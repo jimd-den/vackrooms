@@ -1,0 +1,55 @@
+# wasm_frontend — the browser front end of the voxel engine.
+#
+# Clean Architecture placement:
+#   application/  Use-case layer for the interactive client (player physics,
+#                 chunk streaming policy, frame orchestration). Pure Rust,
+#                 unit-tested natively. Defines the ports (RendererPort,
+#                 ChunkSourcePort) that outer layers implement.
+#   adapters/     Interface adapters: input mapping, SVO atlas assembly, and
+#                 the local chunk source that drives the `vackrooms` core
+#                 use cases (generation -> SVO -> GPU serialization).
+#   drivers/      Frameworks & Drivers: WebGL2 renderer, browser event/rAF
+#                 plumbing, HUD. Only this layer touches web-sys, and it is
+#                 compiled exclusively for wasm32.
+[package]
+name = "wasm_frontend"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# Inner-ring engine core: entities (VoxelGrid, SparseVoxelOctree),
+# use cases (GenerateChunk, BuildOctree, lighting) and the GPU serializer.
+vackrooms = { path = ".." }
+
+# Browser bindings are wasm-only so `cargo test` on the host runs the pure
+# application/adapters layers without pulling in web-sys.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = "0.2"
+js-sys = "0.3"
+console_error_panic_hook = "0.1"
+web-sys = { version = "0.3", features = [
+    "Window",
+    "Location",
+    "Document",
+    "Element",
+    "HtmlElement",
+    "HtmlCanvasElement",
+    "CssStyleDeclaration",
+    "Event",
+    "EventTarget",
+    "KeyboardEvent",
+    "MouseEvent",
+    "Performance",
+    "CanvasRenderingContext2d",
+    "WebGl2RenderingContext",
+    "WebGlProgram",
+    "WebGlShader",
+    "WebGlTexture",
+    "WebGlBuffer",
+    "WebGlVertexArrayObject",
+    "WebGlUniformLocation",
+    "console",
+] }

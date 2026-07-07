@@ -1,0 +1,19 @@
+# Workspace root. Layout:
+#   .              -> `vackrooms` core: Entities + Use Cases + Interface Adapters,
+#                     plus the native dev server binary (Frameworks & Drivers).
+#                     The library is platform-agnostic and also compiles to wasm32.
+#   wasm_frontend  -> Browser front end (wasm-bindgen + WebGL2 driver).
+#   wasm_raycaster -> Legacy CPU raycaster experiment (kept for reference).
+[workspace]
+members = [".", "wasm_frontend", "wasm_raycaster"]
+
+[package]
+name = "vackrooms"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+# default-features disabled so the `os_rng`/getrandom backend is never pulled in;
+# every RNG in the engine is deterministically seeded (StdRng::seed_from_u64),
+# which keeps the core buildable on wasm32-unknown-unknown.
+rand = { version = "0.10.2", default-features = false, features = ["std", "std_rng"] }

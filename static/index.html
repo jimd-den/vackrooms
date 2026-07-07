@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Vackrooms — WASM Voxel Engine</title>
+    <!--
+        Thin presentation shell. All engine logic — procedural generation,
+        SVO construction, lighting, streaming, physics, WebGL2 raymarching —
+        lives in the Rust wasm module loaded at the bottom of this file.
+        The only JavaScript here is the module bootstrap.
+
+        Query flags:  ?spec=high  -> 20u chunks, 5x5 streaming, 0.1u voxels
+                      (default)   -> low-spec profile for weak GPUs
+    -->
+    <style>
+        html, body {
+            margin: 0;
+            padding: 0;
+            width: 100%;
+            height: 100%;
+            overflow: hidden;
+            background: #000;
+            font-family: 'Courier New', monospace;
+            color: #d8cf9f;
+        }
+        /* Render canvas: backing-store resolution is managed by the engine
+           (adaptive scale); CSS stretches it to the full viewport. */
+        #view {
+            position: absolute;
+            inset: 0;
+            width: 100%;
+            height: 100%;
+            image-rendering: pixelated;
+        }
+        #minimap {
+            position: absolute;
+            top: 12px;
+            right: 12px;
+            border: 1px solid #4a4433;
+            opacity: 0.85;
+        }
+        #hud {
+            position: absolute;
+            bottom: 12px;
+            left: 12px;
+            font-size: 13px;
+            line-height: 1.6;
+            background: rgba(0, 0, 0, 0.55);
+            border: 1px solid #4a4433;
+            padding: 8px 12px;
+            pointer-events: none;
+        }
+        #hud b { color: #fff3c4; }
+        #overlay {
+            position: absolute;
+            inset: 0;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            background: rgba(0, 0, 0, 0.78);
+            cursor: pointer;
+            text-align: center;
+            z-index: 10;
+        }
+        #overlay h1 {
+            font-size: 28px;
+            letter-spacing: 6px;
+            color: #fff3c4;
+            text-shadow: 0 0 18px rgba(255, 240, 180, 0.35);
+            margin-bottom: 8px;
+        }
+        #overlay p { font-size: 14px; color: #9a916c; }
+        #play-msg { display: none; font-size: 16px; color: #d8cf9f; }
+    </style>
+</head>
+<body>
+    <canvas id="view"></canvas>
+    <canvas id="minimap" width="200" height="200"></canvas>
+
+    <div id="hud">
+        FPS <b id="hud-fps">—</b><br>
+        Chunks <b id="hud-chunks">0</b><br>
+        SVO nodes <b id="hud-nodes">0</b><br>
+        Res scale <b id="hud-scale">—</b>
+    </div>
+
+    <div id="overlay">
+        <h1>VACKROOMS</h1>
+        <p id="status-msg">Generating world in WebAssembly&hellip;</p>
+        <p id="play-msg">Click to enter &mdash; WASD to move, mouse to look, ESC to release</p>
+    </div>
+
+    <script type="module">
+        import init from './pkg/wasm_frontend.js';
+        init().catch((err) => {
+            document.getElementById('status-msg').textContent =
+                'Failed to start engine: ' + err;
+        });
+    </script>
+</body>
+</html>
