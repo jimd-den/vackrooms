@@ -149,25 +149,15 @@ impl BackroomsLevel {
         wx: f32,
         wz: f32,
     ) -> ColumnPlan {
-        // ---- halls -------------------------------------------------------
-        let (ox_off, ox_half) = Self::hall_offset(noise, seed, 0xC300, wx, wz);
-        let (oz_off, oz_half) = Self::hall_offset(noise, seed, 0xC400, wz, wx);
-        let in_hall = ox_off.abs() < ox_half || oz_off.abs() < oz_half;
-
         // ---- ceiling field (flat and low everywhere like authentic Level 0) ----
         let coarse = Self::n(noise, seed, 0xB200, wx, wz, 0.55);
         let fine = Self::n(noise, seed, 0xB300, wx, wz, 1.6);
         let mut ceiling_units = (2.8 + 0.15 * coarse + 0.05 * fine).clamp(2.7, 3.0);
         
-        // Corridor ceiling drops slightly to a soffit
-        if in_hall {
-            ceiling_units = ceiling_units.min(2.7);
-        }
-        
         // Coffered ceiling grid
         let on_beam = wx.rem_euclid(COFFER_PERIOD) < 0.22
             || wz.rem_euclid(COFFER_PERIOD) < 0.22;
-        if !in_hall && on_beam {
+        if on_beam {
             ceiling_units -= COFFER_DROP;
         }
 
@@ -181,72 +171,65 @@ impl BackroomsLevel {
         let mut sconce = false;
 
         if !in_spawn {
-            if in_hall {
-                // Halls stay completely clear of columns/walls
-                solid = false;
-            } else {
-                let fx = wx.rem_euclid(WALL_PERIOD);
-                let fz = wz.rem_euclid(WALL_PERIOD);
-                let cell_x = (wx / WALL_PERIOD).floor() as i64;
-                let cell_z = (wz / WALL_PERIOD).floor() as i64;
+            let fx = wx.rem_euclid(WALL_PERIOD);
+            let fz = wz.rem_euclid(WALL_PERIOD);
+            let cell_x = (wx / WALL_PERIOD).floor() as i64;
+            let cell_z = (wz / WALL_PERIOD).floor() as i64;
 
-                // (solid, lintel) contribution of one wall family.
-                let wall_here = |f_wall: f32, f_along: f32, is_z_wall: bool| {
-                    if f_wall >= 0.25 {
-                        return (false, false);
-                    }
-                    
-                    // Center of the wall segment in world units
-                    let (wx_mid, wz_mid) = if is_z_wall {
-                        (
-                            cell_x as f32 * WALL_PERIOD,
-                            (cell_z as f32 + 0.5) * WALL_PERIOD,
-                        )
-                    } else {
-                        (
-                            (cell_x as f32 + 0.5) * WALL_PERIOD,
-                            cell_z as f32 * WALL_PERIOD,
-                        )
-                    };
-
-                    // Sample low-frequency noise to cluster walls into long continuous runs
-                    let salt = if is_z_wall { 0xD500 } else { 0xD600 };
-                    let n_val = Self::n(noise, seed, salt, wx_mid, wz_mid, 0.45);
-                    
-                    // Threshold controls overall wall density (tuned by user walls knob)
-                    let threshold = 1.0 - 1.22 * tuning.walls;
-                    if n_val <= threshold {
-                        return (false, false); // Wall dropped: opens up a path
-                    }
-
-                    // For kept walls, place a doorway under a lintel with 45% probability
-                    let door_salt = if is_z_wall { 0xD700 } else { 0xD800 };
-                    let has_door = Self::cell_hash(noise, seed, door_salt, cell_x, cell_z) < 0.45;
-                    if has_door {
-                        let door_pos = (WALL_PERIOD - DOOR_WIDTH) * 0.5;
-                        if f_along >= door_pos && f_along < door_pos + DOOR_WIDTH {
-                            return (false, true); // Doorway: open below, lintel above
-                        }
-                    }
-                    (true, false) // Solid wall
+            // (solid, lintel) contribution of one wall family.
+            let wall_here = |f_wall: f32, f_along: f32, is_z_wall: bool| {
+                if f_wall >= 0.25 {
+                    return (false, false);
+                }
+                
+                // Coordinated maze: A Z-wall is the East wall of cell_x - 1,
+                // while an X-wall is the South wall of cell_z - 1.
+                let (cx, cz) = if is_z_wall {
+                    (cell_x - 1, cell_z)
+                } else {
+                    (cell_x, cell_z - 1)
                 };
 
-                let (sx, lx) = wall_here(fx, fz, true);
-                let (sz, lz) = wall_here(fz, fx, false);
-                solid = sx || sz;
-                if !solid && (lx || lz) {
-                    lintel_from_units = Some(DOOR_HEIGHT);
+                let h = Self::cell_hash(noise, seed, 0xD300, cx, cz);
+
+                let p_south = 0.40 * tuning.walls;
+                let p_east = 0.40 * tuning.walls;
+                let p_both_kept = 0.08 * tuning.walls;
+                
+                let keep = if is_z_wall {
+                    // East wall
+                    (h >= p_south && h < p_south + p_east) || h >= 1.0 - p_both_kept
+                } else {
+                    // South wall
+                    h < p_south || h >= 1.0 - p_both_kept
+                };
+
+                if !keep {
+                    return (false, false);
                 }
+
+                // Doorways: kept walls have a 40% chance of a doorway
+                let door_salt = if is_z_wall { 0xD700 } else { 0xD800 };
+                let door_hash = Self::cell_hash(noise, seed, door_salt, cx, cz);
+                if door_hash < 0.40 {
+                    let door_pos = (WALL_PERIOD - DOOR_WIDTH) * 0.5;
+                    if f_along >= door_pos && f_along < door_pos + DOOR_WIDTH {
+                        return (false, true); // Doorway: open below, lintel above
+                    }
+                }
+                (true, false) // Solid wall
+            };
+
+            let (sx, lx) = wall_here(fx, fz, true);
+            let (sz, lz) = wall_here(fz, fx, false);
+            solid = sx || sz;
+            if !solid && (lx || lz) {
+                lintel_from_units = Some(DOOR_HEIGHT);
             }
         }
 
         // ---- lights ------------------------------------------------------
-        let light = if in_hall && !solid {
-            // Light strips chase the hall centerline.
-            let along = if ox_off.abs() < ox_half { wz } else { wx };
-            let off = if ox_off.abs() < ox_half { ox_off } else { oz_off };
-            off.abs() < 0.25 && along.rem_euclid(2.0) < 0.6
-        } else if !solid {
+        let light = if !solid {
             // Room panels centered in the coffer bays.
             let lx = (wx - LIGHT_PERIOD * 0.5).rem_euclid(LIGHT_PERIOD);
             let lz = (wz - LIGHT_PERIOD * 0.5).rem_euclid(LIGHT_PERIOD);
@@ -586,4 +569,32 @@ mod tests {
         }
         assert!(lit, "no light panel above spawn");
     }
+
+    #[test]
+    fn test_print_ascii_map() {
+        let noise = SimpleNoiseProvider::new();
+        let tuning = LevelTuning::default();
+        let mut map = String::new();
+        // Sample a 60x60 world area with 0.5 step (120x120 ASCII cells)
+        for sz in -60..60 {
+            for sx in -60..60 {
+                let wx = sx as f32 * 0.5;
+                let wz = sz as f32 * 0.5;
+                let plan = BackroomsLevel::column_plan(&noise, 42, &tuning, wx, wz);
+                if plan.solid {
+                    map.push('#');
+                } else if plan.light {
+                    map.push('*');
+                } else if plan.lintel_from_units.is_some() {
+                    map.push('d');
+                } else {
+                    map.push(' ');
+                }
+            }
+            map.push('\n');
+        }
+        std::fs::write("./ascii_map.txt", map).unwrap();
+    }
 }
+
+
