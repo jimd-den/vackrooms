@@ -10,8 +10,10 @@
         lives in the Rust wasm module loaded at the bottom of this file.
         The only JavaScript here is the module bootstrap.
 
-        Query flags:  ?spec=high  -> 20u chunks, 5x5 streaming, 0.1u voxels
-                      (default)   -> low-spec profile for weak GPUs
+        Query flags:  ?spec=high     -> 20u chunks, 5x5 streaming, 0.1u voxels
+                      ?renderer=cpu  -> CPU microvoxel splatting (no GPU/WebGL;
+                                        also the automatic WebGL2 fallback)
+                      (default)      -> low-spec profile, GPU raymarcher
     -->
     <style>
         html, body {
@@ -80,6 +82,7 @@
     <canvas id="minimap" width="200" height="200"></canvas>
 
     <div id="hud">
+        Renderer <b id="hud-renderer">—</b><br>
         FPS <b id="hud-fps">—</b><br>
         Chunks <b id="hud-chunks">0</b><br>
         SVO nodes <b id="hud-nodes">0</b><br>

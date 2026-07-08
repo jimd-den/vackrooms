@@ -3,5 +3,6 @@
 
 pub mod shaders;
 pub mod webgl;
+pub mod cpu_canvas;
 pub mod browser;
 pub mod console_telemetry;

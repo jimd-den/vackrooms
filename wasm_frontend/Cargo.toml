@@ -44,6 +44,7 @@ web-sys = { version = "0.3", features = [
     "MouseEvent",
     "Performance",
     "CanvasRenderingContext2d",
+    "ImageData",
     "WebGl2RenderingContext",
     "WebGlProgram",
     "WebGlShader",

@@ -23,6 +23,7 @@ use crate::adapters::local_chunk_source::LocalChunkSource;
 use crate::application::engine::{Engine, EngineConfig};
 use crate::application::ports::{ChunkDraw, FrameParams, RendererPort};
 use crate::drivers::console_telemetry::CONSOLE_TELEMETRY;
+use crate::drivers::cpu_canvas::CpuCanvasRenderer;
 use crate::drivers::webgl::WebGl2Renderer;
 
 /// World seed shared with the native server so both render the same world.
@@ -32,10 +33,60 @@ const HUD_INTERVAL: u32 = 30;
 /// Minimap pixels per world unit.
 const MINIMAP_SCALE: f64 = 12.0;
 
+/// The two available renderer back ends. GPU raymarching is the default;
+/// the CPU microvoxel splatter is selected by `?renderer=cpu` or used as an
+/// automatic fallback when WebGL2 is unavailable.
+enum DriverRenderer {
+    Gpu(WebGl2Renderer),
+    Cpu(CpuCanvasRenderer),
+}
+
+impl DriverRenderer {
+    fn resize(&mut self, width: u32, height: u32) {
+        match self {
+            DriverRenderer::Gpu(r) => r.resize(width, height),
+            DriverRenderer::Cpu(r) => r.resize(width, height),
+        }
+    }
+
+    /// Base internal-resolution multiplier (further scaled by the adaptive
+    /// governor). Splatting every pixel on the CPU is far more expensive
+    /// than rasterizing a quad, so the CPU path renders much smaller and
+    /// lets CSS upscale with `image-rendering: pixelated`.
+    fn resolution_factor(&self) -> f64 {
+        match self {
+            DriverRenderer::Gpu(_) => 1.0,
+            DriverRenderer::Cpu(_) => 0.25,
+        }
+    }
+
+    fn label(&self) -> &'static str {
+        match self {
+            DriverRenderer::Gpu(_) => "GPU raymarch",
+            DriverRenderer::Cpu(_) => "CPU splat",
+        }
+    }
+}
+
+impl RendererPort for DriverRenderer {
+    fn upload_atlas(&mut self, texels: &[u32]) {
+        match self {
+            DriverRenderer::Gpu(r) => r.upload_atlas(texels),
+            DriverRenderer::Cpu(r) => r.upload_atlas(texels),
+        }
+    }
+    fn draw(&mut self, frame: &FrameParams, chunks: &[ChunkDraw]) {
+        match self {
+            DriverRenderer::Gpu(r) => r.draw(frame, chunks),
+            DriverRenderer::Cpu(r) => r.draw(frame, chunks),
+        }
+    }
+}
+
 /// Engine owns its renderer behind the port; the driver also needs to call
 /// `resize` on the concrete type. This thin adapter shares one renderer
 /// between both without widening the port.
-struct SharedRenderer(Rc<RefCell<WebGl2Renderer>>);
+struct SharedRenderer(Rc<RefCell<DriverRenderer>>);
 
 impl RendererPort for SharedRenderer {
     fn upload_atlas(&mut self, texels: &[u32]) {
@@ -43,6 +94,24 @@ impl RendererPort for SharedRenderer {
     }
     fn draw(&mut self, frame: &FrameParams, chunks: &[ChunkDraw]) {
         self.0.borrow_mut().draw(frame, chunks);
+    }
+}
+
+/// Renderer selection: explicit `?renderer=cpu`, otherwise WebGL2 with a
+/// logged fallback to the CPU splatter if context creation fails.
+fn create_renderer(canvas: &HtmlCanvasElement, query: &str) -> Result<DriverRenderer, JsValue> {
+    if query.contains("renderer=cpu") {
+        return Ok(DriverRenderer::Cpu(CpuCanvasRenderer::new(canvas)?));
+    }
+    match WebGl2Renderer::new(canvas) {
+        Ok(gpu) => Ok(DriverRenderer::Gpu(gpu)),
+        Err(err) => {
+            web_sys::console::warn_2(
+                &JsValue::from_str("WebGL2 unavailable, falling back to CPU splatting:"),
+                &err,
+            );
+            Ok(DriverRenderer::Cpu(CpuCanvasRenderer::new(canvas)?))
+        }
     }
 }
 
@@ -58,11 +127,8 @@ pub fn boot() -> Result<(), JsValue> {
 
     // ?spec=high -> 20u chunks, 5x5 streaming radius, 0.1u voxels.
     // Default is the low-spec profile: 10u chunks, 3x3 radius, 0.2u voxels.
-    let high_spec = window
-        .location()
-        .search()
-        .unwrap_or_default()
-        .contains("spec=high");
+    let query = window.location().search().unwrap_or_default();
+    let high_spec = query.contains("spec=high");
     let (generator_config, engine_config) = if high_spec {
         (
             GeneratorConfig::high_spec(),
@@ -72,7 +138,10 @@ pub fn boot() -> Result<(), JsValue> {
         (GeneratorConfig::low_spec(), EngineConfig::default())
     };
 
-    let renderer = Rc::new(RefCell::new(WebGl2Renderer::new(&canvas)?));
+    let renderer = Rc::new(RefCell::new(create_renderer(&canvas, &query)?));
+    if let Ok(hud_renderer) = element::<HtmlElement>(&document, "hud-renderer") {
+        hud_renderer.set_text_content(Some(renderer.borrow().label()));
+    }
     let source = LocalChunkSource::with_telemetry(
         SimpleNoiseProvider::new(),
         WORLD_SEED,
@@ -169,7 +238,7 @@ fn run_frame_loop(
     _overlay: HtmlElement,
     status_msg: HtmlElement,
     play_msg: HtmlElement,
-    renderer: Rc<RefCell<WebGl2Renderer>>,
+    renderer: Rc<RefCell<DriverRenderer>>,
     engine: Rc<RefCell<Engine>>,
     input: Rc<RefCell<InputCollector>>,
 ) -> Result<(), JsValue> {
@@ -201,9 +270,11 @@ fn run_frame_loop(
         };
         last_time.set(time_ms);
 
-        // Adaptive resolution: size the backing store to window * scale.
+        // Adaptive resolution: size the backing store to
+        // window * governor scale * renderer base factor.
         {
-            let scale = engine.borrow().stats().resolution_scale as f64;
+            let scale = engine.borrow().stats().resolution_scale as f64
+                * renderer.borrow().resolution_factor();
             let target_w = (loop_window.inner_width().ok().and_then(|v| v.as_f64()).unwrap_or(800.0)
                 * scale)
                 .max(1.0) as u32;
