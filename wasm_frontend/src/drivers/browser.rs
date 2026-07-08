@@ -20,6 +20,7 @@ use vackrooms::use_cases::generate_chunk::GeneratorConfig;
 
 use crate::adapters::input::InputCollector;
 use crate::adapters::local_chunk_source::LocalChunkSource;
+use crate::adapters::query_config::parse_generation_params;
 use crate::application::engine::{Engine, EngineConfig};
 use crate::application::ports::{ChunkDraw, FrameParams, RendererPort};
 use crate::drivers::console_telemetry::CONSOLE_TELEMETRY;
@@ -127,15 +128,26 @@ pub fn boot() -> Result<(), JsValue> {
 
     // ?spec=high -> 20u chunks, 5x5 streaming radius, 0.1u voxels.
     // Default is the low-spec profile: 10u chunks, 3x3 radius, 0.2u voxels.
+    // Generation controls: ?seed=… (number or any text) plus the density
+    // knobs ?pillars= ?walls= ?atria= ?lights= (multipliers, default 1).
     let query = window.location().search().unwrap_or_default();
+    let gen_params = parse_generation_params(&query, WORLD_SEED);
     let high_spec = query.contains("spec=high");
     let (generator_config, engine_config) = if high_spec {
         (
-            GeneratorConfig::high_spec(),
-            EngineConfig { chunk_size: 20.0, chunk_radius: 2, ..EngineConfig::default() },
+            GeneratorConfig::high_spec().with_tuning(gen_params.tuning),
+            EngineConfig {
+                chunk_size: 20.0,
+                chunk_radius: 2,
+                seed: gen_params.seed,
+                ..EngineConfig::default()
+            },
         )
     } else {
-        (GeneratorConfig::low_spec(), EngineConfig::default())
+        (
+            GeneratorConfig::low_spec().with_tuning(gen_params.tuning),
+            EngineConfig { seed: gen_params.seed, ..EngineConfig::default() },
+        )
     };
 
     let renderer = Rc::new(RefCell::new(create_renderer(&canvas, &query)?));
@@ -144,7 +156,7 @@ pub fn boot() -> Result<(), JsValue> {
     }
     let source = LocalChunkSource::with_telemetry(
         SimpleNoiseProvider::new(),
-        WORLD_SEED,
+        gen_params.seed,
         generator_config,
         &CONSOLE_TELEMETRY,
     );

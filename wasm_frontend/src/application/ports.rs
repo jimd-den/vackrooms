@@ -54,5 +54,7 @@ pub struct ChunkPayload {
 /// this with in-wasm procedural generation (`adapters::local_chunk_source`);
 /// a networked build could implement it with HTTP fetches instead.
 pub trait ChunkSourcePort {
-    fn load(&self, origin_x: f32, origin_z: f32) -> ChunkPayload;
+    /// Loads the chunk at `origin` for the given Backrooms level
+    /// (0 = backrooms, 34 = grassland; see the core's `level_generator`).
+    fn load(&self, origin_x: f32, origin_z: f32, level: u32) -> ChunkPayload;
 }

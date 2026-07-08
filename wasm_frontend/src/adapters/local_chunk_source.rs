@@ -19,11 +19,13 @@ use vackrooms::use_cases::ports::{NoiseProvider, TelemetryPort, NULL_TELEMETRY};
 use crate::application::collision::Aabb;
 use crate::application::ports::{ChunkPayload, ChunkSourcePort};
 
-/// Voxel types that block the player. FLOOR/CEILING/LIGHT are visual-only:
-/// including them would make the player collide with the floor they stand on.
-const SOLID_TYPES: [u8; 2] = [
+/// Voxel types that block the player. FLOOR/CEILING/LIGHT/GRASS/WATER are
+/// visual-only: including them would make the player collide with the floor
+/// they stand on.
+const SOLID_TYPES: [u8; 3] = [
     vackrooms::domain::entities::voxel_grid::VOXEL_WALL,
     vackrooms::domain::entities::voxel_grid::VOXEL_RED_WALL,
+    vackrooms::domain::entities::voxel_grid::VOXEL_TREE,
 ];
 
 pub struct LocalChunkSource<N: NoiseProvider> {
@@ -49,10 +51,14 @@ impl<N: NoiseProvider> LocalChunkSource<N> {
 }
 
 impl<N: NoiseProvider> ChunkSourcePort for LocalChunkSource<N> {
-    fn load(&self, origin_x: f32, origin_z: f32) -> ChunkPayload {
+    fn load(&self, origin_x: f32, origin_z: f32, level: u32) -> ChunkPayload {
         let generator =
             GenerateChunkArchitectureUseCase::with_telemetry(&self.noise, self.telemetry);
-        let grid = generator.execute(Position::new(origin_x, origin_z), self.seed, self.config);
+        let grid = generator.execute(
+            Position::new(origin_x, origin_z),
+            self.seed,
+            self.config.with_level(level),
+        );
 
         let svo = BuildOctreeUseCase::new().execute(
             &grid,
@@ -162,7 +168,7 @@ mod tests {
             42,
             GeneratorConfig::low_spec(),
         );
-        let payload = source.load(10.0, 10.0);
+        let payload = source.load(10.0, 10.0, 0);
         // Row padding: node stream is a whole number of 1024-texel rows.
         assert_eq!(payload.nodes.len() % (1024 * 4), 0);
         assert!(payload.world_size > 0.0);

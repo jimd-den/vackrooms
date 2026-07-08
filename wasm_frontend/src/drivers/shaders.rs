@@ -122,12 +122,13 @@ bool raymarchSVO(
                 float b = float(node.color & 0xFFu) / 255.0;
                 float light = float(node.lightLevel) / 15.0;
 
-                hitColor = vec4(vec3(r, g, b) * (0.25 + 0.75 * light), 1.0);
+                hitColor = vec4(r, g, b, light);
                 isLight = (node.voxelType == 4u);
 
+                vec3 hit_p = ro + t * rd;
                 vec3 center = (current_min + current_max) * 0.5;
                 vec3 size = (current_max - current_min) * 0.5;
-                vec3 local_p = (p - center) / size;
+                vec3 local_p = (hit_p - center) / size;
                 vec3 abs_p = abs(local_p);
 
                 if (abs_p.x > abs_p.y && abs_p.x > abs_p.z) {
@@ -148,12 +149,21 @@ bool raymarchSVO(
                 ) - ro) / rd;
 
                 float t_exit_box = min(t_max_planes.x, min(t_max_planes.y, t_max_planes.z));
-                t = t_exit_box + 0.0001;
+                t = t_exit_box;
                 p = ro + t * rd;
+                // Snap every tied axis past its exit plane: leaving an axis
+                // exactly ON its plane stalls the march (t stops advancing).
+                if (abs(t_exit_box - t_max_planes.x) < 0.0001) p.x = (rd.x > 0.0 ? current_max.x : current_min.x) + (rd.x > 0.0 ? 0.001 : -0.001);
+                if (abs(t_exit_box - t_max_planes.y) < 0.0001) p.y = (rd.y > 0.0 ? current_max.y : current_min.y) + (rd.y > 0.0 ? 0.001 : -0.001);
+                if (abs(t_exit_box - t_max_planes.z) < 0.0001) p.z = (rd.z > 0.0 ? current_max.z : current_min.z) + (rd.z > 0.0 ? 0.001 : -0.001);
 
-                if (p.x < current_min.x || p.x > current_max.x ||
-                    p.y < current_min.y || p.y > current_max.y ||
-                    p.z < current_min.z || p.z > current_max.z) {
+                // Pop EVERY level the ray exited: a skip through a plane
+                // shared by several ancestor boxes leaves p outside more
+                // than one of them, and descending from a box that no
+                // longer contains p corrupts the traversal (wall cracks).
+                while (p.x < current_min.x || p.x > current_max.x ||
+                       p.y < current_min.y || p.y > current_max.y ||
+                       p.z < current_min.z || p.z > current_max.z) {
 
                     if (stack_ptr == 0) return false;
                     stack_ptr--;
@@ -194,19 +204,23 @@ bool raymarchSVO(
                     oy == 1 ? center.y : current_min.y,
                     oz == 1 ? center.z : current_min.z
                 );
-                vec3 t_max_planes = (vec3(
+                 vec3 t_max_planes = (vec3(
                     rd.x > 0.0 ? oct_max.x : oct_min.x,
                     rd.y > 0.0 ? oct_max.y : oct_min.y,
                     rd.z > 0.0 ? oct_max.z : oct_min.z
                 ) - ro) / rd;
 
                 float t_exit_oct = min(t_max_planes.x, min(t_max_planes.y, t_max_planes.z));
-                t = t_exit_oct + 0.0001;
+                t = t_exit_oct;
                 p = ro + t * rd;
+                if (abs(t_exit_oct - t_max_planes.x) < 0.0001) p.x = (rd.x > 0.0 ? oct_max.x : oct_min.x) + (rd.x > 0.0 ? 0.001 : -0.001);
+                if (abs(t_exit_oct - t_max_planes.y) < 0.0001) p.y = (rd.y > 0.0 ? oct_max.y : oct_min.y) + (rd.y > 0.0 ? 0.001 : -0.001);
+                if (abs(t_exit_oct - t_max_planes.z) < 0.0001) p.z = (rd.z > 0.0 ? oct_max.z : oct_min.z) + (rd.z > 0.0 ? 0.001 : -0.001);
 
-                if (p.x < current_min.x || p.x > current_max.x ||
-                    p.y < current_min.y || p.y > current_max.y ||
-                    p.z < current_min.z || p.z > current_max.z) {
+                // Same multi-level pop as the empty-leaf skip above.
+                while (p.x < current_min.x || p.x > current_max.x ||
+                       p.y < current_min.y || p.y > current_max.y ||
+                       p.z < current_min.z || p.z > current_max.z) {
 
                     if (stack_ptr == 0) return false;
                     stack_ptr--;
@@ -247,9 +261,9 @@ void main() {
     int numHits = 0;
 
     vec3 safe_rd = vec3(
-        abs(rd.x) < 1e-6 ? sign(rd.x) * 1e-6 : rd.x,
-        abs(rd.y) < 1e-6 ? sign(rd.y) * 1e-6 : rd.y,
-        abs(rd.z) < 1e-6 ? sign(rd.z) * 1e-6 : rd.z
+        abs(rd.x) < 1e-4 ? sign(rd.x) * 1e-4 : rd.x,
+        abs(rd.y) < 1e-4 ? sign(rd.y) * 1e-4 : rd.y,
+        abs(rd.z) < 1e-4 ? sign(rd.z) * 1e-4 : rd.z
     );
     vec3 invRd = 1.0 / safe_rd;
 
@@ -282,9 +296,11 @@ void main() {
     }
 
     vec4 finalColor = vec4(0.0);
+    vec3 finalNormal = vec3(0.0);
     bool hitSolid = false;
     bool hitIsLight = false;
     float closest_t = 1e6;
+    int hit_chunk_idx = -1;
 
     for (int k = 0; k < numHits; k++) {
         int i = hits[k].idx;
@@ -294,20 +310,77 @@ void main() {
         vec3 norm;
         bool isL;
         float h_t;
-        if (raymarchSVO(local_ro, rd, uChunkRootIndices[i], hits[k].t_min, hits[k].t_max,
+        // Literate Documentation:
+        // Pass safe_rd instead of the raw direction vector rd to prevent division-by-zero and
+        // resulting NaN states in SVO traversal when the view direction aligns with any coordinate axis.
+        if (raymarchSVO(local_ro, safe_rd, uChunkRootIndices[i], hits[k].t_min, hits[k].t_max,
                         uChunkWorldSizes[i], col, norm, isL, h_t)) {
             finalColor = col;
+            finalNormal = norm;
             hitSolid = true;
             hitIsLight = isL;
             closest_t = h_t;
+            hit_chunk_idx = i;
             break;
         }
     }
 
     if (hitSolid) {
-        vec3 baseColor = hitIsLight ? vec3(1.0) : finalColor.rgb;
-        float fogFactor = exp(-0.015 * closest_t);
-        fragColor = vec4(mix(vec3(0.0), baseColor, fogFactor), 1.0);
+        vec3 albedo = hitIsLight ? vec3(1.0) : finalColor.rgb;
+        float staticLight = finalColor.a;
+        
+        vec3 N = finalNormal;
+        vec3 V = -rd; // View direction pointing back to camera
+        
+        // Emissive light source: render as constant white
+        if (hitIsLight) {
+            fragColor = vec4(vec3(1.5), 1.0);
+            return;
+        }
+        
+        // 1. Natural Ambient & Better Shadows
+        float voxel_scale = uChunkWorldSizes[hit_chunk_idx] > 20.0 ? 0.1 : 0.2;
+        vec3 local_hit_p = (ro - uChunkOrigins[hit_chunk_idx]) + closest_t * rd;
+        
+        float distToFloor = local_hit_p.y - voxel_scale;
+        float distToCeiling = (3.0 - voxel_scale) - local_hit_p.y;
+        
+        // Soft contact shadow AO in corners where walls meet floor/ceiling
+        float edgeAO = 1.0;
+        if (abs(N.y) < 0.5) { // Only apply to vertical walls
+            edgeAO = smoothstep(0.0, 0.4, distToFloor) * smoothstep(0.0, 0.4, distToCeiling);
+            edgeAO = mix(0.55, 1.0, edgeAO);
+        }
+        
+        // Brighter and warmer ambient colors for a natural Backrooms look
+        vec3 groundColor = vec3(0.24, 0.21, 0.16);
+        vec3 skyColor = vec3(0.52, 0.48, 0.40);
+        vec3 ambient = mix(groundColor, skyColor, N.y * 0.5 + 0.5) * (0.45 + 0.55 * staticLight) * edgeAO;
+        
+        // 2. Static Room/Ceiling Lights
+        vec3 staticL = vec3(0.0, 1.0, 0.0); // Directional light from ceiling pointing down
+        float staticDiffuse = max(dot(N, staticL), 0.0) * staticLight * 0.8;
+        vec3 staticDiffuseContrib = staticDiffuse * albedo * vec3(1.0, 0.98, 0.90);
+        
+        // Specular reflections - active on walls and ceiling, but disabled on carpet floor
+        float specularMask = 1.0 - smoothstep(0.3, 0.7, N.y);
+        vec3 staticH = normalize(staticL + V);
+        float staticSpecular = pow(max(dot(N, staticH), 0.0), 24.0) * staticLight * 0.18 * specularMask;
+        vec3 staticSpecularContrib = staticSpecular * vec3(1.0, 0.98, 0.90);
+        
+        vec3 staticContrib = (staticDiffuseContrib + staticSpecularContrib) * edgeAO;
+        
+        // Total Lighting (No Flashlight)
+        vec3 litColor = albedo * ambient + staticContrib;
+        
+        // 3. Fog and Vignette
+        float dist = closest_t;
+        float fogFactor = exp(-0.02 * dist);
+        
+        float vignette = vUv.x * vUv.y * (1.0 - vUv.x) * (1.0 - vUv.y);
+        vignette = clamp(pow(16.0 * vignette, 0.25), 0.0, 1.0);
+        
+        fragColor = vec4(mix(vec3(0.0), litColor, fogFactor * vignette), 1.0);
     } else {
         fragColor = vec4(0.0, 0.0, 0.0, 1.0);
     }

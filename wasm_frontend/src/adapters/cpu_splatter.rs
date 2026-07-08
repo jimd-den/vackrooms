@@ -170,6 +170,17 @@ impl SoftwareRasterizer {
     }
 
     /// Shades and splats one solid box (leaf, virtual sub-leaf, or MIP node).
+    ///
+    /// Literate Documentation:
+    /// This function applies directional shading, contact ambient occlusion,
+    /// player torchlight falloff, and distance fog.
+    /// To resolve the visual checkerboard popping artifacts and moving bands
+    /// on floor/ceiling surfaces, we use a continuous face shading interpolation.
+    /// Instead of checking which coordinate axis is strictly dominant and applying
+    /// a hard step in face brightness (e.g. 0.55 vs 0.7 vs 0.8), we compute a
+    /// weighted combination of the cardinal face values based on the normalized
+    /// viewing vector squared. This ensures the shading coefficient varies
+    /// smoothly with camera position, eliminating sharp seams and popping.
     #[allow(clippy::too_many_arguments)]
     fn shade_and_splat(
         &mut self,
@@ -185,21 +196,28 @@ impl SoftwareRasterizer {
         crowded_siblings: u32,
     ) {
         // Per-face directional shading from the face we actually see:
-        // the dominant axis of the view vector picks the visible face.
+        // We project the view vector onto the three axes. Instead of taking
+        // the max (discontinuous step), we blend the face shading factors
+        // continuously using the normalized squared vector components as weights.
         let to_cam = [
             center[0] - cam.pos[0],
             center[1] - cam.pos[1],
             center[2] - cam.pos[2],
         ];
-        let ax = to_cam[0].abs();
-        let ay = to_cam[1].abs();
-        let az = to_cam[2].abs();
-        let face = if ay >= ax && ay >= az {
-            if to_cam[1] > 0.0 { 0.55 } else { 1.0 } // bottom face vs top face
-        } else if ax >= az {
-            0.8
+        
+        let dx_sq = to_cam[0] * to_cam[0];
+        let dy_sq = to_cam[1] * to_cam[1];
+        let dz_sq = to_cam[2] * to_cam[2];
+        let sum = dx_sq + dy_sq + dz_sq;
+
+        let face = if sum > 1e-6 {
+            // Y-face: bottom face (0.55) if looking up, top face (1.0) if looking down.
+            let y_val = if to_cam[1] > 0.0 { 0.55 } else { 1.0 };
+            let x_val = 0.8;
+            let dz_val = 0.7;
+            (dx_sq * x_val + dy_sq * y_val + dz_sq * dz_val) / sum
         } else {
-            0.7
+            1.0
         };
 
         // Contact AO: leaves packed tightly among solid siblings darken,
@@ -223,6 +241,7 @@ impl SoftwareRasterizer {
 
         self.splat(px, py, half_px, dist, r, g, b);
     }
+
 
     /// Recursive front-to-back node renderer.
     ///
@@ -311,12 +330,16 @@ impl SoftwareRasterizer {
                     Some((voxel_type, color, light)),
                 );
             } else {
+                // Inflate the splat size slightly (scale by 1.15, clamp to min 0.85 pixels)
+                // to create a tiny overlap between adjacent splats under perspective projection.
+                // This closes sub-pixel/pixel gaps (black lines) that occur where squares fail
+                // to tile perfectly due to depth differences and pixel-grid rounding.
                 self.shade_and_splat(
                     cam,
                     center,
                     px,
                     py,
-                    proj_half.max(0.6),
+                    (proj_half * 1.15).max(0.85),
                     z,
                     color,
                     light,
@@ -405,59 +428,74 @@ impl SoftwareRasterizer {
     }
 }
 
-/// Bottom-up MIP filtering over the whole atlas. Children always live at
-/// higher indices than their parent (the SVO arena is append-only), so one
-/// reverse pass aggregates every subtree in O(n).
+/// Bottom-up MIP filtering over the whole atlas. Node order in the arena is
+/// not guaranteed (`SparseVoxelOctree::set` appends children after parents,
+/// `BuildOctreeUseCase` pushes the root last), so each subtree is resolved by
+/// memoized recursion instead of a single directional sweep. Still O(n): every
+/// node is computed exactly once.
 fn build_mips(atlas: &[u32]) -> Vec<MipNode> {
     let node_count = atlas.len() / 4;
     let mut mips = vec![MipNode::default(); node_count];
-
-    for i in (0..node_count).rev() {
-        let t = i * 4;
-        if atlas[t] == 1 {
-            // Leaf.
-            let voxel_type = atlas[t + 1];
-            if voxel_type != VOXEL_AIR {
-                let c = atlas[t + 2];
-                mips[i] = MipNode {
-                    color: [
-                        ((c >> 16) & 0xFF) as f32,
-                        ((c >> 8) & 0xFF) as f32,
-                        (c & 0xFF) as f32,
-                    ],
-                    light: atlas[t + 3] as f32,
-                    occupancy: 1.0,
-                };
-            }
-        } else {
-            let child_base = atlas[t + 1] as usize;
-            let child_mask = atlas[t + 2];
-            let mut acc = MipNode::default();
-            for child in 0..8usize {
-                if child_mask & (1 << child) == 0 {
-                    continue;
-                }
-                let m = match mips.get(child_base + child) {
-                    Some(m) => *m,
-                    None => continue,
-                };
-                let w = m.occupancy / 8.0;
-                acc.color[0] += m.color[0] * w;
-                acc.color[1] += m.color[1] * w;
-                acc.color[2] += m.color[2] * w;
-                acc.light = acc.light.max(m.light);
-                acc.occupancy += w;
-            }
-            if acc.occupancy > 0.0 {
-                let inv = 1.0 / acc.occupancy;
-                acc.color[0] *= inv;
-                acc.color[1] *= inv;
-                acc.color[2] *= inv;
-            }
-            mips[i] = acc;
-        }
+    let mut done = vec![false; node_count];
+    for i in 0..node_count {
+        compute_mip(atlas, i, &mut mips, &mut done);
     }
     mips
+}
+
+fn compute_mip(atlas: &[u32], i: usize, mips: &mut [MipNode], done: &mut [bool]) {
+    if done[i] {
+        return;
+    }
+    // Marked before descending: a malformed cycle degrades to a zero mip
+    // instead of infinite recursion.
+    done[i] = true;
+
+    let t = i * 4;
+    if atlas[t] == 1 {
+        // Leaf.
+        let voxel_type = atlas[t + 1];
+        if voxel_type != VOXEL_AIR {
+            let c = atlas[t + 2];
+            mips[i] = MipNode {
+                color: [
+                    ((c >> 16) & 0xFF) as f32,
+                    ((c >> 8) & 0xFF) as f32,
+                    (c & 0xFF) as f32,
+                ],
+                light: atlas[t + 3] as f32,
+                occupancy: 1.0,
+            };
+        }
+    } else {
+        let child_base = atlas[t + 1] as usize;
+        let child_mask = atlas[t + 2];
+        let mut acc = MipNode::default();
+        for child in 0..8usize {
+            if child_mask & (1 << child) == 0 {
+                continue;
+            }
+            let idx = child_base + child;
+            if idx >= mips.len() {
+                continue;
+            }
+            compute_mip(atlas, idx, mips, done);
+            let m = mips[idx];
+            let w = m.occupancy / 8.0;
+            acc.color[0] += m.color[0] * w;
+            acc.color[1] += m.color[1] * w;
+            acc.color[2] += m.color[2] * w;
+            acc.light = acc.light.max(m.light);
+            acc.occupancy += w;
+        }
+        if acc.occupancy > 0.0 {
+            let inv = 1.0 / acc.occupancy;
+            acc.color[0] *= inv;
+            acc.color[1] *= inv;
+            acc.color[2] *= inv;
+        }
+        mips[i] = acc;
+    }
 }
 
 impl RendererPort for SoftwareRasterizer {
@@ -580,6 +618,28 @@ mod tests {
     }
 
     #[test]
+    fn mip_aggregation_works_for_root_last_node_order() {
+        // BuildOctreeUseCase (the production chunk pipeline) pushes children
+        // BEFORE their parent, so the root is the LAST node — the opposite
+        // order of SparseVoxelOctree::set. build_mips must handle both.
+        use vackrooms::domain::entities::voxel_grid::{VoxelGrid, VOXEL_WALL};
+        use vackrooms::domain::use_cases::build_octree::BuildOctreeUseCase;
+
+        let mut grid = VoxelGrid::new(4, 4, 4);
+        grid.set(0, 0, 0, VOXEL_WALL);
+        grid.set(3, 3, 3, VOXEL_WALL);
+        let svo = BuildOctreeUseCase::new().execute(&grid, 2, 4.0);
+        let gpu = OctreeGpuSerializer::serialize_to_gpu_data(&svo);
+        let mips = build_mips(&gpu.texel_data);
+
+        let root = &mips[svo.root];
+        assert!(
+            root.occupancy > 0.0,
+            "root mip must see its solid descendants, got occupancy 0"
+        );
+    }
+
+    #[test]
     fn mip_aggregation_averages_child_colors() {
         let mut svo = SparseVoxelOctree::new(1, 2.0);
         // Two solid children: pure red + pure blue -> average purple-ish.
@@ -608,4 +668,134 @@ mod tests {
         let lit = r.framebuffer().chunks_exact(4).filter(|p| p[0] > 0).count();
         assert_eq!(lit, 0);
     }
+
+    #[test]
+    fn test_face_shading_discontinuity() {
+        let mut r = SoftwareRasterizer::new(16, 16);
+        let center = [0.0, 0.0, 0.0];
+
+        // Case A: Camera Y is 1.01 (above the center, Y-dominant)
+        let frame_a = FrameParams { camera_pos: [-1.0, 1.01, -0.1], yaw: 0.0, pitch: 0.0 };
+        let cam_a = Camera::new(&frame_a, 16, 16);
+
+        // Case B: Camera Y is 0.99 (below Case A, X-dominant)
+        let frame_b = FrameParams { camera_pos: [-1.0, 0.99, -0.1], yaw: 0.0, pitch: 0.0 };
+        let cam_b = Camera::new(&frame_b, 16, 16);
+
+        // Clear rasterizer
+        r.clear();
+        // Call shade_and_splat for Case A
+        r.shade_and_splat(
+            &cam_a,
+            center,
+            8.0, 8.0, 1.0,
+            1.0, // dist
+            [100.0, 100.0, 100.0], // base color
+            15.0, // light level
+            false, // is_emissive
+            1, // crowded siblings
+        );
+        let color_a = center_pixel(&r);
+
+        // Clear rasterizer
+        r.clear();
+        // Call shade_and_splat for Case B
+        r.shade_and_splat(
+            &cam_b,
+            center,
+            8.0, 8.0, 1.0,
+            1.0, // dist
+            [100.0, 100.0, 100.0], // base color
+            15.0, // light level
+            false, // is_emissive
+            1, // crowded siblings
+        );
+        let color_b = center_pixel(&r);
+
+        // Check difference. Under the old code, Case A gives face = 1.0, Case B gives face = 0.8.
+        // This is a 20% difference, leading to a difference in color (e.g. 20 out of 255).
+        // Assert that the difference is very small (e.g., <= 2) to prove continuity/smoothness.
+        let diff = (color_a[0] as i32 - color_b[0] as i32).abs();
+        assert!(diff <= 2, "Discontinuity found: diff was {} (color_a = {:?}, color_b = {:?})", diff, color_a, color_b);
+    }
+
+    #[test]
+    fn test_adjacent_voxels_shading_variation() {
+        let mut r = SoftwareRasterizer::new(16, 16);
+        
+        // Camera positioned above the floor plane (Y = 5.0)
+        let frame = FrameParams { camera_pos: [1.0, 5.0, 1.0], yaw: 0.0, pitch: 0.0 };
+        let cam = Camera::new(&frame, 16, 16);
+
+        // Voxel 1 center: [0.5, 0.0, 0.5]
+        // dist = sqrt(0.5^2 + 5.0^2 + 0.5^2) = sqrt(25.5) = 5.0497
+        r.clear();
+        r.shade_and_splat(
+            &cam,
+            [0.5, 0.0, 0.5],
+            8.0, 8.0, 1.0,
+            5.0497,
+            [100.0, 100.0, 100.0],
+            15.0,
+            false,
+            1,
+        );
+        let color_1 = center_pixel(&r);
+
+        // Voxel 2 center: [2.5, 0.0, 0.5]
+        // dist = sqrt(1.5^2 + 5.0^2 + 0.5^2) = sqrt(27.5) = 5.2440
+        r.clear();
+        r.shade_and_splat(
+            &cam,
+            [2.5, 0.0, 0.5],
+            8.0, 8.0, 1.0,
+            5.2440,
+            [100.0, 100.0, 100.0],
+            15.0,
+            false,
+            1,
+        );
+        let color_2 = center_pixel(&r);
+
+        // Verify that the two adjacent voxels differ in color/shading.
+        // This diagnostic test proves that rendering flat surfaces voxel-by-voxel
+        // without quad-merging causes individual tiles to have slightly different
+        // shading, creating a visible grid pattern.
+        assert_ne!(color_1[0], color_2[0], "Expected adjacent voxels to have slightly different shading due to center-based lighting calculations");
+    }
+
+    #[test]
+    fn test_splat_flat_shading_limitation() {
+        let mut r = SoftwareRasterizer::new(16, 16);
+        let frame = FrameParams { camera_pos: [1.0, 5.0, 1.0], yaw: 0.0, pitch: 0.0 };
+        let cam = Camera::new(&frame, 16, 16);
+
+        // Draw a single large splat (half_px = 4.0) centered at [8.0, 8.0]
+        r.clear();
+        r.shade_and_splat(
+            &cam,
+            [0.5, 0.0, 0.5],
+            8.0, 8.0, 4.0, // large size
+            5.0,
+            [100.0, 100.0, 100.0],
+            15.0,
+            false,
+            1,
+        );
+
+        // Read pixels at different parts of the splat (left inside vs right inside)
+        let idx_left = (8 * r.width() + 5) * 4;
+        let idx_right = (8 * r.width() + 10) * 4;
+        let fb = r.framebuffer();
+        let color_left = [fb[idx_left], fb[idx_left+1], fb[idx_left+2]];
+        let color_right = [fb[idx_right], fb[idx_right+1], fb[idx_right+2]];
+
+        // Confirm they are identical, which proves that the entire projected area
+        // of a single splat is displayed with one flat color, causing lighting to look
+        // like big blocks/squares on screen.
+        assert_eq!(color_left, color_right, "Expected a single splat to be flat-shaded (all its pixels have identical color)");
+    }
+
 }
+
+

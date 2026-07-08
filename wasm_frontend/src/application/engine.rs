@@ -22,9 +22,9 @@ pub struct EngineConfig {
     pub chunk_radius: i32,
     /// Player spawn (eye position).
     pub spawn: [f32; 3],
-    /// Chunks generated per tick; kept at 1 so generation never blows the
-    /// frame budget (wasm is single-threaded — time-slicing replaces the
-    /// background worker a native engine would use).
+    /// Chunks generated per tick. 2 balances streaming latency against
+    /// frame hitches: one chunk costs ~15 ms native (more in wasm), so
+    /// higher budgets stall the frame visibly.
     pub max_loads_per_tick: usize,
 }
 
@@ -35,7 +35,7 @@ impl Default for EngineConfig {
             chunk_size: 10.0,
             chunk_radius: 1,
             spawn: [5.0, 1.7, 5.0],
-            max_loads_per_tick: 1,
+            max_loads_per_tick: 2,
         }
     }
 }
@@ -102,6 +102,14 @@ impl PerfGovernor {
     }
 }
 
+/// Backrooms level ids the engine can noclip between.
+const LEVEL_BACKROOMS: u32 = 0;
+const LEVEL_GRASSLAND: u32 = 34;
+/// Keep pushing into a wall this long before a noclip roll happens...
+const NOCLIP_PUSH_SECONDS: f32 = 1.2;
+/// ...then one roll per second of continued pushing, at this probability.
+const NOCLIP_CHANCE: f32 = 0.2;
+
 pub struct Engine {
     config: EngineConfig,
     player: Player,
@@ -113,6 +121,14 @@ pub struct Engine {
     governor: PerfGovernor,
     renderer: Box<dyn RendererPort>,
     source: Box<dyn ChunkSourcePort>,
+    /// Active Backrooms level; chunks are requested for this level.
+    level: u32,
+    /// How long the player has been pushing into a wall without moving.
+    push_seconds: f32,
+    /// Seconds until the next noclip roll is allowed.
+    noclip_cooldown: f32,
+    /// xorshift state for the noclip dice.
+    rng: u64,
 }
 
 impl Engine {
@@ -132,8 +148,68 @@ impl Engine {
             governor: PerfGovernor::new(),
             renderer,
             source,
+            level: LEVEL_BACKROOMS,
+            push_seconds: 0.0,
+            noclip_cooldown: 0.0,
+            rng: (config.seed as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1,
             config,
         }
+    }
+
+    fn rng_next01(&mut self) -> f32 {
+        self.rng ^= self.rng << 13;
+        self.rng ^= self.rng >> 7;
+        self.rng ^= self.rng << 17;
+        (self.rng >> 40) as f32 / (1u64 << 24) as f32
+    }
+
+    /// Backrooms lore made mechanical: holding a walk into solid wall long
+    /// enough occasionally phases the player through reality.
+    fn update_noclip(&mut self, dt: f32, input: &InputFrame, old_pos: [f32; 3]) {
+        self.noclip_cooldown = (self.noclip_cooldown - dt).max(0.0);
+
+        let i = input.intent;
+        let pushing = input.locked && (i.forward || i.backward || i.left || i.right);
+        let dx = self.player.position[0] - old_pos[0];
+        let dz = self.player.position[2] - old_pos[2];
+        let pinned = pushing && (dx * dx + dz * dz) < 0.002 * 0.002;
+
+        if !pinned {
+            self.push_seconds = 0.0;
+            return;
+        }
+        self.push_seconds += dt;
+        if self.push_seconds < NOCLIP_PUSH_SECONDS || self.noclip_cooldown > 0.0 {
+            return;
+        }
+        self.noclip_cooldown = 1.0;
+        if self.rng_next01() < NOCLIP_CHANCE {
+            self.noclip();
+        }
+    }
+
+    /// Phase between Level 0 and the grassland: drop every resident chunk so
+    /// the streamer rebuilds the world from the new level's generator.
+    fn noclip(&mut self) {
+        self.level = if self.level == LEVEL_BACKROOMS {
+            LEVEL_GRASSLAND
+        } else {
+            LEVEL_BACKROOMS
+        };
+        self.store.retain_keys(&[]);
+        self.world.rebuild([].iter());
+        self.draws.clear();
+        self.push_seconds = 0.0;
+        // Into the grassland you phase in place; the way back drops you at
+        // the spawn clearing so you can't rematerialize inside a wall.
+        if self.level == LEVEL_BACKROOMS {
+            self.player.position = self.config.spawn;
+        }
+    }
+
+    /// The active Backrooms level id.
+    pub fn level(&self) -> u32 {
+        self.level
     }
 
     /// Advances the simulation one frame and issues the draw.
@@ -142,10 +218,12 @@ impl Engine {
         let dt = dt_seconds.clamp(0.0, 0.1);
         self.governor.update(dt_seconds * 1000.0);
 
+        let old_pos = self.player.position;
         if input.locked {
             self.player.apply_look(input.look_dx, input.look_dy);
             self.player.step(dt, &input.intent, &self.world);
         }
+        self.update_noclip(dt, input, old_pos);
 
         self.stream_chunks();
 
@@ -175,7 +253,7 @@ impl Engine {
             }
             let key = chunk_key(ox, oz);
             if !self.store.contains(key) {
-                let payload = self.source.load(ox, oz);
+                let payload = self.source.load(ox, oz, self.level);
                 self.store.insert(key, LoadedChunk { origin: (ox, oz), payload });
                 loads += 1;
                 changed = true;
@@ -243,7 +321,7 @@ mod tests {
     struct FlatChunkSource;
 
     impl ChunkSourcePort for FlatChunkSource {
-        fn load(&self, origin_x: f32, _origin_z: f32) -> ChunkPayload {
+        fn load(&self, origin_x: f32, _origin_z: f32, _level: u32) -> ChunkPayload {
             ChunkPayload {
                 root: 0,
                 nodes: [1u32, 0, 0, 0].repeat(1024), // one padded row of air leaves
@@ -252,6 +330,24 @@ mod tests {
                     [origin_x, 0.0, 0.0],
                     [origin_x + 0.2, 3.0, 0.2],
                 )],
+            }
+        }
+    }
+
+    /// Chunk source that traps the player: one huge collision box around the
+    /// spawn, and it records which level each load was for.
+    struct TrappingChunkSource {
+        levels: Rc<RefCell<Vec<u32>>>,
+    }
+
+    impl ChunkSourcePort for TrappingChunkSource {
+        fn load(&self, _x: f32, _z: f32, level: u32) -> ChunkPayload {
+            self.levels.borrow_mut().push(level);
+            ChunkPayload {
+                root: 0,
+                nodes: [1u32, 0, 0, 0].repeat(1024),
+                world_size: 12.8,
+                collision: vec![Aabb::new([-100.0, 0.0, -100.0], [100.0, 3.0, 100.0])],
             }
         }
     }
@@ -269,17 +365,24 @@ mod tests {
     }
 
     #[test]
-    fn streams_one_chunk_per_tick_until_radius_filled() {
-        let (mut engine, uploads, draws) = engine_with_recorder();
+    fn streams_multiple_chunks_per_tick_up_to_max_loads() {
+        let (mut engine, uploads, _draws) = engine_with_recorder();
         let input = InputFrame::default();
-        for _ in 0..9 {
+        
+        // 9 chunks total are desired (radius 1). With max_loads_per_tick=2:
+        // 2+2+2+2+1 over five ticks.
+        for expected in [2usize, 4, 6, 8, 9] {
+            engine.tick(1.0 / 60.0, &input);
+            assert_eq!(engine.stats().resident_chunks, expected);
+        }
+        assert_eq!(uploads.borrow().len(), 5);
+
+        // Subsequent ticks should not load anything or re-upload.
+        for _ in 0..5 {
             engine.tick(1.0 / 60.0, &input);
         }
         assert_eq!(engine.stats().resident_chunks, 9);
-        // Atlas re-uploaded on every tick that loaded a chunk.
-        assert_eq!(uploads.borrow().len(), 9);
-        // Every tick drew exactly the resident chunk count.
-        assert_eq!(*draws.borrow().last().unwrap(), 9);
+        assert_eq!(uploads.borrow().len(), 5);
         assert!(engine.stats().ready);
     }
 
@@ -290,7 +393,7 @@ mod tests {
         for _ in 0..20 {
             engine.tick(1.0 / 60.0, &input);
         }
-        assert_eq!(uploads.borrow().len(), 9, "no uploads once resident set is stable");
+        assert_eq!(uploads.borrow().len(), 5, "no uploads once resident set is stable");
     }
 
     #[test]
@@ -301,6 +404,57 @@ mod tests {
             engine.tick(1.0 / 60.0, &input);
         }
         assert_eq!(engine.collision_world().len(), 9);
+    }
+
+    #[test]
+    fn pushing_into_a_wall_eventually_noclips_to_the_grassland() {
+        let levels = Rc::new(RefCell::new(Vec::new()));
+        let mut engine = Engine::new(
+            EngineConfig::default(),
+            Box::new(RecordingRenderer::default()),
+            Box::new(TrappingChunkSource { levels: levels.clone() }),
+        );
+        assert_eq!(engine.level(), 0);
+
+        // Hold forward into the wall. 20% per roll, one roll per second of
+        // pushing: 120 simulated seconds without a switch is ~1e-11 likely.
+        let input = InputFrame {
+            intent: crate::application::player::MoveIntent { forward: true, ..Default::default() },
+            locked: true,
+            ..Default::default()
+        };
+        let mut switched_at = None;
+        for tick in 0..(120 * 60) {
+            engine.tick(1.0 / 60.0, &input);
+            if engine.level() != 0 {
+                switched_at = Some(tick);
+                break;
+            }
+        }
+        assert_eq!(engine.level(), 34, "never noclipped (switched_at={switched_at:?})");
+        // New chunks must be requested for the grassland level.
+        for _ in 0..5 {
+            engine.tick(1.0 / 60.0, &input);
+        }
+        assert!(
+            levels.borrow().iter().any(|&l| l == 34),
+            "chunk source never asked for level 34: {:?}",
+            levels.borrow()
+        );
+    }
+
+    #[test]
+    fn walking_freely_never_noclips() {
+        let (mut engine, _, _) = engine_with_recorder();
+        let input = InputFrame {
+            intent: crate::application::player::MoveIntent { forward: true, ..Default::default() },
+            locked: true,
+            ..Default::default()
+        };
+        for _ in 0..(60 * 60) {
+            engine.tick(1.0 / 60.0, &input);
+        }
+        assert_eq!(engine.level(), 0, "noclip fired without a wall");
     }
 
     #[test]

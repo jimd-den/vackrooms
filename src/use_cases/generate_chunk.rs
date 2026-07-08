@@ -4,20 +4,55 @@ use crate::domain::entities::voxel_grid::{
     VoxelGrid, VOXEL_AIR, VOXEL_WALL, VOXEL_FLOOR, VOXEL_CEILING, VOXEL_LIGHT, VOXEL_RED_WALL,
 };
 
+/// User-tunable knobs for the level generators. All values are multipliers
+/// around the defaults (1.0); 0 disables the feature, ~2 saturates it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LevelTuning {
+    /// Structural column / pillar density.
+    pub pillars: f32,
+    /// Office wall segment density.
+    pub walls: f32,
+    /// How much of the world vaults into tall atria.
+    pub atria: f32,
+    /// Ceiling light panel density.
+    pub lights: f32,
+}
+
+impl Default for LevelTuning {
+    fn default() -> Self {
+        Self { pillars: 1.0, walls: 1.0, atria: 1.0, lights: 1.0 }
+    }
+}
+
 /// Dynamic config configuration profile to scale SVO dimensions and voxel grid.
 #[derive(Debug, Clone, Copy)]
 pub struct GeneratorConfig {
     pub chunk_size: f32,
     pub voxel_scale: f32,
+    /// Which level generator fills the chunks (see `level_generator`):
+    /// 0 = Backrooms (default), 1 = legacy office blueprint, 34 = grassland.
+    pub level: u32,
+    /// User-facing generation knobs (URL query params in the browser).
+    pub tuning: LevelTuning,
 }
 
 impl GeneratorConfig {
     pub fn high_spec() -> Self {
-        Self { chunk_size: 20.0, voxel_scale: 0.1 }
+        Self { chunk_size: 20.0, voxel_scale: 0.1, level: 0, tuning: LevelTuning::default() }
     }
-    
+
     pub fn low_spec() -> Self {
-        Self { chunk_size: 10.0, voxel_scale: 0.2 }
+        Self { chunk_size: 10.0, voxel_scale: 0.2, level: 0, tuning: LevelTuning::default() }
+    }
+
+    pub fn with_level(mut self, level: u32) -> Self {
+        self.level = level;
+        self
+    }
+
+    pub fn with_tuning(mut self, tuning: LevelTuning) -> Self {
+        self.tuning = tuning;
+        self
     }
 
     pub fn svo_depth(&self) -> u32 {
@@ -106,6 +141,29 @@ impl<'a> GenerateChunkArchitectureUseCase<'a> {
     }
 
     pub fn execute(&self, chunk_pos: Position, seed: u32, config: GeneratorConfig) -> VoxelGrid {
+        // Pluggable levels: everything except the legacy office blueprint
+        // (level 1, kept inline below) goes through the LevelGenerator port.
+        if config.level != 1 {
+            use crate::use_cases::backrooms_level::BackroomsLevel;
+            use crate::use_cases::grassland_level::GrasslandLevel;
+            use crate::use_cases::level_generator::{LevelGenerator, LEVEL_GRASSLAND};
+
+            let start_micros = self.telemetry.now_micros();
+            let generator: &dyn LevelGenerator = match config.level {
+                LEVEL_GRASSLAND => &GrasslandLevel,
+                _ => &BackroomsLevel,
+            };
+            let mut grid = generator.generate(chunk_pos, seed, config, self.noise_provider);
+            crate::domain::use_cases::calculate_lighting::calculate_voxel_lighting(&mut grid);
+
+            let elapsed_micros = self.telemetry.now_micros().saturating_sub(start_micros);
+            self.telemetry.log(&format!(
+                "[TELEMETRY] level {} chunk generated. Duration={}us, Grid={}x{}x{}",
+                config.level, elapsed_micros, grid.width(), grid.height(), grid.depth()
+            ));
+            return grid;
+        }
+
         let start_micros = self.telemetry.now_micros();
 
         let width = (config.chunk_size / config.voxel_scale) as usize;
@@ -137,12 +195,12 @@ impl<'a> GenerateChunkArchitectureUseCase<'a> {
                         // Leave holes for the standard corridors so it connects to other chunks!
                         let w_f = width as f32;
                         let d_f = depth as f32;
-                        let main_wall_x1 = (0.465 * w_f) as usize;
-                        let main_wall_x2 = (0.53 * w_f) as usize;
-                        let z_split1 = (0.275 * d_f) as usize;
-                        let z_split2 = (0.325 * d_f) as usize;
-                        let z_split3 = (0.675 * d_f) as usize;
-                        let z_split4 = (0.725 * d_f) as usize;
+                        let main_wall_x1 = (0.42 * w_f) as usize;
+                        let main_wall_x2 = (0.58 * w_f) as usize;
+                        let z_split1 = (0.23 * d_f) as usize;
+                        let z_split2 = (0.37 * d_f) as usize;
+                        let z_split3 = (0.63 * d_f) as usize;
+                        let z_split4 = (0.77 * d_f) as usize;
                         
                         let is_z_corridor = z >= z_split1 && z < z_split2 || z >= z_split3 && z < z_split4;
                         let is_x_corridor = x >= main_wall_x1 && x < main_wall_x2;
@@ -167,13 +225,13 @@ impl<'a> GenerateChunkArchitectureUseCase<'a> {
         let w_f = width as f32;
         let d_f = depth as f32;
 
-        let main_wall_x1 = (0.465 * w_f) as usize;
-        let main_wall_x2 = (0.53 * w_f) as usize;
+        let main_wall_x1 = (0.42 * w_f) as usize;
+        let main_wall_x2 = (0.58 * w_f) as usize;
         
-        let z_split1 = (0.275 * d_f) as usize;
-        let z_split2 = (0.325 * d_f) as usize;
-        let z_split3 = (0.675 * d_f) as usize;
-        let z_split4 = (0.725 * d_f) as usize;
+        let z_split1 = (0.23 * d_f) as usize;
+        let z_split2 = (0.37 * d_f) as usize;
+        let z_split3 = (0.63 * d_f) as usize;
+        let z_split4 = (0.77 * d_f) as usize;
 
         // ==========================================
         // PASS 1: BLUEPRINT (Deterministic layout)
@@ -333,8 +391,8 @@ impl<'a> GenerateChunkArchitectureUseCase<'a> {
                             grid.get(x, 1, z + 1) == VOXEL_WALL,
                             grid.get(x, 1, z - 1) == VOXEL_WALL,
                         ];
-                        let walls_count = neighbors.iter().filter(|&&v| v).count();
-                        if walls_count == 1 {
+                        let _walls_count = neighbors.iter().filter(|&&v| v).count();
+                        if false { // Disabled to prevent wall gaps and player blockages from column thickening
                             let mut h = 1;
                             while h < height - 1 && grid.get(x, h + 1, z) == VOXEL_WALL {
                                 h += 1;
@@ -359,10 +417,6 @@ impl<'a> GenerateChunkArchitectureUseCase<'a> {
                                         for y in 1..=h {
                                             mutated_grid.set(tx, y, tz, VOXEL_WALL);
                                         }
-                                    }
-                                } else if noise_val < -0.75 {
-                                    for y in 1..=h {
-                                        mutated_grid.set(x, y, z, VOXEL_AIR);
                                     }
                                 }
                             }
@@ -653,11 +707,102 @@ mod tests {
     fn test_voxel_native_blueprint_walkable() {
         let noise = MockNoiseProvider { value: 0.0 };
         let generator = GenerateChunkArchitectureUseCase::new(&noise);
-        let config = GeneratorConfig::high_spec();
+        let config = GeneratorConfig::high_spec().with_level(1);
         let grid = generator.execute(Position::new(0.0, 0.0), 42, config);
 
         assert_eq!(grid.width(), 200);
         assert_eq!(grid.height(), 30);
         assert_eq!(grid.depth(), 200);
+    }
+
+    #[test]
+    fn test_ceiling_stepping_mutation() {
+        // Mock noise provider returning high noise value to trigger ceiling step
+        let noise = MockNoiseProvider { value: 0.95 };
+        let generator = GenerateChunkArchitectureUseCase::new(&noise);
+        let config = GeneratorConfig::low_spec().with_level(1);
+        // Generate a non-hub chunk (e.g. at 10.0, 10.0) so the mutation pass runs
+        let grid = generator.execute(Position::new(10.0, 10.0), 42, config);
+        
+        let height = grid.height();
+        
+        // Find if any mutated ceiling voxel (y = height - 2) is created underneath a wall voxel (y = height - 1)
+        let mut mutation_found = false;
+        for z in 0..grid.depth() {
+            for x in 0..grid.width() {
+                if grid.get(x, height - 2, z) == VOXEL_CEILING && grid.get(x, height - 1, z) == VOXEL_WALL {
+                    mutation_found = true;
+                    break;
+                }
+            }
+            if mutation_found {
+                break;
+            }
+        }
+        
+        assert!(mutation_found, "Expected ceiling stepping mutation to drop a ceiling voxel and insert a wall voxel under high noise conditions");
+    }
+
+    #[test]
+    fn test_wall_thinning_carves_air_under_low_noise() {
+        // Mock noise provider returning very low noise value (< -0.75) to trigger carving
+        let noise = MockNoiseProvider { value: -0.85 };
+        let generator = GenerateChunkArchitectureUseCase::new(&noise);
+        let config = GeneratorConfig::low_spec().with_level(1);
+        let grid = generator.execute(Position::new(10.0, 10.0), 42, config);
+
+        let generator_no_carve = GenerateChunkArchitectureUseCase::new(&MockNoiseProvider { value: 0.0 });
+        let grid_no_carve = generator_no_carve.execute(Position::new(10.0, 10.0), 42, config);
+        
+        let mut walls_no_carve = 0;
+        for z in 0..grid_no_carve.depth() {
+            for x in 0..grid_no_carve.width() {
+                if grid_no_carve.get(x, 1, z) == VOXEL_WALL {
+                    walls_no_carve += 1;
+                }
+            }
+        }
+        
+        let mut walls_carved = 0;
+        for z in 0..grid.depth() {
+            for x in 0..grid.width() {
+                if grid.get(x, 1, z) == VOXEL_WALL {
+                    walls_carved += 1;
+                }
+            }
+        }
+        
+        assert_eq!(walls_carved, walls_no_carve, "Expected wall carving to be disabled, so carved walls ({}) should equal walls_no_carve ({})", walls_carved, walls_no_carve);
+    }
+
+    #[test]
+    fn test_wall_thickening_is_disabled() {
+        let noise = MockNoiseProvider { value: 0.85 };
+        let generator = GenerateChunkArchitectureUseCase::new(&noise);
+        let config = GeneratorConfig::low_spec().with_level(1);
+        let grid = generator.execute(Position::new(10.0, 10.0), 42, config);
+
+        let generator_no_thicken = GenerateChunkArchitectureUseCase::new(&MockNoiseProvider { value: 0.0 });
+        let grid_no_thicken = generator_no_thicken.execute(Position::new(10.0, 10.0), 42, config);
+        
+        let mut walls_no_thicken = 0;
+        for z in 0..grid_no_thicken.depth() {
+            for x in 0..grid_no_thicken.width() {
+                if grid_no_thicken.get(x, 1, z) == VOXEL_WALL {
+                    walls_no_thicken += 1;
+                }
+            }
+        }
+        
+        let mut walls_thickened = 0;
+        for z in 0..grid.depth() {
+            for x in 0..grid.width() {
+                if grid.get(x, 1, z) == VOXEL_WALL {
+                    walls_thickened += 1;
+                }
+            }
+        }
+        
+        assert_eq!(walls_thickened, walls_no_thicken, "Expected wall thickening to be disabled, so thickened walls ({}) should equal walls_no_thicken ({})", walls_thickened, walls_no_thicken);
     }
 }

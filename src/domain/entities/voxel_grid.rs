@@ -14,6 +14,12 @@ pub const VOXEL_FLOOR: u8 = 2;
 pub const VOXEL_CEILING: u8 = 3;
 pub const VOXEL_LIGHT: u8 = 4;
 pub const VOXEL_RED_WALL: u8 = 5;
+/// Walkable ground cover (grassland level). Visual-only, like FLOOR.
+pub const VOXEL_GRASS: u8 = 6;
+/// Walkable shallow water (grassland lakes). Visual-only, like FLOOR.
+pub const VOXEL_WATER: u8 = 7;
+/// Tree trunk (grassland). Solid: blocks the player like WALL.
+pub const VOXEL_TREE: u8 = 8;
 
 impl VoxelGrid {
     pub fn new(width: usize, height: usize, depth: usize) -> Self {

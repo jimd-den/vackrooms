@@ -7,8 +7,8 @@
 use crate::application::collision::CollisionWorld;
 
 /// Acceleration applied while a movement key is held (units/s^2 toward the
-/// wish direction). Terminal speed = ACCELERATION / FRICTION = 0.5 u/s.
-const ACCELERATION: f32 = 4.0;
+/// wish direction). Terminal speed = ACCELERATION / FRICTION = 2.5 u/s (increased from 0.5 u/s).
+const ACCELERATION: f32 = 20.0;
 /// Exponential velocity damping factor (1/s).
 const FRICTION: f32 = 8.0;
 /// Radians of yaw/pitch per pixel of mouse movement.
@@ -131,8 +131,8 @@ mod tests {
         let before = p.position[2];
         walk(&mut p, &world, MoveIntent { forward: true, ..Default::default() }, 1.0);
         let speed = (before - p.position[2]).abs();
-        // Terminal speed = ACCELERATION / FRICTION = 0.5 u/s.
-        assert!((speed - 0.5).abs() < 0.05, "speed was {speed}");
+        // Terminal speed = ACCELERATION / FRICTION = 2.5 u/s (was 0.5 u/s).
+        assert!((speed - 2.5).abs() < 0.05, "speed was {speed}");
     }
 
     #[test]

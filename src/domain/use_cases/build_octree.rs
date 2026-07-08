@@ -1,5 +1,6 @@
 use crate::domain::entities::voxel_grid::{
     VoxelGrid, VOXEL_AIR, VOXEL_WALL, VOXEL_FLOOR, VOXEL_CEILING, VOXEL_LIGHT, VOXEL_RED_WALL,
+    VOXEL_GRASS, VOXEL_WATER, VOXEL_TREE,
 };
 use crate::domain::entities::sparse_voxel_octree::{SparseVoxelOctree, SvoNode};
 
@@ -143,6 +144,9 @@ impl BuildOctreeUseCase {
             VOXEL_CEILING => 0xcccccc,
             VOXEL_LIGHT => 0xffffff,
             VOXEL_RED_WALL => 0x880000,
+            VOXEL_GRASS => 0x4f9a3d,
+            VOXEL_WATER => 0x3a6fb8,
+            VOXEL_TREE => 0x6b4a2f,
             _ => 0x000000,
         };
 
