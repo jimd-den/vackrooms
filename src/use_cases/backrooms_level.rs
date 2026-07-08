@@ -149,37 +149,25 @@ impl BackroomsLevel {
         wx: f32,
         wz: f32,
     ) -> ColumnPlan {
-        // ---- zones -------------------------------------------------------
-        // Interpolated value noise clusters toward 0, so amplify it to make
-        // the outer zone bands (atria, expanses) actually occur.
-        let zone = 1.6 * Self::n(noise, seed, 0xA100, wx, wz, 0.8);
-        // 0 = flat ceiling, 1 = full atrium; the atria knob scales how much
-        // of the zone field clears the vault threshold.
-        let vault = Self::smoothstep((zone * tuning.atria - 0.42) / 0.33);
-        let atrium = vault > 0.0;
-        let expanse = zone < -0.45;
-
         // ---- halls -------------------------------------------------------
         let (ox_off, ox_half) = Self::hall_offset(noise, seed, 0xC300, wx, wz);
         let (oz_off, oz_half) = Self::hall_offset(noise, seed, 0xC400, wz, wx);
         let in_hall = ox_off.abs() < ox_half || oz_off.abs() < oz_half;
 
-        // ---- ceiling field -----------------------------------------------
+        // ---- ceiling field (flat and low everywhere like authentic Level 0) ----
         let coarse = Self::n(noise, seed, 0xB200, wx, wz, 0.55);
         let fine = Self::n(noise, seed, 0xB300, wx, wz, 1.6);
-        let base = (3.1 + 0.4 * coarse + 0.15 * fine).clamp(2.6, 3.6);
-        // Atria vault continuously out of the base ceiling: a dome swell,
-        // not a step.
-        let mut ceiling_units = base + (MAX_CEILING_UNITS - base) * vault;
-        // Halls run under a lowered soffit outside atria: passing from a
-        // tight corridor into a vaulted space is the architectural payoff.
-        if in_hall && vault < 0.15 {
-            ceiling_units = ceiling_units.min(HALL_SOFFIT_UNITS);
+        let mut ceiling_units = (2.8 + 0.15 * coarse + 0.05 * fine).clamp(2.7, 3.0);
+        
+        // Corridor ceiling drops slightly to a soffit
+        if in_hall {
+            ceiling_units = ceiling_units.min(2.7);
         }
-        // Coffered ceilings: a beam grid overhead in flat-ceiling rooms.
+        
+        // Coffered ceiling grid
         let on_beam = wx.rem_euclid(COFFER_PERIOD) < 0.22
             || wz.rem_euclid(COFFER_PERIOD) < 0.22;
-        if !in_hall && vault < 0.15 && on_beam {
+        if !in_hall && on_beam {
             ceiling_units -= COFFER_DROP;
         }
 
@@ -194,48 +182,8 @@ impl BackroomsLevel {
 
         if !in_spawn {
             if in_hall {
-                // Colonnades: where a hall crosses an atrium, columns march
-                // along both flanks just inside the hall edge.
-                if vault > 0.35 {
-                    let (flank, along) = if ox_off.abs() < ox_half {
-                        (ox_half - ox_off.abs(), wz)
-                    } else {
-                        (oz_half - oz_off.abs(), wx)
-                    };
-                    if flank < 0.35
-                        && along.rem_euclid(3.6) < 0.35
-                        && Self::pillar_alive(noise, seed, tuning, wx, wz, 3.6)
-                    {
-                        solid = true;
-                        sconce = true;
-                    }
-                }
-            } else if atrium && vault > 0.5 {
-                // Atrium interior: sparse structural columns holding the vault.
-                let px = wx.rem_euclid(7.5);
-                let pz = wz.rem_euclid(7.5);
-                solid = px < 0.4
-                    && pz < 0.4
-                    && Self::pillar_alive(noise, seed, tuning, wx, wz, 7.5);
-                sconce = solid;
-            } else if vault > 0.2 {
-                // Atrium rim: a colonnade ring in the narrow band where the
-                // vault takes off — a ring, not a forest.
-                let px = wx.rem_euclid(4.8);
-                let pz = wz.rem_euclid(4.8);
-                solid = px < 0.4
-                    && pz < 0.4
-                    && Self::pillar_alive(noise, seed, tuning, wx, wz, 4.8);
-                sconce = solid;
-            } else if atrium {
-                // Lower vault skirt: keep it open.
-            } else if expanse {
-                // Expanse: sparse columns, big bays.
-                let px = wx.rem_euclid(6.5);
-                let pz = wz.rem_euclid(6.5);
-                solid = px < 0.4
-                    && pz < 0.4
-                    && Self::pillar_alive(noise, seed, tuning, wx, wz, 6.5);
+                // Halls stay completely clear of columns/walls
+                solid = false;
             } else {
                 // Offices: wall grid with doorways under lintels, plus
                 // pilaster bumps that give the walls relief.
@@ -250,8 +198,10 @@ impl BackroomsLevel {
                     if f_wall >= 0.25 && !pilaster {
                         return (false, false);
                     }
-                    // Wall-density knob: 1.0 keeps ~65% of segments, 0 none.
-                    let drop_below = 1.0 - 0.65 * tuning.walls;
+                    
+                    // Low-frequency noise controls local room layouts (open spaces vs dense maze)
+                    let density_noise = Self::n(noise, seed, 0xD900, wx, wz, 0.15) * 0.2 + 0.65;
+                    let drop_below = 1.0 - density_noise * tuning.walls;
                     if Self::cell_hash(noise, seed, salt_keep, cell_x, cell_z) <= drop_below {
                         return (false, false); // whole segment dropped: rooms merge
                     }
@@ -285,7 +235,7 @@ impl BackroomsLevel {
             let lz = (wz - LIGHT_PERIOD * 0.5).rem_euclid(LIGHT_PERIOD);
             let cell_x = (wx / LIGHT_PERIOD).floor() as i64;
             let cell_z = (wz / LIGHT_PERIOD).floor() as i64;
-            let keep = if atrium { 0.90 } else { 0.78 } * tuning.lights;
+            let keep = 0.78 * tuning.lights;
             let alive = Self::cell_hash(noise, seed, 0xE900, cell_x, cell_z) < keep;
             (lx < 0.45 && lz < 0.45 && alive) || spawn_d2 < 0.36
         } else {
@@ -506,18 +456,14 @@ mod tests {
             }
         }
         assert!(
-            tallest as f32 * s >= 4.2,
-            "expected a vault >= 4.2 u somewhere, tallest was {} u",
+            tallest as f32 * s <= 3.1,
+            "expected flat ceiling <= 3.1 u, tallest was {} u",
             tallest as f32 * s
         );
         assert!(
-            lowest as f32 * s >= 2.0,
-            "walkable headroom fell below 2.0 u: {} u",
+            lowest as f32 * s >= 2.1,
+            "walkable headroom fell below 2.1 u: {} u",
             lowest as f32 * s
-        );
-        assert!(
-            tallest - lowest >= 5,
-            "ceiling field should vary, got {lowest}..{tallest}"
         );
     }
 
