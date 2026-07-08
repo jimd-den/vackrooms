@@ -185,37 +185,54 @@ impl BackroomsLevel {
                 // Halls stay completely clear of columns/walls
                 solid = false;
             } else {
-                // Offices: wall grid with doorways under lintels, plus
-                // pilaster bumps that give the walls relief.
                 let fx = wx.rem_euclid(WALL_PERIOD);
                 let fz = wz.rem_euclid(WALL_PERIOD);
                 let cell_x = (wx / WALL_PERIOD).floor() as i64;
                 let cell_z = (wz / WALL_PERIOD).floor() as i64;
 
                 // (solid, lintel) contribution of one wall family.
-                let wall_here = |f_wall: f32, f_along: f32, salt_keep: u32, salt_door: u32| {
-                    let pilaster = f_wall < 0.5 && f_along.rem_euclid(2.1) < 0.3;
-                    if f_wall >= 0.25 && !pilaster {
+                let wall_here = |f_wall: f32, f_along: f32, is_z_wall: bool| {
+                    if f_wall >= 0.25 {
                         return (false, false);
                     }
                     
-                    // Low-frequency noise controls local room layouts (open spaces vs dense maze)
-                    let density_noise = Self::n(noise, seed, 0xD900, wx, wz, 0.15) * 0.2 + 0.65;
-                    let drop_below = 1.0 - density_noise * tuning.walls;
-                    if Self::cell_hash(noise, seed, salt_keep, cell_x, cell_z) <= drop_below {
-                        return (false, false); // whole segment dropped: rooms merge
-                    }
-                    let door = Self::cell_hash(noise, seed, salt_door, cell_x, cell_z)
-                        * (WALL_PERIOD - DOOR_WIDTH - 1.0)
-                        + 0.5;
-                    if f_along >= door && f_along < door + DOOR_WIDTH {
-                        (false, true) // doorway: open below, lintel above
+                    // Center of the wall segment in world units
+                    let (wx_mid, wz_mid) = if is_z_wall {
+                        (
+                            cell_x as f32 * WALL_PERIOD,
+                            (cell_z as f32 + 0.5) * WALL_PERIOD,
+                        )
                     } else {
-                        (true, false)
+                        (
+                            (cell_x as f32 + 0.5) * WALL_PERIOD,
+                            cell_z as f32 * WALL_PERIOD,
+                        )
+                    };
+
+                    // Sample low-frequency noise to cluster walls into long continuous runs
+                    let salt = if is_z_wall { 0xD500 } else { 0xD600 };
+                    let n_val = Self::n(noise, seed, salt, wx_mid, wz_mid, 0.45);
+                    
+                    // Threshold controls overall wall density (tuned by user walls knob)
+                    let threshold = 1.0 - 1.22 * tuning.walls;
+                    if n_val <= threshold {
+                        return (false, false); // Wall dropped: opens up a path
                     }
+
+                    // For kept walls, place a doorway under a lintel with 45% probability
+                    let door_salt = if is_z_wall { 0xD700 } else { 0xD800 };
+                    let has_door = Self::cell_hash(noise, seed, door_salt, cell_x, cell_z) < 0.45;
+                    if has_door {
+                        let door_pos = (WALL_PERIOD - DOOR_WIDTH) * 0.5;
+                        if f_along >= door_pos && f_along < door_pos + DOOR_WIDTH {
+                            return (false, true); // Doorway: open below, lintel above
+                        }
+                    }
+                    (true, false) // Solid wall
                 };
-                let (sx, lx) = wall_here(fx, fz, 0xD500, 0xD600);
-                let (sz, lz) = wall_here(fz, fx, 0xD700, 0xD800);
+
+                let (sx, lx) = wall_here(fx, fz, true);
+                let (sz, lz) = wall_here(fz, fx, false);
                 solid = sx || sz;
                 if !solid && (lx || lz) {
                     lintel_from_units = Some(DOOR_HEIGHT);
