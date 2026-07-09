@@ -1,0 +1,15 @@
+{
+  "name": "wasm_frontend",
+  "type": "module",
+  "version": "0.1.0",
+  "files": [
+    "wasm_frontend_bg.wasm",
+    "wasm_frontend.js",
+    "wasm_frontend.d.ts"
+  ],
+  "main": "wasm_frontend.js",
+  "types": "wasm_frontend.d.ts",
+  "sideEffects": [
+    "./snippets/*"
+  ]
+}
