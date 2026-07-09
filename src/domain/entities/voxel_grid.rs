@@ -5,7 +5,11 @@ pub struct VoxelGrid {
     height: usize,
     depth: usize,
     data: Vec<u8>,
+    /// Scalar light level 0-15 (the max of the RGB channels), kept for
+    /// presenters and bakes that only need brightness.
     light_data: Vec<u8>,
+    /// Colored flood-fill light, 0-15 per channel.
+    light_rgb: Vec<[u8; 3]>,
     face_occlusion: Vec<u8>,
 }
 
@@ -32,6 +36,7 @@ impl VoxelGrid {
             depth,
             data: vec![VOXEL_AIR; size],
             light_data: vec![0; size],
+            light_rgb: vec![[0; 3]; size],
             face_occlusion: vec![0; size],
         }
     }
@@ -68,10 +73,9 @@ impl VoxelGrid {
         }
     }
 
+    /// Sets a neutral (white) light level: all three channels get `level`.
     pub fn set_light(&mut self, x: usize, y: usize, z: usize, level: u8) {
-        if let Some(idx) = self.index(x, y, z) {
-            self.light_data[idx] = level;
-        }
+        self.set_light_rgb(x, y, z, [level; 3]);
     }
 
     pub fn get_light(&self, x: usize, y: usize, z: usize) -> u8 {
@@ -79,6 +83,23 @@ impl VoxelGrid {
             self.light_data[idx]
         } else {
             0
+        }
+    }
+
+    /// Sets colored light (0-15 per channel); the scalar level becomes the
+    /// max of the channels.
+    pub fn set_light_rgb(&mut self, x: usize, y: usize, z: usize, rgb: [u8; 3]) {
+        if let Some(idx) = self.index(x, y, z) {
+            self.light_rgb[idx] = rgb;
+            self.light_data[idx] = rgb[0].max(rgb[1]).max(rgb[2]);
+        }
+    }
+
+    pub fn get_light_rgb(&self, x: usize, y: usize, z: usize) -> [u8; 3] {
+        if let Some(idx) = self.index(x, y, z) {
+            self.light_rgb[idx]
+        } else {
+            [0; 3]
         }
     }
 

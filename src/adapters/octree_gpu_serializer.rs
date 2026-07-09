@@ -31,7 +31,12 @@ pub struct OctreeGpuData {
 ///
 /// - **A (w):** Payload 3
 ///   * If Internal Node (`R == 0`): `0` (Padding).
-///   * If Leaf Node (`R == 1`): `light_level` (uint32) - BFS-propagated light level (`0` to `15`).
+///   * If Leaf Node (`R == 1`): packed lighting:
+///     - bits 0-7:   scalar light level, the max of the RGB channels (0-15)
+///     - bits 8-15:  face occlusion mask
+///     - bits 16-19: red light channel (0-15)
+///     - bits 20-23: green light channel (0-15)
+///     - bits 24-27: blue light channel (0-15)
 pub struct OctreeGpuSerializer;
 
 impl OctreeGpuSerializer {
@@ -48,13 +53,21 @@ impl OctreeGpuSerializer {
                 SvoNode::Leaf {
                     voxel_type,
                     color,
-                    light_level,
+                    light_rgb,
                     face_occlusion,
                 } => {
+                    let [r, g, b] = light_rgb;
+                    let scalar = r.max(g).max(b) as u32;
                     texel_data.push(1); // R
                     texel_data.push(voxel_type as u32); // G
                     texel_data.push(color); // B
-                    texel_data.push((face_occlusion as u32) << 8 | (light_level as u32)); // A
+                    texel_data.push(
+                        scalar
+                            | (face_occlusion as u32) << 8
+                            | (r as u32 & 0xF) << 16
+                            | (g as u32 & 0xF) << 20
+                            | (b as u32 & 0xF) << 24,
+                    ); // A
                 }
                 SvoNode::Internal {
                     child_base_index,
@@ -94,7 +107,7 @@ mod tests {
     #[test]
     fn test_gpu_serialization_padding() {
         let mut octree = SparseVoxelOctree::new(2, 4.0);
-        octree.set(0, 0, 0, 1, 0xFF00FF, 15, 0);
+        octree.set(0, 0, 0, 1, 0xFF00FF, [15; 3], 0);
 
         let gpu_data = OctreeGpuSerializer::serialize_to_gpu_data(&octree);
 

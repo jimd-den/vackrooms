@@ -47,7 +47,7 @@ impl BuildOctreeUseCase {
             return SvoNode::Leaf {
                 voxel_type: v_type,
                 color,
-                light_level: ll,
+                light_rgb: ll,
                 face_occlusion: fo,
             };
         }
@@ -56,7 +56,7 @@ impl BuildOctreeUseCase {
         let mut children = [SvoNode::Leaf {
             voxel_type: 0,
             color: 0,
-            light_level: 0,
+            light_rgb: [0; 3],
             face_occlusion: 0,
         }; 8];
 
@@ -81,20 +81,20 @@ impl BuildOctreeUseCase {
                 SvoNode::Leaf {
                     voxel_type,
                     color,
-                    light_level,
+                    light_rgb,
                     face_occlusion,
                 } => {
                     if let Some((vt, col, ll, fo)) = first_val {
                         if vt != *voxel_type
                             || col != *color
-                            || ll != *light_level
+                            || ll != *light_rgb
                             || fo != *face_occlusion
                         {
                             uniform = false;
                             break;
                         }
                     } else {
-                        first_val = Some((*voxel_type, *color, *light_level, *face_occlusion));
+                        first_val = Some((*voxel_type, *color, *light_rgb, *face_occlusion));
                     }
                 }
             }
@@ -105,7 +105,7 @@ impl BuildOctreeUseCase {
                 return SvoNode::Leaf {
                     voxel_type: vt,
                     color: col,
-                    light_level: ll,
+                    light_rgb: ll,
                     face_occlusion: fo,
                 };
             }
@@ -136,17 +136,17 @@ impl BuildOctreeUseCase {
         }
     }
 
-    fn get_voxel_attrs(&self, grid: &VoxelGrid, x: u32, y: u32, z: u32) -> (u8, u32, u8, u8) {
+    fn get_voxel_attrs(&self, grid: &VoxelGrid, x: u32, y: u32, z: u32) -> (u8, u32, [u8; 3], u8) {
         if x >= grid.width() as u32 || y >= grid.height() as u32 || z >= grid.depth() as u32 {
-            return (0, 0, 0, 0); // Out of bounds is air
+            return (0, 0, [0; 3], 0); // Out of bounds is air
         }
 
         let v_id = grid.get(x as usize, y as usize, z as usize);
         if v_id == VOXEL_AIR {
-            return (0, 0, 0, 0);
+            return (0, 0, [0; 3], 0);
         }
 
-        let ll = grid.get_light(x as usize, y as usize, z as usize);
+        let ll = grid.get_light_rgb(x as usize, y as usize, z as usize);
         let fo = grid.get_face_occlusion(x as usize, y as usize, z as usize);
         let base_color = match v_id {
             VOXEL_WALL => 0xddcc66,

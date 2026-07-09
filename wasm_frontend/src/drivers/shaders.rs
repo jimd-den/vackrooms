@@ -107,7 +107,7 @@ bool raymarchSVO(
     int chunk_root_idx,
     float t_entry, float t_exit,
     float world_size,
-    out vec4 hitColor, out vec3 hitNormal, out bool isLight, out uint hitVoxelType, out float hit_t, out uint hitOcclusion
+    out vec4 hitColor, out vec3 hitNormal, out bool isLight, out uint hitVoxelType, out float hit_t, out uint hitLightWord
 ) {
     float t = t_entry;
     vec3 p = ro + t * rd;
@@ -133,12 +133,13 @@ bool raymarchSVO(
                 float g = float((node.color >> 8) & 0xFFu) / 255.0;
                 float b = float(node.color & 0xFFu) / 255.0;
                 float light = float(node.lightLevel & 0xFFu) / 15.0;
-                uint occlusionBits = (node.lightLevel >> 8u) & 0xFFu;
 
                 hitColor = vec4(r, g, b, light);
                 isLight = (node.voxelType == 4u || node.voxelType == 9u);
                 hitVoxelType = node.voxelType;
-                hitOcclusion = occlusionBits;
+                // Full packed light word: scalar (0-7), occlusion mask
+                // (8-15), RGB flood-fill channels (16-27).
+                hitLightWord = node.lightLevel;
 
                 vec3 hit_p = ro + t * rd;
                 vec3 center = (current_min + current_max) * 0.5;
@@ -302,7 +303,7 @@ void main() {
     bool hitSolid = false;
     bool hitIsLight = false;
     uint finalVoxelType = 0u;
-    uint finalOcclusion = 0u;
+    uint finalLightWord = 0u;
     float closest_t = 1e6;
     int hit_chunk_idx = -1;
 
@@ -315,18 +316,18 @@ void main() {
         bool isL;
         uint h_voxel_type;
         float h_t;
-        uint h_occlusion;
+        uint h_light_word;
         // Literate Documentation:
         // Pass safe_rd instead of the raw direction vector rd to prevent division-by-zero and
         // resulting NaN states in SVO traversal when the view direction aligns with any coordinate axis.
         if (raymarchSVO(local_ro, safe_rd, uChunkRootIndices[i], hits[k].t_min, hits[k].t_max,
-                        uChunkWorldSizes[i], col, norm, isL, h_voxel_type, h_t, h_occlusion)) {
+                        uChunkWorldSizes[i], col, norm, isL, h_voxel_type, h_t, h_light_word)) {
             finalColor = col;
             finalNormal = norm;
             hitSolid = true;
             hitIsLight = isL;
             finalVoxelType = h_voxel_type;
-            finalOcclusion = h_occlusion;
+            finalLightWord = h_light_word;
             closest_t = h_t;
             hit_chunk_idx = i;
             break;
@@ -366,6 +367,7 @@ void main() {
         float face_shading_scalar = vSq.x * uFaceWeightX + vSq.y * y_val + vSq.z * uFaceWeightZ;
 
         // Decode per-face occlusion from the 6-bit mask
+        uint finalOcclusion = (finalLightWord >> 8u) & 0x3Fu;
         bool isOccluded = false;
         if (N.x > 0.5) { isOccluded = ((finalOcclusion & 1u) != 0u); }
         else if (N.x < -0.5) { isOccluded = ((finalOcclusion & 2u) != 0u); }
@@ -373,16 +375,25 @@ void main() {
         else if (N.y < -0.5) { isOccluded = ((finalOcclusion & 8u) != 0u); }
         else if (N.z > 0.5) { isOccluded = ((finalOcclusion & 16u) != 0u); }
         else if (N.z < -0.5) { isOccluded = ((finalOcclusion & 32u) != 0u); }
-        
-        bool isRedLight = ((finalOcclusion & 64u) != 0u);
-        vec3 lightTint = isRedLight ? vec3(1.0, 0.4, 0.4) : vec3(1.0, 0.98, 0.90);
-        
+
+        // Colored flood-fill light: the BFS propagates three channels, so
+        // the local light *chroma* comes straight from the atlas instead of
+        // a binary red/white flag. Falls back to a warm white where unlit.
+        vec3 lightRgb = vec3(
+            float((finalLightWord >> 16u) & 0xFu),
+            float((finalLightWord >> 20u) & 0xFu),
+            float((finalLightWord >> 24u) & 0xFu)
+        ) * (1.0 / 15.0);
+        float maxChannel = max(lightRgb.r, max(lightRgb.g, lightRgb.b));
+        vec3 lightTint = maxChannel > 0.001 ? lightRgb / maxChannel : vec3(1.0, 0.98, 0.90);
+
         float face_occlusion_factor = isOccluded ? 0.35 : 1.0;
-        
+
         vec3 groundColor = vec3(0.24, 0.21, 0.16);
         vec3 skyColor = vec3(0.52, 0.48, 0.40);
         vec3 ambient = mix(groundColor, skyColor, N.y * 0.5 + 0.5) * (bfs_term * face_shading_scalar * face_occlusion_factor) * edgeAO;
-        ambient *= isRedLight ? vec3(1.0, 0.7, 0.7) : vec3(1.0);
+        // Let strong colored light bleed subtly into the ambient term.
+        ambient *= mix(vec3(1.0), lightTint, 0.5 * staticLight);
         
         // 2. Beautiful Faux-Directional Room/Ceiling Lights
         // Assume a point light is roughly at the center of the nearest 10x10 cell (3 world units)
@@ -453,11 +464,18 @@ void main() {
         // 3. Fog and Vignette
         float dist = closest_t;
         float fogFactor = exp(-0.02 * dist);
-        
+
         float vignette = vUv.x * vUv.y * (1.0 - vUv.x) * (1.0 - vUv.y);
         vignette = clamp(pow(16.0 * vignette, 0.25), 0.0, 1.0);
-        
-        fragColor = vec4(mix(vec3(0.0), litColor, fogFactor * vignette), 1.0);
+
+        vec3 outColor = mix(vec3(0.0), litColor, fogFactor * vignette);
+        // Interleaved-gradient-noise dither: breaks up the 8-bit banding
+        // that fog/vignette gradients produce, which is especially visible
+        // at the reduced internal resolutions low-spec machines render at.
+        // Two fracts and a dot — far cheaper than a sin-hash.
+        float ign = fract(52.9829189 * fract(dot(gl_FragCoord.xy, vec2(0.06711056, 0.00583715))));
+        outColor += (ign - 0.5) * (1.0 / 128.0);
+        fragColor = vec4(outColor, 1.0);
     } else {
         fragColor = vec4(0.0, 0.0, 0.0, 1.0);
     }

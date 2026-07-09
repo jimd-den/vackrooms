@@ -306,7 +306,7 @@ impl SoftwareRasterizer {
                     ((c >> 8) & 0xFF) as f32,
                     (c & 0xFF) as f32,
                 ];
-                (true, (vt, color, self.atlas[t + 3] as f32))
+                (true, (vt, color, (self.atlas[t + 3] & 0xFF) as f32))
             } else {
                 (false, (0, [0.0; 3], 0.0))
             }
@@ -462,7 +462,9 @@ fn compute_mip(atlas: &[u32], i: usize, mips: &mut [MipNode], done: &mut [bool])
                     ((c >> 8) & 0xFF) as f32,
                     (c & 0xFF) as f32,
                 ],
-                light: atlas[t + 3] as f32,
+                // Bits 0-7 are the scalar level; occlusion and the RGB
+                // channels live in the higher bits (see OctreeGpuSerializer).
+                light: (atlas[t + 3] & 0xFF) as f32,
                 occupancy: 1.0,
             };
         }
@@ -548,7 +550,7 @@ mod tests {
     /// depth-2 SVO (4^3) with one solid voxel, serialized like production.
     fn one_voxel_atlas(color: u32, light: u8) -> (Vec<u32>, u32) {
         let mut svo = SparseVoxelOctree::new(2, 4.0);
-        svo.set(1, 1, 1, 1, color, light, 0);
+        svo.set(1, 1, 1, 1, color, [light; 3], 0);
         let gpu = OctreeGpuSerializer::serialize_to_gpu_data(&svo);
         (gpu.texel_data, svo.root as u32)
     }
@@ -671,8 +673,8 @@ mod tests {
     fn mip_aggregation_averages_child_colors() {
         let mut svo = SparseVoxelOctree::new(1, 2.0);
         // Two solid children: pure red + pure blue -> average purple-ish.
-        svo.set(0, 0, 0, 1, 0xFF0000, 10, 0);
-        svo.set(1, 1, 1, 1, 0x0000FF, 4, 0);
+        svo.set(0, 0, 0, 1, 0xFF0000, [10; 3], 0);
+        svo.set(1, 1, 1, 1, 0x0000FF, [4; 3], 0);
         let gpu = OctreeGpuSerializer::serialize_to_gpu_data(&svo);
         let mips = build_mips(&gpu.texel_data);
 
