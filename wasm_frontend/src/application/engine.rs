@@ -6,11 +6,11 @@
 //! No browser types appear anywhere in this file, so the whole game loop is
 //! natively unit-testable.
 
-use crate::application::atlas::{MAX_CHUNKS, build_atlas};
+use crate::application::atlas::{AtlasPool, MAX_CHUNKS, payload_rows};
 use crate::application::collision::CollisionWorld;
 use crate::application::player::{MoveIntent, Player};
 use crate::application::ports::{ChunkDraw, ChunkSourcePort, FrameParams, RendererPort};
-use crate::application::streaming::{ChunkStore, LoadedChunk, StreamingPolicy, chunk_key};
+use crate::application::streaming::{ChunkKey, ChunkStore, LoadedChunk, StreamingPolicy, chunk_key};
 
 /// Static configuration chosen by the composition root.
 #[derive(Debug, Clone, Copy)]
@@ -71,16 +71,27 @@ pub struct PerfGovernor {
     ema_frame_ms: f32,
     scale: f32,
     cooldown_frames: u32,
+    /// Frames since the last scale-up attempt (saturating).
+    frames_since_raise: u32,
+    /// While positive, scale-ups are locked out because a recent raise
+    /// immediately overloaded the GPU and had to be reverted (anti-flap).
+    raise_lockout_frames: u32,
 }
 
 impl PerfGovernor {
     const SCALES: [f32; 4] = [0.5, 0.65, 0.8, 1.0];
+    /// A drop this soon after a raise counts as a failed raise.
+    const RAISE_PROBE_FRAMES: u32 = 600;
+    /// How long a failed raise blocks further raise attempts (~1 min).
+    const RAISE_LOCKOUT_FRAMES: u32 = 3600;
 
     pub fn new() -> Self {
         Self {
             ema_frame_ms: 16.0,
             scale: 0.8,
             cooldown_frames: 0,
+            frames_since_raise: u32::MAX,
+            raise_lockout_frames: 0,
         }
     }
 
@@ -90,6 +101,8 @@ impl PerfGovernor {
 
     pub fn update(&mut self, frame_ms: f32) {
         self.ema_frame_ms = self.ema_frame_ms * 0.95 + frame_ms.clamp(0.0, 100.0) * 0.05;
+        self.frames_since_raise = self.frames_since_raise.saturating_add(1);
+        self.raise_lockout_frames = self.raise_lockout_frames.saturating_sub(1);
         if self.cooldown_frames > 0 {
             self.cooldown_frames -= 1;
             return;
@@ -99,13 +112,23 @@ impl PerfGovernor {
             .position(|&s| s == self.scale)
             .unwrap_or(2);
         if self.ema_frame_ms > 33.0 && idx > 0 {
-            // Sustained under ~30 fps: drop one resolution step.
+            // Sustained under ~30 fps: drop one resolution step. If this
+            // happens right after a raise, the raise failed — lock raises
+            // out for a while so the scale doesn't oscillate.
+            if self.frames_since_raise < Self::RAISE_PROBE_FRAMES {
+                self.raise_lockout_frames = Self::RAISE_LOCKOUT_FRAMES;
+            }
             self.scale = Self::SCALES[idx - 1];
             self.cooldown_frames = 120;
-        } else if self.ema_frame_ms < 15.0 && idx + 1 < Self::SCALES.len() {
-            // Sustained over ~66 fps: try one step up.
+        } else if self.ema_frame_ms < 17.5
+            && idx + 1 < Self::SCALES.len()
+            && self.raise_lockout_frames == 0
+        {
+            // Holding 60Hz vsync (rAF EMA floors at ~16.7 ms, so a lower
+            // threshold would never fire): probe one resolution step up.
             self.scale = Self::SCALES[idx + 1];
             self.cooldown_frames = 240;
+            self.frames_since_raise = 0;
         }
     }
 }
@@ -123,6 +146,7 @@ pub struct Engine {
     player: Player,
     policy: StreamingPolicy,
     store: ChunkStore,
+    pool: AtlasPool,
     world: CollisionWorld,
     draws: Vec<ChunkDraw>,
     atlas_nodes: usize,
@@ -153,6 +177,7 @@ impl Engine {
                 radius,
             },
             store: ChunkStore::new(),
+            pool: AtlasPool::new(),
             world: CollisionWorld::new(),
             draws: Vec::new(),
             atlas_nodes: 0,
@@ -208,6 +233,9 @@ impl Engine {
             LEVEL_BACKROOMS
         };
         self.store.retain_keys(&[]);
+        // The whole world is regenerated: drop the pool so the next stream
+        // pass relayouts and re-uploads from scratch.
+        self.pool = AtlasPool::new();
         self.world.rebuild([].iter());
         self.draws.clear();
         self.push_seconds = 0.0;
@@ -238,6 +266,21 @@ impl Engine {
 
         self.stream_chunks();
 
+        // Front-to-back chunk order: the shader marches chunks nearest-first
+        // and its per-pixel insertion sort degenerates to a single linear
+        // pass when the uniform table is already sorted by camera distance.
+        let cam = self.player.position;
+        self.draws.sort_by(|a, b| {
+            let d2 = |c: &ChunkDraw| {
+                let h = c.world_size * 0.5;
+                let dx = c.origin[0] + h - cam[0];
+                let dy = c.origin[1] + h - cam[1];
+                let dz = c.origin[2] + h - cam[2];
+                dx * dx + dy * dy + dz * dz
+            };
+            d2(a).total_cmp(&d2(b))
+        });
+
         let frame = FrameParams {
             camera_pos: self.player.position,
             yaw: self.player.yaw,
@@ -248,19 +291,32 @@ impl Engine {
     }
 
     /// Loads at most `max_loads_per_tick` missing chunks (nearest first),
-    /// evicts out-of-range ones, and rebuilds the atlas + collision world
-    /// only when the resident set actually changed.
+    /// evicts out-of-range ones, and updates the pooled atlas + collision
+    /// world only when the resident set actually changed. Newly loaded
+    /// chunks upload only their own atlas slot rows; a full re-upload only
+    /// happens on pool relayouts (first load, bigger chunks, level switch)
+    /// or on back ends without partial-update support.
     fn stream_chunks(&mut self) {
         let desired = self
             .policy
             .desired_origins(self.player.position[0], self.player.position[2]);
         let keep: Vec<_> = desired.iter().map(|&(x, z)| chunk_key(x, z)).collect();
 
+        // Free the atlas slots of chunks about to be evicted.
+        let evicted: Vec<ChunkKey> = self
+            .store
+            .iter_ordered()
+            .map(|c| chunk_key(c.origin.0, c.origin.1))
+            .filter(|k| !keep.contains(k))
+            .collect();
         let mut changed = self.store.retain_keys(&keep);
+        for key in evicted {
+            self.pool.release(key);
+        }
 
-        let mut loads = 0;
+        let mut loaded: Vec<ChunkKey> = Vec::new();
         for &(ox, oz) in &desired {
-            if loads >= self.config.max_loads_per_tick {
+            if loaded.len() >= self.config.max_loads_per_tick {
                 break;
             }
             let key = chunk_key(ox, oz);
@@ -273,21 +329,79 @@ impl Engine {
                         payload,
                     },
                 );
-                loads += 1;
+                loaded.push(key);
                 changed = true;
             }
         }
 
-        if changed {
-            let build = build_atlas(self.store.iter_ordered());
-            self.atlas_nodes = build.texels.len() / 4;
-            self.draws = build.draws;
-            self.draws.truncate(MAX_CHUNKS);
-            self.renderer.upload_atlas(&build.texels);
-
-            let boxes: Vec<_> = self.store.all_collision_boxes().copied().collect();
-            self.world.rebuild(boxes.iter());
+        if !changed {
+            return;
         }
+
+        // Size the pool for the streaming footprint and the largest chunk.
+        let num_slots = ((2 * self.policy.radius + 1).pow(2) as usize).min(MAX_CHUNKS);
+        let rows = self
+            .store
+            .iter_ordered()
+            .map(|c| payload_rows(&c.payload))
+            .max()
+            .unwrap_or(1)
+            .max(1);
+        let mut need_full = self.pool.ensure_layout(num_slots, rows);
+
+        if !need_full {
+            for &key in &loaded {
+                let uploaded = match self.pool.assign(key) {
+                    Some(slot) => {
+                        let payload = &self.store.get(key).expect("just inserted").payload;
+                        let block = self.pool.rebased_block(slot, payload);
+                        let first_row = self.pool.slot_first_row(slot) as u32;
+                        self.renderer.upload_atlas_rows(first_row, &block)
+                    }
+                    None => false,
+                };
+                if !uploaded {
+                    need_full = true;
+                    break;
+                }
+            }
+        }
+
+        if need_full {
+            let keys: Vec<ChunkKey> = self
+                .store
+                .iter_ordered()
+                .map(|c| chunk_key(c.origin.0, c.origin.1))
+                .collect();
+            for key in keys {
+                let _ = self.pool.assign(key);
+            }
+            let texels = self
+                .pool
+                .full_texels(|k| self.store.get(k).map(|c| &c.payload));
+            self.renderer.upload_atlas(&texels);
+        }
+
+        self.draws.clear();
+        for chunk in self.store.iter_ordered() {
+            let key = chunk_key(chunk.origin.0, chunk.origin.1);
+            if let Some(offset) = self.pool.node_offset_of(key) {
+                self.draws.push(ChunkDraw {
+                    origin: [chunk.origin.0, 0.0, chunk.origin.1],
+                    root_index: (offset + chunk.payload.root as usize) as i32,
+                    world_size: chunk.payload.world_size,
+                });
+            }
+        }
+        self.draws.truncate(MAX_CHUNKS);
+        self.atlas_nodes = self
+            .store
+            .iter_ordered()
+            .map(|c| c.payload.nodes.len() / 4)
+            .sum();
+
+        let boxes: Vec<_> = self.store.all_collision_boxes().copied().collect();
+        self.world.rebuild(boxes.iter());
     }
 
     pub fn player(&self) -> &Player {
@@ -324,12 +438,22 @@ mod tests {
     #[derive(Default)]
     struct RecordingRenderer {
         uploads: Rc<RefCell<Vec<usize>>>,
+        row_uploads: Rc<RefCell<Vec<u32>>>,
         draws: Rc<RefCell<Vec<usize>>>,
+        /// When true the renderer accepts partial row updates like the GPU
+        /// driver; when false it forces the full-upload fallback.
+        supports_rows: bool,
     }
 
     impl RendererPort for RecordingRenderer {
         fn upload_atlas(&mut self, texels: &[u32]) {
             self.uploads.borrow_mut().push(texels.len());
+        }
+        fn upload_atlas_rows(&mut self, first_row: u32, _texels: &[u32]) -> bool {
+            if self.supports_rows {
+                self.row_uploads.borrow_mut().push(first_row);
+            }
+            self.supports_rows
         }
         fn draw(&mut self, _frame: &FrameParams, chunks: &[ChunkDraw]) {
             self.draws.borrow_mut().push(chunks.len());
@@ -399,6 +523,30 @@ mod tests {
         assert_eq!(engine.stats().resident_chunks, 9);
         assert_eq!(uploads.borrow().len(), 5);
         assert!(engine.stats().ready);
+    }
+
+    #[test]
+    fn partial_row_uploads_replace_full_uploads_after_first_layout() {
+        let renderer = RecordingRenderer {
+            supports_rows: true,
+            ..Default::default()
+        };
+        let uploads = renderer.uploads.clone();
+        let row_uploads = renderer.row_uploads.clone();
+        let mut engine = Engine::new(
+            EngineConfig::default(),
+            Box::new(renderer),
+            Box::new(FlatChunkSource),
+        );
+        let input = InputFrame::default();
+        for _ in 0..10 {
+            engine.tick(1.0 / 60.0, &input);
+        }
+        assert_eq!(engine.stats().resident_chunks, 9);
+        // The first tick sizes the pool (full upload of 2 chunks); every
+        // later load goes through the partial row path.
+        assert_eq!(uploads.borrow().len(), 1, "exactly one full upload");
+        assert_eq!(row_uploads.borrow().len(), 7, "remaining chunks partial");
     }
 
     #[test]
@@ -495,5 +643,33 @@ mod tests {
             governor.update(50.0); // 20 fps
         }
         assert!(governor.scale() < 0.8);
+    }
+
+    #[test]
+    fn governor_raises_resolution_when_holding_60hz_vsync() {
+        let mut governor = PerfGovernor::new();
+        // rAF on a 60Hz display floors at ~16.7ms even with GPU headroom.
+        for _ in 0..600 {
+            governor.update(16.7);
+        }
+        assert_eq!(governor.scale(), 1.0, "must reach native res under vsync");
+    }
+
+    #[test]
+    fn governor_locks_out_raises_after_a_failed_probe() {
+        let mut governor = PerfGovernor::new();
+        for _ in 0..300 {
+            governor.update(16.7); // raises to 1.0 almost immediately
+        }
+        assert_eq!(governor.scale(), 1.0);
+        for _ in 0..600 {
+            governor.update(40.0); // raise fails: overloaded at 1.0
+        }
+        assert!(governor.scale() < 1.0);
+        let settled = governor.scale();
+        for _ in 0..600 {
+            governor.update(16.7); // healthy again, but inside the lockout
+        }
+        assert_eq!(governor.scale(), settled, "raise must stay locked out");
     }
 }

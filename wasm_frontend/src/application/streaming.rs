@@ -96,6 +96,10 @@ impl ChunkStore {
         self.chunks.contains_key(&key)
     }
 
+    pub fn get(&self, key: ChunkKey) -> Option<&LoadedChunk> {
+        self.chunks.get(&key)
+    }
+
     pub fn insert(&mut self, key: ChunkKey, chunk: LoadedChunk) {
         if self.chunks.insert(key, chunk).is_none() {
             self.order.push(key);

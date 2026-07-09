@@ -13,9 +13,46 @@ use vackrooms::frameworks_drivers::simple_noise::SimpleNoiseProvider;
 use vackrooms::use_cases::generate_chunk::{GenerateChunkArchitectureUseCase, GeneratorConfig};
 
 use wasm_frontend::adapters::local_chunk_source::LocalChunkSource;
-use wasm_frontend::application::atlas::build_atlas;
-use wasm_frontend::application::ports::ChunkSourcePort;
-use wasm_frontend::application::streaming::LoadedChunk;
+use wasm_frontend::application::atlas::{AtlasPool, payload_rows};
+use wasm_frontend::application::ports::{ChunkDraw, ChunkSourcePort};
+use wasm_frontend::application::streaming::{LoadedChunk, chunk_key};
+
+struct AtlasBuild {
+    texels: Vec<u32>,
+    draws: Vec<ChunkDraw>,
+}
+
+/// Merges chunks through the engine's pooled atlas, exactly like
+/// `Engine::stream_chunks` does on a relayout.
+fn build_atlas(chunks: &[LoadedChunk]) -> AtlasBuild {
+    let mut pool = AtlasPool::new();
+    let rows = chunks
+        .iter()
+        .map(|c| payload_rows(&c.payload))
+        .max()
+        .unwrap_or(1)
+        .max(1);
+    pool.ensure_layout(chunks.len(), rows);
+
+    let mut draws = Vec::new();
+    for c in chunks {
+        let key = chunk_key(c.origin.0, c.origin.1);
+        pool.assign(key).expect("pool sized for all chunks");
+        let offset = pool.node_offset_of(key).unwrap();
+        draws.push(ChunkDraw {
+            origin: [c.origin.0, 0.0, c.origin.1],
+            root_index: (offset + c.payload.root as usize) as i32,
+            world_size: c.payload.world_size,
+        });
+    }
+    let texels = pool.full_texels(|k| {
+        chunks
+            .iter()
+            .find(|c| chunk_key(c.origin.0, c.origin.1) == k)
+            .map(|c| &c.payload)
+    });
+    AtlasBuild { texels, draws }
+}
 
 #[derive(Debug, Clone, Copy)]
 #[allow(dead_code)] // `t`/`voxel_type` exist for the Debug dump on failure
@@ -249,7 +286,7 @@ fn multi_chunk_raymarch_reports_no_phantom_geometry() {
             });
         }
     }
-    let build = build_atlas(chunks.iter());
+    let build = build_atlas(&chunks);
 
     // Ground truth: rebuild each chunk's SVO exactly like LocalChunkSource.
     let svos: Vec<_> = chunks
@@ -332,7 +369,7 @@ fn pitched_rays_never_escape_through_cracks() {
             });
         }
     }
-    let build = build_atlas(chunks.iter());
+    let build = build_atlas(&chunks);
 
     let mut misses = 0usize;
     let mut total = 0usize;

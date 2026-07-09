@@ -32,9 +32,14 @@ in vec2 vUv;
 out vec4 fragColor;
 
 uniform vec3 uCameraPosition;
-uniform float uYaw;
-uniform float uPitch;
+// Camera basis vectors, precomputed once per frame on the CPU so no
+// per-pixel trigonometry is needed to build the ray.
+uniform vec3 uCamRight;
+uniform vec3 uCamUp;
+uniform vec3 uCamForward;
 uniform float uAspect;
+// tan(FOV/2); 0.767 = 75 degree default.
+uniform float uFovTan;
 
 uniform float uFaceWeightTop;
 uniform float uFaceWeightBottom;
@@ -246,23 +251,10 @@ bool raymarchSVO(
 
 void main() {
     vec2 ndc = vUv * 2.0 - 1.0;
-    // 0.767 = tan(75deg FOV / 2)
-    vec3 rd_local = normalize(vec3(ndc.x * uAspect * 0.767, ndc.y * 0.767, -1.0));
-
-    float cp = cos(uPitch);
-    float sp = sin(uPitch);
-    vec3 rd_pitched = vec3(
-        rd_local.x,
-        rd_local.y * cp - rd_local.z * sp,
-        rd_local.y * sp + rd_local.z * cp
-    );
-
-    float cy = cos(uYaw);
-    float sy = sin(uYaw);
-    vec3 rd = vec3(
-        rd_pitched.x * cy + rd_pitched.z * sy,
-        rd_pitched.y,
-        -rd_pitched.x * sy + rd_pitched.z * cy
+    vec3 rd = normalize(
+        uCamRight * (ndc.x * uAspect * uFovTan) +
+        uCamUp * (ndc.y * uFovTan) +
+        uCamForward
     );
 
     vec3 ro = uCameraPosition;

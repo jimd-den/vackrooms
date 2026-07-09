@@ -16,6 +16,8 @@ use std::cell::RefCell;
 
 thread_local! {
     static FACE_WEIGHTS: RefCell<(f32, f32, f32, f32)> = RefCell::new((0.55, 1.0, 0.8, 0.7));
+    /// tan(FOV/2). 0.767 = the 75-degree default.
+    static FOV_TAN: RefCell<f32> = RefCell::new(0.767);
 }
 
 #[wasm_bindgen]
@@ -25,6 +27,13 @@ pub fn set_face_weights(top: f32, bottom: f32, x: f32, z: f32) {
     });
 }
 
+/// Sets the vertical field of view in degrees (clamped to 40–110).
+#[wasm_bindgen]
+pub fn set_fov(degrees: f32) {
+    let half = degrees.clamp(40.0, 110.0).to_radians() * 0.5;
+    FOV_TAN.with(|f| *f.borrow_mut() = half.tan());
+}
+
 /// Row width of the node atlas texture (texels). Must match both the shader's
 /// `decodeNode` constant and the core `OctreeGpuSerializer` row padding.
 const ATLAS_WIDTH: i32 = 1024;
@@ -32,9 +41,11 @@ const ATLAS_WIDTH: i32 = 1024;
 /// Uniform locations resolved once at program link time.
 struct Uniforms {
     camera_position: Option<WebGlUniformLocation>,
-    yaw: Option<WebGlUniformLocation>,
-    pitch: Option<WebGlUniformLocation>,
+    cam_right: Option<WebGlUniformLocation>,
+    cam_up: Option<WebGlUniformLocation>,
+    cam_forward: Option<WebGlUniformLocation>,
     aspect: Option<WebGlUniformLocation>,
+    fov_tan: Option<WebGlUniformLocation>,
 
     face_weight_top: Option<WebGlUniformLocation>,
     face_weight_bottom: Option<WebGlUniformLocation>,
@@ -56,8 +67,15 @@ pub struct WebGl2Renderer {
     vao: WebGlVertexArrayObject,
     uniforms: Uniforms,
     texture: Option<WebGlTexture>,
+    /// Allocated height (rows) of the atlas texture, for bounds-checking
+    /// partial row updates.
+    texture_rows: i32,
     width: i32,
     height: i32,
+    // Reused per-frame upload buffers so the draw path never allocates.
+    origins_buf: Vec<f32>,
+    roots_buf: Vec<i32>,
+    sizes_buf: Vec<f32>,
 }
 
 impl WebGl2Renderer {
@@ -78,9 +96,11 @@ impl WebGl2Renderer {
 
         let uniforms = Uniforms {
             camera_position: gl.get_uniform_location(&program, "uCameraPosition"),
-            yaw: gl.get_uniform_location(&program, "uYaw"),
-            pitch: gl.get_uniform_location(&program, "uPitch"),
+            cam_right: gl.get_uniform_location(&program, "uCamRight"),
+            cam_up: gl.get_uniform_location(&program, "uCamUp"),
+            cam_forward: gl.get_uniform_location(&program, "uCamForward"),
             aspect: gl.get_uniform_location(&program, "uAspect"),
+            fov_tan: gl.get_uniform_location(&program, "uFovTan"),
 
             face_weight_top: gl.get_uniform_location(&program, "uFaceWeightTop"),
             face_weight_bottom: gl.get_uniform_location(&program, "uFaceWeightBottom"),
@@ -126,8 +146,12 @@ impl WebGl2Renderer {
             vao,
             uniforms,
             texture: None,
+            texture_rows: 0,
             width,
             height,
+            origins_buf: Vec::with_capacity(MAX_CHUNKS * 3),
+            roots_buf: Vec::with_capacity(MAX_CHUNKS),
+            sizes_buf: Vec::with_capacity(MAX_CHUNKS),
         })
     }
 
@@ -180,6 +204,37 @@ impl RendererPort for WebGl2Renderer {
         gl.bind_texture(Gl::TEXTURE_2D, None);
 
         self.texture = texture;
+        self.texture_rows = height;
+    }
+
+    fn upload_atlas_rows(&mut self, first_row: u32, texels: &[u32]) -> bool {
+        let row_stride = 4 * ATLAS_WIDTH as usize;
+        let rows = texels.len() / row_stride;
+        if self.texture.is_none()
+            || rows == 0
+            || texels.len() % row_stride != 0
+            || first_row as i32 + rows as i32 > self.texture_rows
+        {
+            return false;
+        }
+        let gl = &self.gl;
+        gl.bind_texture(Gl::TEXTURE_2D, self.texture.as_ref());
+        let view = js_sys::Uint32Array::from(texels);
+        let ok = gl
+            .tex_sub_image_2d_with_i32_and_i32_and_u32_and_type_and_opt_array_buffer_view(
+                Gl::TEXTURE_2D,
+                0,
+                0,
+                first_row as i32,
+                ATLAS_WIDTH,
+                rows as i32,
+                Gl::RGBA_INTEGER,
+                Gl::UNSIGNED_INT,
+                Some(&view),
+            )
+            .is_ok();
+        gl.bind_texture(Gl::TEXTURE_2D, None);
+        ok
     }
 
     fn draw(&mut self, frame: &FrameParams, chunks: &[ChunkDraw]) {
@@ -195,12 +250,18 @@ impl RendererPort for WebGl2Renderer {
             frame.camera_pos[1],
             frame.camera_pos[2],
         );
-        gl.uniform1f(self.uniforms.yaw.as_ref(), frame.yaw);
-        gl.uniform1f(self.uniforms.pitch.as_ref(), frame.pitch);
+        // Camera basis from yaw/pitch, computed once per frame instead of
+        // per pixel in the fragment shader.
+        let (sp, cp) = frame.pitch.sin_cos();
+        let (sy, cy) = frame.yaw.sin_cos();
+        gl.uniform3f(self.uniforms.cam_right.as_ref(), cy, 0.0, -sy);
+        gl.uniform3f(self.uniforms.cam_up.as_ref(), sp * sy, cp, sp * cy);
+        gl.uniform3f(self.uniforms.cam_forward.as_ref(), -cp * sy, sp, -cp * cy);
         gl.uniform1f(
             self.uniforms.aspect.as_ref(),
             self.width as f32 / self.height.max(1) as f32,
         );
+        FOV_TAN.with(|f| gl.uniform1f(self.uniforms.fov_tan.as_ref(), *f.borrow()));
 
         FACE_WEIGHTS.with(|w| {
             let (top, bottom, x, z) = *w.borrow();
@@ -216,17 +277,20 @@ impl RendererPort for WebGl2Renderer {
         gl.uniform1i(self.uniforms.num_chunks.as_ref(), count as i32);
 
         if count > 0 {
-            let mut origins = Vec::with_capacity(count * 3);
-            let mut roots = Vec::with_capacity(count);
-            let mut world_sizes = Vec::with_capacity(count);
+            self.origins_buf.clear();
+            self.roots_buf.clear();
+            self.sizes_buf.clear();
             for chunk in &chunks[..count] {
-                origins.extend_from_slice(&chunk.origin);
-                roots.push(chunk.root_index);
-                world_sizes.push(chunk.world_size);
+                self.origins_buf.extend_from_slice(&chunk.origin);
+                self.roots_buf.push(chunk.root_index);
+                self.sizes_buf.push(chunk.world_size);
             }
-            gl.uniform3fv_with_f32_array(self.uniforms.chunk_origins.as_ref(), &origins);
-            gl.uniform1iv_with_i32_array(self.uniforms.chunk_root_indices.as_ref(), &roots);
-            gl.uniform1fv_with_f32_array(self.uniforms.chunk_world_sizes.as_ref(), &world_sizes);
+            gl.uniform3fv_with_f32_array(self.uniforms.chunk_origins.as_ref(), &self.origins_buf);
+            gl.uniform1iv_with_i32_array(
+                self.uniforms.chunk_root_indices.as_ref(),
+                &self.roots_buf,
+            );
+            gl.uniform1fv_with_f32_array(self.uniforms.chunk_world_sizes.as_ref(), &self.sizes_buf);
         }
 
         gl.active_texture(Gl::TEXTURE0);

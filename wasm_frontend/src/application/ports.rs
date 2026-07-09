@@ -34,6 +34,14 @@ pub trait RendererPort {
     /// node, rows of 1024 texels — see `OctreeGpuSerializer` in the core).
     fn upload_atlas(&mut self, texels: &[u32]);
 
+    /// Overwrites whole atlas rows starting at `first_row` (1024 texels per
+    /// row) without reallocating or re-uploading the rest of the atlas.
+    /// Returns `false` if the back end can't do partial updates (or has no
+    /// atlas yet), in which case the caller must fall back to `upload_atlas`.
+    fn upload_atlas_rows(&mut self, _first_row: u32, _texels: &[u32]) -> bool {
+        false
+    }
+
     /// Draws one frame: fullscreen raymarch of every chunk in `chunks`.
     fn draw(&mut self, frame: &FrameParams, chunks: &[ChunkDraw]);
 }

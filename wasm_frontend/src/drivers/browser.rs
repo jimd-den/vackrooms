@@ -76,6 +76,14 @@ impl RendererPort for DriverRenderer {
             DriverRenderer::Cpu(r) => r.upload_atlas(texels),
         }
     }
+    fn upload_atlas_rows(&mut self, first_row: u32, texels: &[u32]) -> bool {
+        match self {
+            DriverRenderer::Gpu(r) => r.upload_atlas_rows(first_row, texels),
+            // The CPU splatter rebuilds its mip pyramid from the whole
+            // atlas, so it only supports full uploads.
+            DriverRenderer::Cpu(_) => false,
+        }
+    }
     fn draw(&mut self, frame: &FrameParams, chunks: &[ChunkDraw]) {
         match self {
             DriverRenderer::Gpu(r) => r.draw(frame, chunks),
@@ -92,6 +100,9 @@ struct SharedRenderer(Rc<RefCell<DriverRenderer>>);
 impl RendererPort for SharedRenderer {
     fn upload_atlas(&mut self, texels: &[u32]) {
         self.0.borrow_mut().upload_atlas(texels);
+    }
+    fn upload_atlas_rows(&mut self, first_row: u32, texels: &[u32]) -> bool {
+        self.0.borrow_mut().upload_atlas_rows(first_row, texels)
     }
     fn draw(&mut self, frame: &FrameParams, chunks: &[ChunkDraw]) {
         self.0.borrow_mut().draw(frame, chunks);
@@ -326,7 +337,12 @@ fn run_frame_loop(
             let _ = play_msg.style().set_property("display", "block");
         }
 
-        draw_minimap(&minimap_ctx, &minimap, &engine.borrow());
+        // The minimap is a pure convenience display: redrawing its dozens of
+        // fill_rects every frame costs real CPU on low-end machines, so it
+        // refreshes at a third of the frame rate.
+        if frame_count.get() % 3 == 0 {
+            draw_minimap(&minimap_ctx, &minimap, &engine.borrow());
+        }
 
         // HUD refresh at a fixed frame cadence.
         frame_count.set(frame_count.get() + 1);
