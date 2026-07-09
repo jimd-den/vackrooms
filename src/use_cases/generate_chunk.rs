@@ -3,6 +3,10 @@ use crate::use_cases::ports::{NoiseProvider, TelemetryPort, NULL_TELEMETRY};
 use crate::domain::entities::voxel_grid::{
     VoxelGrid, VOXEL_AIR, VOXEL_WALL, VOXEL_FLOOR, VOXEL_CEILING, VOXEL_LIGHT, VOXEL_RED_WALL,
 };
+use rand::{Rng, RngExt, SeedableRng};
+use rand::rngs::StdRng;
+use crate::domain::use_cases::generate_maze::{GrowingTreeGenerator, MazeGenerator};
+use crate::domain::entities::grid::Grid;
 
 /// User-tunable knobs for the level generators. All values are multipliers
 /// around the defaults (1.0); 0 disables the feature, ~2 saturates it.
@@ -16,11 +20,22 @@ pub struct LevelTuning {
     pub atria: f32,
     /// Ceiling light panel density.
     pub lights: f32,
+    /// Dead-end and junction frequency (Growing Tree loop breaking).
+    pub junction_density: f32,
+    /// Frequency of stairs / vertical traversal generation.
+    pub stairs_density: f32,
 }
 
 impl Default for LevelTuning {
     fn default() -> Self {
-        Self { pillars: 1.0, walls: 1.0, atria: 1.0, lights: 1.0 }
+        Self { 
+            pillars: 1.0, 
+            walls: 1.0, 
+            atria: 1.0, 
+            lights: 1.0,
+            junction_density: 1.0,
+            stairs_density: 1.0,
+        }
     }
 }
 
@@ -120,6 +135,93 @@ impl RoomStamp {
         }
         Self { width, depth, data }
     }
+
+    fn storage() -> Self {
+        let width = 12;
+        let depth = 16;
+        let mut data = vec![0; width * depth];
+        for z in 2..14 {
+            data[z * width + 2] = 1;
+            data[z * width + 9] = 1;
+        }
+        Self { width, depth, data }
+    }
+
+    fn lounge() -> Self {
+        let width = 18;
+        let depth = 18;
+        let mut data = vec![0; width * depth];
+        for z in 6..12 {
+            for x in 6..12 {
+                if z == 6 || z == 11 || x == 6 || x == 11 {
+                    data[z * width + x] = 3;
+                }
+            }
+        }
+        Self { width, depth, data }
+    }
+
+    fn server_room() -> Self {
+        let width = 14;
+        let depth = 20;
+        let mut data = vec![0; width * depth];
+        for x in [3, 7, 10].iter() {
+            for z in 2..18 {
+                if z % 4 != 0 {
+                    data[z * width + x] = 2;
+                }
+            }
+        }
+        Self { width, depth, data }
+    }
+
+    fn cafeteria() -> Self {
+        let width = 24;
+        let depth = 24;
+        let mut data = vec![0; width * depth];
+        for z in [4, 10, 16, 20].iter() {
+            for x in [4, 10, 16, 20].iter() {
+                data[z * width + x] = 1;
+                data[*z * width + x + 1] = 1;
+                data[(z + 1) * width + x] = 1;
+                data[(z + 1) * width + x + 1] = 1;
+            }
+        }
+        Self { width, depth, data }
+    }
+
+    fn maintenance() -> Self {
+        let width = 10;
+        let depth = 10;
+        let mut data = vec![0; width * depth];
+        data[2 * width + 2] = 2;
+        data[2 * width + 7] = 2;
+        data[7 * width + 2] = 2;
+        data[7 * width + 7] = 2;
+        data[4 * width + 4] = 3;
+        data[4 * width + 5] = 3;
+        data[5 * width + 4] = 3;
+        data[5 * width + 5] = 3;
+        Self { width, depth, data }
+    }
+
+    fn stairway() -> Self {
+        let width = 16;
+        let depth = 16;
+        let mut data = vec![0; width * depth];
+        for z in 0..16 {
+            for x in 0..16 {
+                if x > 9 {
+                    data[z * width + x] = 4; // raised
+                } else if x == 9 {
+                    data[z * width + x] = 5; // step 2
+                } else if x == 8 {
+                    data[z * width + x] = 6; // step 1
+                }
+            }
+        }
+        Self { width, depth, data }
+    }
 }
 
 pub struct GenerateChunkArchitectureUseCase<'a> {
@@ -143,16 +245,12 @@ impl<'a> GenerateChunkArchitectureUseCase<'a> {
     pub fn execute(&self, chunk_pos: Position, seed: u32, config: GeneratorConfig) -> VoxelGrid {
         // Pluggable levels: everything except the legacy office blueprint
         // (level 1, kept inline below) goes through the LevelGenerator port.
-        if config.level != 1 {
-            use crate::use_cases::backrooms_level::BackroomsLevel;
+        if config.level == 34 { // Grassland
             use crate::use_cases::grassland_level::GrasslandLevel;
             use crate::use_cases::level_generator::{LevelGenerator, LEVEL_GRASSLAND};
 
             let start_micros = self.telemetry.now_micros();
-            let generator: &dyn LevelGenerator = match config.level {
-                LEVEL_GRASSLAND => &GrasslandLevel,
-                _ => &BackroomsLevel,
-            };
+            let generator: &dyn LevelGenerator = &GrasslandLevel;
             let mut grid = generator.generate(chunk_pos, seed, config, self.noise_provider);
             crate::domain::use_cases::calculate_lighting::calculate_voxel_lighting(&mut grid);
 
@@ -177,7 +275,7 @@ impl<'a> GenerateChunkArchitectureUseCase<'a> {
 
         let mut grid = VoxelGrid::new(width, height, depth);
 
-        // STARTING HUB OVERRIDE: Chunk (0,0) is a massive open plaza
+        // STARTING HUB OVERRIDE: Chunk (0,0) is a massive open plaza that feeds seamlessly into the maze
         if chunk_pos.x.abs() < 1.0 && chunk_pos.z.abs() < 1.0 {
             for z in 0..depth {
                 for x in 0..width {
@@ -187,313 +285,265 @@ impl<'a> GenerateChunkArchitectureUseCase<'a> {
                     // Add some scattered lights to the ceiling and floor so it's bright
                     if x > 0 && z > 0 && x % 20 == 0 && z % 20 == 0 {
                         grid.set(x, height - 1, z, VOXEL_LIGHT);
-                        grid.set(x, 0, z, VOXEL_LIGHT); // Also light up the floor
-                    }
-                    
-                    // Only put walls exactly at the absolute outer edge so you don't fall off the world if adjacent chunks aren't loaded yet
-                    if x == 0 || x == width - 1 || z == 0 || z == depth - 1 {
-                        // Leave holes for the standard corridors so it connects to other chunks!
-                        let w_f = width as f32;
-                        let d_f = depth as f32;
-                        let main_wall_x1 = (0.42 * w_f) as usize;
-                        let main_wall_x2 = (0.58 * w_f) as usize;
-                        let z_split1 = (0.23 * d_f) as usize;
-                        let z_split2 = (0.37 * d_f) as usize;
-                        let z_split3 = (0.63 * d_f) as usize;
-                        let z_split4 = (0.77 * d_f) as usize;
-                        
-                        let is_z_corridor = z >= z_split1 && z < z_split2 || z >= z_split3 && z < z_split4;
-                        let is_x_corridor = x >= main_wall_x1 && x < main_wall_x2;
-                        
-                        let is_hole = ( (x == 0 || x == width - 1) && is_z_corridor ) || 
-                                      ( (z == 0 || z == depth - 1) && is_x_corridor );
-                                      
-                        if !is_hole {
-                            for y in 1..height-1 {
-                                grid.set(x, y, z, VOXEL_WALL);
-                            }
-                        }
+                        grid.set(x, 0, z, VOXEL_LIGHT);
                     }
                 }
             }
-            
             crate::domain::use_cases::calculate_lighting::calculate_voxel_lighting(&mut grid);
             return grid;
         }
 
-        // Scale-invariant coordinate splits using fractions
-        let w_f = width as f32;
-        let d_f = depth as f32;
-
-        let main_wall_x1 = (0.42 * w_f) as usize;
-        let main_wall_x2 = (0.58 * w_f) as usize;
+        // ==========================================
+        // DYNAMIC GENERATION (Growing Tree & BSP)
+        // ==========================================
+        let mut rng = StdRng::seed_from_u64((seed as u64) ^ (chunk_pos.x.to_bits() as u64) ^ (chunk_pos.z.to_bits() as u64));
         
-        let z_split1 = (0.23 * d_f) as usize;
-        let z_split2 = (0.37 * d_f) as usize;
-        let z_split3 = (0.63 * d_f) as usize;
-        let z_split4 = (0.77 * d_f) as usize;
+        let cell_vw = (5.0 / config.voxel_scale) as usize;
+        let cell_vd = (5.0 / config.voxel_scale) as usize;
+        let cell_w = width / cell_vw;
+        let cell_d = depth / cell_vd;
+        
+        let mut abstract_grid = Grid::new(cell_w, cell_d);
+        let maze_gen = GrowingTreeGenerator {
+            junction_density: config.tuning.junction_density,
+        };
+        maze_gen.generate(&mut abstract_grid, &mut rng);
 
-        // ==========================================
-        // PASS 1: BLUEPRINT (Deterministic layout)
-        // ==========================================
-        let wall_max_y = height - 2;
-        for z in 0..depth {
-            for x in 0..width {
-                grid.set(x, 0, z, VOXEL_FLOOR);
-                grid.set(x, height - 1, z, VOXEL_CEILING);
-
-                let is_main_wall = (x == main_wall_x1 || x == main_wall_x2) && 
-                                   (z < z_split1 || (z >= z_split2 && z < z_split3) || z >= z_split4);
-                let is_branch1_wall = (x < main_wall_x1) && (z == z_split1 || z == z_split2 - 1);
-                let is_branch2_wall = (x >= main_wall_x2) && (z == z_split3 || z == z_split4 - 1);
-                
-                let is_boundary_wall = 
-                    (z == 0 && (x < main_wall_x1 + 1 || x >= main_wall_x2)) ||
-                    (z == depth - 1 && (x < main_wall_x1 + 1 || x >= main_wall_x2)) ||
-                    (x == 0 && (z < z_split1 || (z >= z_split2 && z < z_split3) || z >= z_split4)) ||
-                    (x == width - 1 && (z < z_split1 || (z >= z_split2 && z < z_split3) || z >= z_split4));
-
-                if is_main_wall || is_branch1_wall || is_branch2_wall || is_boundary_wall {
-                    for y in 1..=wall_max_y {
-                        grid.set(x, y, z, VOXEL_WALL);
+        // Organic room segmentation
+        let mut rooms = Vec::new();
+        let mut room_grid = vec![None; cell_w * cell_d];
+        
+        // Tunable parameters
+        let num_room_attempts = 15;
+        for _ in 0..num_room_attempts {
+            let cx = rng.random_range(0..cell_w);
+            let cz = rng.random_range(0..cell_d);
+            let rw = rng.random_range(1..=3);
+            let rd = rng.random_range(1..=3);
+            
+            if cx + rw <= cell_w && cz + rd <= cell_d {
+                let mut overlap = false;
+                for i in 0..rw {
+                    for j in 0..rd {
+                        if room_grid[(cz + j) * cell_w + cx + i].is_some() {
+                            overlap = true;
+                        }
                     }
-                } else {
-                    for y in 1..=wall_max_y {
-                        grid.set(x, y, z, VOXEL_AIR);
+                }
+                if !overlap {
+                    let room_id = rooms.len();
+                    for i in 0..rw {
+                        for j in 0..rd {
+                            room_grid[(cz + j) * cell_w + cx + i] = Some(room_id);
+                            if let Some(cell) = abstract_grid.get_mut(cx + i, cz + j) {
+                                if j > 0 { cell.walls[0] = false; }
+                                if i < rw - 1 { cell.walls[1] = false; }
+                                if j < rd - 1 { cell.walls[2] = false; }
+                                if i > 0 { cell.walls[3] = false; }
+                            }
+                        }
                     }
+                    rooms.push(Room {
+                        name: "Organic",
+                        x0: cx * cell_vw,
+                        x1: (cx + rw) * cell_vw - 1,
+                        z0: cz * cell_vd,
+                        z1: (cz + rd) * cell_vd - 1,
+                    });
                 }
             }
         }
 
-        // Carve doorways
-        let d_z1 = (0.14 * d_f) as usize;
-        let d_z2 = (0.50 * d_f) as usize;
-        let d_z3 = (0.85 * d_f) as usize;
-        let d_z4 = (0.35 * d_f) as usize;
-        let d_z5 = (0.85 * d_f) as usize;
+        // Draw abstract grid to VoxelGrid
+        let wall_max_y = height - 2;
+        for cz in 0..cell_d {
+            for cx in 0..cell_w {
+                let cell = abstract_grid.get(cx, cz).unwrap();
+                let v_x0 = cx * cell_vw;
+                let v_z0 = cz * cell_vd;
+                let v_x1 = v_x0 + cell_vw - 1;
+                let v_z1 = v_z0 + cell_vd - 1;
 
-        self.carve_doorway(&mut grid, main_wall_x1, d_z1, 1, wall_max_y);
-        self.carve_doorway(&mut grid, main_wall_x1, d_z2, 1, wall_max_y);
-        self.carve_doorway(&mut grid, main_wall_x1, d_z3, 1, wall_max_y);
-        self.carve_doorway(&mut grid, main_wall_x2, d_z4, 1, wall_max_y);
-        self.carve_doorway(&mut grid, main_wall_x2, d_z5, 1, wall_max_y);
+                // Floors and Ceilings
+                for vx in v_x0..=v_x1 {
+                    for vz in v_z0..=v_z1 {
+                        grid.set(vx, 0, vz, VOXEL_FLOOR);
+                        grid.set(vx, height - 1, vz, VOXEL_CEILING);
+                    }
+                }
+                
+                // South Wall (z1)
+                if cz < cell_d - 1 {
+                    let same_room = room_grid[cz * cell_w + cx] == room_grid[(cz + 1) * cell_w + cx] 
+                        && room_grid[cz * cell_w + cx].is_some();
+                    
+                    if !same_room {
+                        let width_choice = rng.random_range(0..100);
+                        let hole_units = if width_choice < 15 { 1.2 } else if width_choice < 85 { 2.0 } else { 3.5 };
+                        let hole_w = (hole_units / config.voxel_scale) as usize;
+                        let min_offset = (0.5 / config.voxel_scale) as usize;
+                        let max_offset = cell_vw.saturating_sub(hole_w + min_offset);
+                        let offset = if max_offset > min_offset { rng.random_range(min_offset..max_offset) } else { min_offset };
+                        let hole_x0 = v_x0 + offset;
+                        let hole_x1 = hole_x0 + hole_w;
 
-        // Room interior stamp placement
-        let rooms = vec![
-            Room { name: "Room 1", x0: 1, x1: main_wall_x1 - 1, z0: 1, z1: z_split1 - 1 },
-            Room { name: "Room 2", x0: 1, x1: main_wall_x1 - 1, z0: z_split2, z1: z_split3 - 1 },
-            Room { name: "Room 3", x0: 1, x1: main_wall_x1 - 1, z0: z_split4, z1: depth - 2 },
-            Room { name: "Room 4", x0: main_wall_x2 + 1, x1: width - 2, z0: 1, z1: z_split3 - 1 },
-            Room { name: "Room 5", x0: main_wall_x2 + 1, x1: width - 2, z0: z_split4, z1: depth - 2 },
-        ];
+                        for vx in v_x0..=v_x1 {
+                            if cell.walls[2] || vx < hole_x0 || vx >= hole_x1 {
+                                for y in 1..=wall_max_y { grid.set(vx, y, v_z1, VOXEL_WALL); }
+                            }
+                        }
+                    }
+                } else if cz == cell_d - 1 {
+                    // Chunk boundary (force holes for connectivity)
+                    let hole_w = (2.0 / config.voxel_scale) as usize;
+                    let hole_x0 = v_x0 + cell_vw / 2 - hole_w / 2;
+                    for vx in v_x0..=v_x1 {
+                        let is_hole = vx >= hole_x0 && vx < hole_x0 + hole_w;
+                        if !is_hole {
+                            for y in 1..=wall_max_y { grid.set(vx, y, v_z1, VOXEL_WALL); }
+                        }
+                    }
+                }
 
+                // East Wall (x1)
+                if cx < cell_w - 1 {
+                    let same_room = room_grid[cz * cell_w + cx] == room_grid[cz * cell_w + cx + 1] 
+                        && room_grid[cz * cell_w + cx].is_some();
+                    
+                    if !same_room {
+                        let width_choice = rng.random_range(0..100);
+                        let hole_units = if width_choice < 15 { 1.2 } else if width_choice < 85 { 2.0 } else { 3.5 };
+                        let hole_w = (hole_units / config.voxel_scale) as usize;
+                        let min_offset = (0.5 / config.voxel_scale) as usize;
+                        let max_offset = cell_vd.saturating_sub(hole_w + min_offset);
+                        let offset = if max_offset > min_offset { rng.random_range(min_offset..max_offset) } else { min_offset };
+                        let hole_z0 = v_z0 + offset;
+                        let hole_z1 = hole_z0 + hole_w;
+
+                        for vz in v_z0..=v_z1 {
+                            if cell.walls[1] || vz < hole_z0 || vz >= hole_z1 {
+                                for y in 1..=wall_max_y { grid.set(v_x1, y, vz, VOXEL_WALL); }
+                            }
+                        }
+                    }
+                } else if cx == cell_w - 1 {
+                    let hole_w = (2.0 / config.voxel_scale) as usize;
+                    let hole_z0 = v_z0 + cell_vd / 2 - hole_w / 2;
+                    for vz in v_z0..=v_z1 {
+                        let is_hole = vz >= hole_z0 && vz < hole_z0 + hole_w;
+                        if !is_hole {
+                            for y in 1..=wall_max_y { grid.set(v_x1, y, vz, VOXEL_WALL); }
+                        }
+                    }
+                }
+            }
+        }
+        
+        // Chunk Boundaries (North and West)
+        for cz in 0..cell_d {
+            let cell = abstract_grid.get(0, cz).unwrap();
+            let v_z0 = cz * cell_vd;
+            let v_z1 = v_z0 + cell_vd - 1;
+            let hole_w = (2.0 / config.voxel_scale) as usize;
+            let hole_z0 = v_z0 + cell_vd / 2 - hole_w / 2;
+            for vz in v_z0..=v_z1 {
+                let is_hole = vz >= hole_z0 && vz < hole_z0 + hole_w;
+                if !is_hole {
+                    for y in 1..=wall_max_y { grid.set(0, y, vz, VOXEL_WALL); }
+                }
+            }
+        }
+        for cx in 0..cell_w {
+            let cell = abstract_grid.get(cx, 0).unwrap();
+            let v_x0 = cx * cell_vw;
+            let v_x1 = v_x0 + cell_vw - 1;
+            let hole_w = (2.0 / config.voxel_scale) as usize;
+            let hole_x0 = v_x0 + cell_vw / 2 - hole_w / 2;
+            for vx in v_x0..=v_x1 {
+                let is_hole = vx >= hole_x0 && vx < hole_x0 + hole_w;
+                if !is_hole {
+                    for y in 1..=wall_max_y { grid.set(vx, y, 0, VOXEL_WALL); }
+                }
+            }
+        }
+
+
+
+        // Apply Room Stamps to generated rooms
         let stamps = vec![
             RoomStamp::cubicles(),
             RoomStamp::showroom(),
             RoomStamp::waiting(),
+            RoomStamp::storage(),
+            RoomStamp::lounge(),
+            RoomStamp::server_room(),
+            RoomStamp::cafeteria(),
+            RoomStamp::maintenance(),
+            RoomStamp::stairway(),
         ];
-
+        
         for room in &rooms {
-            let stamp = match room.name {
-                "Room 2" => &stamps[0], // Cubicles
-                "Room 4" => &stamps[1], // Showroom
-                _ => &stamps[2],        // Waiting
-            };
-
-            let spacing = (6.0 * (config.voxel_scale / 0.1)) as usize;
-            let mut start_x = room.x0 + spacing;
-            while start_x + stamp.width <= room.x1.saturating_sub(spacing) {
-                let mut start_z = room.z0 + spacing;
-                while start_z + stamp.depth <= room.z1.saturating_sub(spacing) {
-                    if self.validate_stamp_placement(&grid, room, stamp, start_x, start_z) {
-                        self.place_stamp(&mut grid, stamp, start_x, start_z);
-                    }
-                    start_z += stamp.depth + spacing;
+            let mut possible_stamps = Vec::new();
+            for stamp in &stamps {
+                let max_stamps_w = (room.x1 - room.x0) / stamp.width.max(1);
+                let max_stamps_d = (room.z1 - room.z0) / stamp.depth.max(1);
+                if max_stamps_w > 0 && max_stamps_d > 0 {
+                    possible_stamps.push(stamp);
                 }
-                start_x += stamp.width + spacing;
             }
-        }
-
-        // Lights
-        for room in &rooms {
+            if !possible_stamps.is_empty() {
+                let mut stamp = possible_stamps[rng.random_range(0..possible_stamps.len())];
+                
+                // Low-frequency stairs chance override
+                if rng.random_bool(0.15 * (config.tuning.stairs_density as f64)) {
+                    stamp = &stamps[8]; // stairway
+                }
+                
+                let spacing = (6.0 * (config.voxel_scale / 0.1)) as usize;
+                let mut start_x = room.x0 + spacing;
+                while start_x + stamp.width <= room.x1.saturating_sub(spacing) {
+                    let mut start_z = room.z0 + spacing;
+                    while start_z + stamp.depth <= room.z1.saturating_sub(spacing) {
+                        if self.validate_stamp_placement(&grid, room, stamp, start_x, start_z) {
+                            self.place_stamp(&mut grid, stamp, start_x, start_z);
+                        }
+                        start_z += stamp.depth + spacing;
+                    }
+                    start_x += stamp.width + spacing;
+                }
+            }
+            
+            // Basic room lighting
             let cx = (room.x0 + room.x1) / 2;
             let mut z = room.z0 + 8;
-            while z <= room.z1 - 8 {
+            while z <= room.z1.saturating_sub(8) {
                 grid.set(cx, height - 1, z, VOXEL_LIGHT);
                 z += 12;
             }
-
-            if room.x1 - room.x0 > 50 {
-                let cx1 = room.x0 + (room.x1 - room.x0) / 4;
-                let cx2 = room.x0 + 3 * (room.x1 - room.x0) / 4;
-                let mut z = room.z0 + 8;
-                while z <= room.z1 - 8 {
-                    grid.set(cx1, height - 1, z, VOXEL_LIGHT);
-                    grid.set(cx2, height - 1, z, VOXEL_LIGHT);
-                    z += 12;
+        }
+        
+        // Basic corridor lighting
+        for cz in (8..depth).step_by(16) {
+            for cx in (8..width).step_by(16) {
+                if grid.get(cx, height - 1, cz) == VOXEL_CEILING && grid.get(cx, 1, cz) == VOXEL_AIR {
+                    grid.set(cx, height - 1, cz, VOXEL_LIGHT);
                 }
             }
         }
 
-        // Corridor light runs
-        let mut cz = 8;
-        let corridor_x = (0.50 * w_f) as usize;
-        while cz < depth - 8 {
-            grid.set(corridor_x, height - 1, cz, VOXEL_LIGHT);
-            cz += 16;
-        }
-
-        // ==========================================
-        // PASS 2: UNCANNY EROSION (Noise-driven)
-        // ==========================================
-        let mut mutated_grid = VoxelGrid::new(width, height, depth);
-        for z in 0..depth {
-            for x in 0..width {
-                for y in 0..height {
-                    mutated_grid.set(x, y, z, grid.get(x, y, z));
-                }
-
-                for y in 1..height {
-                    let current = grid.get(x, y, z);
-                    let noise_val = self.noise_provider.evaluate_2d(
-                        seed,
-                        Position::new(
-                            x as f32 + (y as f32 * 31.415) + (chunk_pos.x * 23.5),
-                            z as f32 + (chunk_pos.z * 23.5)
-                        )
-                    );
-
-                    if current == VOXEL_WALL && y > 0 && y < height - 1 {
-                        if noise_val > 0.94 {
-                            mutated_grid.set(x, y, z, VOXEL_RED_WALL);
-                        }
-                    }
-
-                    if current == VOXEL_LIGHT {
-                        if noise_val > 0.80 {
-                            mutated_grid.set(x, y, z, VOXEL_CEILING);
-                        }
-                    }
-
-                    if current == VOXEL_CEILING && y == height - 1 {
-                        if noise_val > 0.90 {
-                            mutated_grid.set(x, y - 1, z, VOXEL_CEILING);
-                            mutated_grid.set(x, y, z, VOXEL_WALL);
-                        }
-                    }
-                }
-
-                if z > 0 && z < depth - 1 && x > 0 && x < width - 1 {
-                    if grid.get(x, 1, z) == VOXEL_WALL {
-                        let neighbors = [
-                            grid.get(x + 1, 1, z) == VOXEL_WALL,
-                            grid.get(x - 1, 1, z) == VOXEL_WALL,
-                            grid.get(x, 1, z + 1) == VOXEL_WALL,
-                            grid.get(x, 1, z - 1) == VOXEL_WALL,
-                        ];
-                        let _walls_count = neighbors.iter().filter(|&&v| v).count();
-                        if false { // Disabled to prevent wall gaps and player blockages from column thickening
-                            let mut h = 1;
-                            while h < height - 1 && grid.get(x, h + 1, z) == VOXEL_WALL {
-                                h += 1;
-                            }
-                            
-                            if h <= 16 {
-                                let noise_val = self.noise_provider.evaluate_2d(
-                                    seed.wrapping_add(x as u32),
-                                    Position::new(
-                                        x as f32 + (chunk_pos.x * 23.5),
-                                        z as f32 + (chunk_pos.z * 23.5)
-                                    )
-                                );
-                                if noise_val > 0.75 {
-                                    let offset = if neighbors[0] { (-1, 0) }
-                                                 else if neighbors[1] { (1, 0) }
-                                                 else if neighbors[2] { (0, -1) }
-                                                 else { (0, 1) };
-                                    let tx = (x as isize + offset.0) as usize;
-                                    let tz = (z as isize + offset.1) as usize;
-                                    if grid.get(tx, 1, tz) == VOXEL_AIR {
-                                        for y in 1..=h {
-                                            mutated_grid.set(tx, y, tz, VOXEL_WALL);
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        // E. Doorway closure check
-        let doorways = vec![
-            (main_wall_x1, d_z1),
-            (main_wall_x1, d_z2),
-            (main_wall_x1, d_z3),
-            (main_wall_x2, d_z4),
-            (main_wall_x2, d_z5),
-        ];
-        for &(cx, cz) in &doorways {
-            let noise_val = self.noise_provider.evaluate_2d(
-                seed.wrapping_add(99),
-                Position::new(cx as f32 + (chunk_pos.x * 23.5), cz as f32 + (chunk_pos.z * 23.5))
-            );
-            if noise_val > 0.88 {
-                let mut test_grid = VoxelGrid::new(width, height, depth);
-                for tz in 0..depth {
-                    for ty in 0..height {
-                        for tx in 0..width {
-                            test_grid.set(tx, ty, tz, mutated_grid.get(tx, ty, tz));
-                        }
-                    }
-                }
-                
-                for ty in 1..=wall_max_y {
-                    test_grid.set(cx, ty, cz, VOXEL_WALL);
-                    test_grid.set(cx, ty, cz + 1, VOXEL_WALL);
-                    test_grid.set(cx, ty, cz + 2, VOXEL_WALL);
-                    test_grid.set(cx, ty, cz + 3, VOXEL_WALL);
-                    test_grid.set(cx, ty, cz + 4, VOXEL_WALL);
-                    test_grid.set(cx, ty, cz + 5, VOXEL_WALL);
-                }
-
-                if self.validate_global_walkability(&test_grid, corridor_x, main_wall_x1, main_wall_x2, d_z1, d_z2, d_z3, d_z4, d_z5) {
-                    for ty in 1..=wall_max_y {
-                        mutated_grid.set(cx, ty, cz, VOXEL_WALL);
-                        mutated_grid.set(cx, ty, cz + 1, VOXEL_WALL);
-                        mutated_grid.set(cx, ty, cz + 2, VOXEL_WALL);
-                        mutated_grid.set(cx, ty, cz + 3, VOXEL_WALL);
-                        mutated_grid.set(cx, ty, cz + 4, VOXEL_WALL);
-                        mutated_grid.set(cx, ty, cz + 5, VOXEL_WALL);
-                    }
-                }
-            }
-        }
 
         // ==========================================
         // LIGHTING PROPAGATION (BFS Flood fill only)
         // ==========================================
-        crate::domain::use_cases::calculate_lighting::calculate_voxel_lighting(&mut mutated_grid);
+        crate::domain::use_cases::calculate_lighting::calculate_voxel_lighting(&mut grid);
 
         let elapsed_micros = self.telemetry.now_micros().saturating_sub(start_micros);
         self.telemetry.log(&format!(
             "[TELEMETRY] execute completed. Duration={}us, OutputVoxelGridSize={}x{}x{}",
-            elapsed_micros, mutated_grid.width(), mutated_grid.height(), mutated_grid.depth()
+            elapsed_micros, grid.width(), grid.height(), grid.depth()
         ));
 
-        mutated_grid
-    }
-
-    fn carve_doorway(&self, grid: &mut VoxelGrid, x: usize, z: usize, y0: usize, y1: usize) {
-        for y in y0..=y1 {
-            grid.set(x, y, z, VOXEL_AIR);
-        }
-        for dz in 1..6 {
-            for y in y0..=y1 {
-                grid.set(x, y, z + dz, VOXEL_AIR);
-            }
-        }
+        grid
     }
 
     fn validate_stamp_placement(
@@ -514,179 +564,45 @@ impl<'a> GenerateChunkArchitectureUseCase<'a> {
                 let vx = start_x + lx;
                 let vz = start_z + lz;
                 if stamp.data[lz * stamp.width + lx] > 0 {
-                    if grid.get(vx, 1, vz) != VOXEL_AIR {
+                    if grid.get(vx, 1, vz) != VOXEL_AIR && grid.get(vx, 1, vz) != VOXEL_FLOOR {
                         return false;
                     }
                 }
             }
         }
-
-        let mut temp_grid = VoxelGrid::new(grid.width(), grid.height(), grid.depth());
-        for z in 0..grid.depth() {
-            for y in 0..grid.height() {
-                for x in 0..grid.width() {
-                    temp_grid.set(x, y, z, grid.get(x, y, z));
-                }
-            }
-        }
-
-        for lz in 0..stamp.depth {
-            for lx in 0..stamp.width {
-                let vx = start_x + lx;
-                let vz = start_z + lz;
-                let t = stamp.data[lz * stamp.width + lx];
-                if t == 1 {
-                    for y in 1..=16 { temp_grid.set(vx, y, vz, VOXEL_WALL); }
-                } else if t == 2 {
-                    for y in 1..=28 { temp_grid.set(vx, y, vz, VOXEL_WALL); }
-                } else if t == 3 {
-                    for y in 1..=10 { temp_grid.set(vx, y, vz, VOXEL_WALL); }
-                }
-            }
-        }
-
-        let mut d_x = 0;
-        let mut d_z = 0;
-        let mut found = false;
-
-        for z in room.z0..room.z1 {
-            if temp_grid.get(room.x0 - 1, 1, z) == VOXEL_AIR {
-                d_x = room.x0 - 1;
-                d_z = z;
-                found = true;
-                break;
-            }
-            if temp_grid.get(room.x1, 1, z) == VOXEL_AIR {
-                d_x = room.x1;
-                d_z = z;
-                found = true;
-                break;
-            }
-        }
-
-        if !found {
-            return false;
-        }
-
-        let mut total_empty = 0;
-        for z in room.z0..room.z1 {
-            for x in room.x0..room.x1 {
-                if temp_grid.get(x, 1, z) == VOXEL_AIR {
-                    total_empty += 1;
-                }
-            }
-        }
-
-        let mut visited = vec![vec![false; grid.depth()]; grid.width()];
-        let mut queue = std::collections::VecDeque::new();
-        queue.push_back((d_x, d_z));
-        visited[d_x][d_z] = true;
-
-        let mut reached = 0;
-
-        while let Some((cx, cz)) = queue.pop_front() {
-            let dirs = [(1, 0), (-1, 0), (0, 1), (0, -1)];
-            for &(dx, dz) in &dirs {
-                let nx = cx as isize + dx;
-                let nz = cz as isize + dz;
-                if nx >= (room.x0 - 1) as isize && nx <= room.x1 as isize &&
-                   nz >= (room.z0 - 1) as isize && nz <= room.z1 as isize {
-                    let nx = nx as usize;
-                    let nz = nz as usize;
-                    if !visited[nx][nz] && temp_grid.get(nx, 1, nz) == VOXEL_AIR {
-                        visited[nx][nz] = true;
-                        queue.push_back((nx, nz));
-                        if nx >= room.x0 && nx < room.x1 && nz >= room.z0 && nz < room.z1 {
-                            reached += 1;
-                        }
-                    }
-                }
-            }
-        }
-
-        if total_empty == 0 { return true; }
-        let ratio = (reached as f32) / (total_empty as f32);
-        ratio >= 0.8
+        
+        true
     }
 
     fn place_stamp(&self, grid: &mut VoxelGrid, stamp: &RoomStamp, start_x: usize, start_z: usize) {
-        for lz in 0..stamp.depth {
-            for lx in 0..stamp.width {
-                let vx = start_x + lx;
-                let vz = start_z + lz;
-                let t = stamp.data[lz * stamp.width + lx];
-                if t == 1 {
-                    for y in 1..=16 { grid.set(vx, y, vz, VOXEL_WALL); }
-                } else if t == 2 {
-                    for y in 1..=28 { grid.set(vx, y, vz, VOXEL_WALL); }
-                } else if t == 3 {
-                    for y in 1..=10 { grid.set(vx, y, vz, VOXEL_WALL); }
-                }
-            }
-        }
-    }
-
-    fn validate_global_walkability(
-        &self,
-        grid: &VoxelGrid,
-        corridor_x: usize,
-        main_wall_x1: usize,
-        main_wall_x2: usize,
-        d_z1: usize,
-        d_z2: usize,
-        d_z3: usize,
-        d_z4: usize,
-        d_z5: usize,
-    ) -> bool {
-        let w = grid.width();
-        let d = grid.depth();
-        let mut visited = vec![vec![false; d]; w];
-        let mut queue = std::collections::VecDeque::new();
-        
-        let start_x = corridor_x;
-        let start_z = 0;
-        queue.push_back((start_x, start_z));
-        visited[start_x][start_z] = true;
-        
-        let mut reached_targets = 0;
-        let targets = vec![
-            (corridor_x, d - 1),
-            (0, (0.3 * d as f32) as usize),
-            (w - 1, (0.7 * d as f32) as usize),
-            (main_wall_x1, d_z1),
-            (main_wall_x1, d_z2),
-            (main_wall_x1, d_z3),
-            (main_wall_x2, d_z4),
-            (main_wall_x2, d_z5),
-        ];
-
-        while let Some((cx, cz)) = queue.pop_front() {
-            for &(tx, tz) in &targets {
-                if cx == tx && cz == tz {
-                    reached_targets += 1;
-                }
-            }
-
-            if reached_targets == targets.len() {
-                return true;
-            }
-
-            let dirs = [(1, 0), (-1, 0), (0, 1), (0, -1)];
-            for &(dx, dz) in &dirs {
-                let nx = cx as isize + dx;
-                let nz = cz as isize + dz;
-                if nx >= 0 && nx < w as isize && nz >= 0 && nz < d as isize {
-                    let nx = nx as usize;
-                    let nz = nz as usize;
-                    if !visited[nx][nz] && grid.get(nx, 1, nz) == VOXEL_AIR {
-                        visited[nx][nz] = true;
-                        queue.push_back((nx, nz));
+        let max_y = grid.height() - 2;
+        for sz in 0..stamp.depth {
+            for sx in 0..stamp.width {
+                let val = stamp.data[sz * stamp.width + sx];
+                let vx = start_x + sx;
+                let vz = start_z + sz;
+                if val == 1 {
+                    for y in 1..=3 {
+                        grid.set(vx, y, vz, VOXEL_WALL);
                     }
+                } else if val == 2 {
+                    for y in 1..=max_y {
+                        grid.set(vx, y, vz, VOXEL_WALL);
+                    }
+                } else if val == 3 {
+                    for y in 1..=1 {
+                        grid.set(vx, y, vz, VOXEL_WALL);
+                    }
+                } else if val == 4 { // Raised floor
+                    grid.set(vx, 1, vz, VOXEL_FLOOR);
+                    grid.set(vx, 2, vz, VOXEL_FLOOR);
+                } else if val == 5 { // Step 1
+                    grid.set(vx, 1, vz, VOXEL_FLOOR);
+                } else if val == 6 { // Step 2
+                    // Just floor, already set
                 }
             }
         }
-        
-        false
     }
 }
 
@@ -716,93 +632,95 @@ mod tests {
     }
 
     #[test]
-    fn test_ceiling_stepping_mutation() {
-        // Mock noise provider returning high noise value to trigger ceiling step
-        let noise = MockNoiseProvider { value: 0.95 };
+    fn test_chunk_seeding_varies_output() {
+        let noise = MockNoiseProvider { value: 0.0 };
         let generator = GenerateChunkArchitectureUseCase::new(&noise);
-        let config = GeneratorConfig::low_spec().with_level(1);
-        // Generate a non-hub chunk (e.g. at 10.0, 10.0) so the mutation pass runs
-        let grid = generator.execute(Position::new(10.0, 10.0), 42, config);
+        let config = GeneratorConfig::high_spec().with_level(0);
         
-        let height = grid.height();
+        let grid1 = generator.execute(Position::new(10.0, 10.0), 42, config);
+        let grid2 = generator.execute(Position::new(10.0, 10.0), 43, config);
         
-        // Find if any mutated ceiling voxel (y = height - 2) is created underneath a wall voxel (y = height - 1)
-        let mut mutation_found = false;
-        for z in 0..grid.depth() {
-            for x in 0..grid.width() {
-                if grid.get(x, height - 2, z) == VOXEL_CEILING && grid.get(x, height - 1, z) == VOXEL_WALL {
-                    mutation_found = true;
-                    break;
+        let mut diff_count = 0;
+        for z in 0..grid1.depth() {
+            for x in 0..grid1.width() {
+                if grid1.get(x, 1, z) != grid2.get(x, 1, z) {
+                    diff_count += 1;
                 }
-            }
-            if mutation_found {
-                break;
             }
         }
         
-        assert!(mutation_found, "Expected ceiling stepping mutation to drop a ceiling voxel and insert a wall voxel under high noise conditions");
+        assert!(diff_count > 100, "Expected significant voxel differences between seeds");
     }
 
     #[test]
-    fn test_wall_thinning_carves_air_under_low_noise() {
-        // Mock noise provider returning very low noise value (< -0.75) to trigger carving
-        let noise = MockNoiseProvider { value: -0.85 };
-        let generator = GenerateChunkArchitectureUseCase::new(&noise);
-        let config = GeneratorConfig::low_spec().with_level(1);
-        let grid = generator.execute(Position::new(10.0, 10.0), 42, config);
-
-        let generator_no_carve = GenerateChunkArchitectureUseCase::new(&MockNoiseProvider { value: 0.0 });
-        let grid_no_carve = generator_no_carve.execute(Position::new(10.0, 10.0), 42, config);
+    fn test_junction_density_increases_connections() {
+        use crate::domain::use_cases::generate_maze::{GrowingTreeGenerator, MazeGenerator};
+        use crate::domain::entities::grid::Grid;
+        use rand::rngs::StdRng;
+        use rand::SeedableRng;
         
-        let mut walls_no_carve = 0;
-        for z in 0..grid_no_carve.depth() {
-            for x in 0..grid_no_carve.width() {
-                if grid_no_carve.get(x, 1, z) == VOXEL_WALL {
-                    walls_no_carve += 1;
+        let mut grid_low = Grid::new(20, 20);
+        let mut rng1 = StdRng::seed_from_u64(42);
+        let gen_low = GrowingTreeGenerator { junction_density: 0.5 };
+        gen_low.generate(&mut grid_low, &mut rng1);
+        
+        let mut grid_high = Grid::new(20, 20);
+        let mut rng2 = StdRng::seed_from_u64(42);
+        let gen_high = GrowingTreeGenerator { junction_density: 2.0 };
+        gen_high.generate(&mut grid_high, &mut rng2);
+        
+        let mut open_low = 0;
+        let mut open_high = 0;
+        
+        for z in 0..20 {
+            for x in 0..20 {
+                if let Some(cell) = grid_low.get(x, z) {
+                    open_low += cell.walls.iter().filter(|&&w| !w).count();
+                }
+                if let Some(cell) = grid_high.get(x, z) {
+                    open_high += cell.walls.iter().filter(|&&w| !w).count();
                 }
             }
         }
         
-        let mut walls_carved = 0;
-        for z in 0..grid.depth() {
-            for x in 0..grid.width() {
-                if grid.get(x, 1, z) == VOXEL_WALL {
-                    walls_carved += 1;
-                }
-            }
-        }
-        
-        assert_eq!(walls_carved, walls_no_carve, "Expected wall carving to be disabled, so carved walls ({}) should equal walls_no_carve ({})", walls_carved, walls_no_carve);
+        assert!(open_high > open_low, "Expected higher junction density to produce more open walls ({} vs {})", open_high, open_low);
     }
 
     #[test]
-    fn test_wall_thickening_is_disabled() {
-        let noise = MockNoiseProvider { value: 0.85 };
+    fn test_stairs_density_scaling() {
+        let noise = MockNoiseProvider { value: 0.0 };
         let generator = GenerateChunkArchitectureUseCase::new(&noise);
-        let config = GeneratorConfig::low_spec().with_level(1);
-        let grid = generator.execute(Position::new(10.0, 10.0), 42, config);
-
-        let generator_no_thicken = GenerateChunkArchitectureUseCase::new(&MockNoiseProvider { value: 0.0 });
-        let grid_no_thicken = generator_no_thicken.execute(Position::new(10.0, 10.0), 42, config);
         
-        let mut walls_no_thicken = 0;
-        for z in 0..grid_no_thicken.depth() {
-            for x in 0..grid_no_thicken.width() {
-                if grid_no_thicken.get(x, 1, z) == VOXEL_WALL {
-                    walls_no_thicken += 1;
+        let mut config_zero = GeneratorConfig::high_spec().with_level(0);
+        config_zero.tuning.stairs_density = 0.0;
+        
+        let mut config_high = GeneratorConfig::high_spec().with_level(0);
+        config_high.tuning.stairs_density = 3.0;
+        
+        let mut stairs_zero_count = 0;
+        let mut stairs_high_count = 0;
+        
+        for i in 0..5 {
+            let grid_zero = generator.execute(Position::new(i as f32, 0.0), 42, config_zero);
+            for z in 0..grid_zero.depth() {
+                for x in 0..grid_zero.width() {
+                    if grid_zero.get(x, 1, z) == VOXEL_FLOOR && grid_zero.get(x, 2, z) == VOXEL_FLOOR {
+                        stairs_zero_count += 1;
+                    }
+                }
+            }
+            
+            let grid_high = generator.execute(Position::new(i as f32, 0.0), 42, config_high);
+            for z in 0..grid_high.depth() {
+                for x in 0..grid_high.width() {
+                    if grid_high.get(x, 1, z) == VOXEL_FLOOR && grid_high.get(x, 2, z) == VOXEL_FLOOR {
+                        stairs_high_count += 1;
+                    }
                 }
             }
         }
         
-        let mut walls_thickened = 0;
-        for z in 0..grid.depth() {
-            for x in 0..grid.width() {
-                if grid.get(x, 1, z) == VOXEL_WALL {
-                    walls_thickened += 1;
-                }
-            }
-        }
-        
-        assert_eq!(walls_thickened, walls_no_thicken, "Expected wall thickening to be disabled, so thickened walls ({}) should equal walls_no_thicken ({})", walls_thickened, walls_no_thicken);
+        assert_eq!(stairs_zero_count, 0, "Expected zero stairs with density 0.0");
+        assert!(stairs_high_count > 0, "Expected stairs to generate with density 3.0");
     }
 }

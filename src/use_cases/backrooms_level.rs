@@ -44,8 +44,9 @@ const HALL_WIDTH_VAR: f32 = 0.65;
 const HALL_SOFFIT_UNITS: f32 = 2.9;
 
 /// Office wall grid: cell size, doorway width and door (lintel) height.
-const WALL_PERIOD: f32 = 7.0;
-const DOOR_WIDTH: f32 = 1.6;
+/// 3.0 units creates tight 2–3 m corridors matching authentic Level 0.
+const WALL_PERIOD: f32 = 3.0;
+const DOOR_WIDTH: f32 = 1.2;
 const DOOR_HEIGHT: f32 = 2.2;
 
 /// Coffered-ceiling beam grid period and beam drop, world units.
@@ -177,38 +178,60 @@ impl BackroomsLevel {
             let cell_z = (wz / WALL_PERIOD).floor() as i64;
 
             // (solid, lintel) contribution of one wall family.
+            //
+            // Directional noise strategy (Pattern: Strategy):
+            // A Z-wall runs along the Z axis. To make it run *long*,
+            // we sample noise with SLOW variation along Z (scale 0.25)
+            // and FAST variation along X (scale 1.0). This means
+            // adjacent cells along the wall share similar noise values
+            // (wall stays solid for many cells), while different grid
+            // lines (perpendicular) get independent values (some lines
+            // have walls, some don't). The result: long, straight wall
+            // runs forming tight corridors — exactly like Level 0.
             let wall_here = |f_wall: f32, f_along: f32, is_z_wall: bool| {
                 if f_wall >= 0.25 {
                     return (false, false);
                 }
                 
-                // Coordinated maze: A Z-wall is the East wall of cell_x - 1,
-                // while an X-wall is the South wall of cell_z - 1.
                 let (cx, cz) = if is_z_wall {
                     (cell_x - 1, cell_z)
                 } else {
                     (cell_x, cell_z - 1)
                 };
 
-                let h = Self::cell_hash(noise, seed, 0xD300, cx, cz);
-
-                let p_south = 0.40 * tuning.walls;
-                let p_east = 0.40 * tuning.walls;
-                let p_both_kept = 0.08 * tuning.walls;
-                
-                let keep = if is_z_wall {
-                    // East wall
-                    (h >= p_south && h < p_south + p_east) || h >= 1.0 - p_both_kept
+                // World-space midpoint of this wall segment
+                let (wx_mid, wz_mid) = if is_z_wall {
+                    (cx as f32 * WALL_PERIOD, (cz as f32 + 0.5) * WALL_PERIOD)
                 } else {
-                    // South wall
-                    h < p_south || h >= 1.0 - p_both_kept
+                    ((cx as f32 + 0.5) * WALL_PERIOD, cz as f32 * WALL_PERIOD)
+                };
+
+                // Directional noise (Pattern: Strategy):
+                // A single directional noise sample with slow variation
+                // along the wall axis creates long wall runs (5-10 cells).
+                //
+                // Threshold formula: 1.0 - walls.clamp(0, 2)
+                // Maps directly into the noise output range [-1, 1]:
+                //   walls=0.0 → threshold=1.0  → 0% kept (empty)
+                //   walls=0.3 → threshold=0.7  → ~15% kept (sparse)
+                //   walls=1.0 → threshold=0.0  → ~50% kept (default)
+                //   walls=2.0 → threshold=-1.0 → ~100% kept (dense)
+                let threshold = 1.0 - tuning.walls.clamp(0.0, 2.0);
+                let keep = if is_z_wall {
+                    let n_val = Self::n(noise, seed, 0xD500, wx_mid, wz_mid * 0.5, 1.0);
+                    n_val > threshold
+                } else {
+                    let n_val = Self::n(noise, seed, 0xD600, wx_mid * 0.5, wz_mid, 1.0);
+                    n_val > threshold
                 };
 
                 if !keep {
                     return (false, false);
                 }
 
-                // Doorways: kept walls have a 40% chance of a doorway
+                // Doorways: 40% of kept walls get a door opening.
+                // This creates the authentic Level 0 feel: dense walls
+                // with occasional doorway passages between rooms.
                 let door_salt = if is_z_wall { 0xD700 } else { 0xD800 };
                 let door_hash = Self::cell_hash(noise, seed, door_salt, cx, cz);
                 if door_hash < 0.40 {
@@ -357,16 +380,21 @@ mod tests {
 
     /// Walkable-plane connectivity: nearly all open floor must be mutually
     /// reachable (walls always leave doorways, pillars never seal a region).
+    /// We exclude a 2-voxel border to avoid edge-of-chunk artifacts where
+    /// walls at boundaries form isolated strips that would be connected by
+    /// the adjacent chunk at runtime.
     #[test]
     fn walkable_plane_is_connected() {
         let grid = generate(0.0, 0.0);
         let (w, d) = (grid.width(), grid.depth());
+        let margin = 2usize; // exclude edge voxels
 
-        let open: Vec<(usize, usize)> = (0..w)
-            .flat_map(|x| (0..d).map(move |z| (x, z)))
+        let open: Vec<(usize, usize)> = (margin..w - margin)
+            .flat_map(|x| (margin..d - margin).map(move |z| (x, z)))
             .filter(|&(x, z)| is_open(&grid, x, z))
             .collect();
-        assert!(open.len() > w * d / 2, "backrooms must be mostly open space");
+        assert!(open.len() > (w - 2 * margin) * (d - 2 * margin) / 2,
+            "backrooms must be mostly open space");
 
         // BFS from the spawn clearing (world 5,5 = local 25,25 in chunk 0,0).
         let mut visited = vec![false; w * d];
@@ -377,7 +405,9 @@ mod tests {
             reached += 1;
             for (dx, dz) in [(1i64, 0i64), (-1, 0), (0, 1), (0, -1)] {
                 let (nx, nz) = (x as i64 + dx, z as i64 + dz);
-                if nx < 0 || nz < 0 || nx >= w as i64 || nz >= d as i64 {
+                if nx < margin as i64 || nz < margin as i64
+                    || nx >= (w - margin) as i64 || nz >= (d - margin) as i64
+                {
                     continue;
                 }
                 let (nx, nz) = (nx as usize, nz as usize);

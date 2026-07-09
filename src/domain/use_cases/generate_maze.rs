@@ -16,7 +16,9 @@ pub trait MazeGenerator {
 /// A concrete strategy for generating a maze using the Growing Tree algorithm.
 /// This algorithm produces non-linear, organic layouts suitable for the Backrooms,
 /// unlike standard depth-first search which produces long winding paths.
-pub struct GrowingTreeGenerator;
+pub struct GrowingTreeGenerator {
+    pub junction_density: f32,
+}
 
 impl MazeGenerator for GrowingTreeGenerator {
     fn generate<R: Rng + ?Sized>(&self, grid: &mut Grid, rng: &mut R) {
@@ -82,7 +84,8 @@ impl MazeGenerator for GrowingTreeGenerator {
         }
         
         // Add loops to break the "perfect maze" property and make it feel like the Backrooms
-        let extra_openings = (width * depth) / 4;
+        let base_openings = (width * depth) as f32 / 4.0;
+        let extra_openings = (base_openings * self.junction_density) as usize;
         for _ in 0..extra_openings {
             let x = rng.random_range(0..width);
             let y = rng.random_range(0..depth);
@@ -142,7 +145,7 @@ mod tests {
         let mut grid = Grid::new(10, 10);
         let mut rng = StdRng::seed_from_u64(42);
         
-        let generator = GrowingTreeGenerator;
+        let generator = GrowingTreeGenerator { junction_density: 1.0 };
         generator.generate(&mut grid, &mut rng);
         
         for y in 0..grid.depth() {
