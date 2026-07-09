@@ -62,9 +62,37 @@ impl InputCollector {
     /// Accumulates a mouse movement (only meaningful while pointer-locked).
     pub fn mouse_delta(&mut self, dx: f32, dy: f32) {
         if self.locked {
-            self.pending_dx += dx;
-            self.pending_dy += dy;
+            #[cfg(target_arch = "wasm32")]
+            let (sens, invert) = {
+                use std::sync::atomic::Ordering;
+                (
+                    f32::from_bits(crate::MOUSE_SENSITIVITY_BITS.load(Ordering::Relaxed)),
+                    crate::INVERT_Y.load(Ordering::Relaxed),
+                )
+            };
+            #[cfg(not(target_arch = "wasm32"))]
+            let (sens, invert) = (1.0f32, false);
+
+            self.pending_dx += dx * sens;
+            self.pending_dy += dy * sens * if invert { -1.0 } else { 1.0 };
         }
+    }
+
+    /// Sets movement intent from an analog source (the touch joystick).
+    /// `x` is strafe (-1..1, right positive), `y` is walk (-1..1, forward
+    /// positive). Values inside the dead zone clear the intent, so lifting
+    /// the thumb stops the player.
+    pub fn set_move_axes(&mut self, x: f32, y: f32) {
+        const DEAD_ZONE: f32 = 0.25;
+        self.intent.forward = y > DEAD_ZONE;
+        self.intent.backward = y < -DEAD_ZONE;
+        self.intent.right = x > DEAD_ZONE;
+        self.intent.left = x < -DEAD_ZONE;
+    }
+
+    /// Toggles the flashlight (touch button; keyboard uses KeyF).
+    pub fn toggle_flashlight(&mut self) {
+        self.flashlight = !self.flashlight;
     }
 
     /// Pointer lock engaged/released. Releasing clears held keys so the

@@ -27,15 +27,59 @@ pub mod application;
 pub mod drivers;
 
 #[cfg(target_arch = "wasm32")]
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 #[cfg(target_arch = "wasm32")]
 pub static DOOM_CONTROLS: AtomicBool = AtomicBool::new(false);
+
+/// Mouse look inversion (Y axis).
+#[cfg(target_arch = "wasm32")]
+pub static INVERT_Y: AtomicBool = AtomicBool::new(false);
+
+/// Mouse sensitivity multiplier, stored as f32 bits. 1.0 = default.
+#[cfg(target_arch = "wasm32")]
+pub static MOUSE_SENSITIVITY_BITS: AtomicU32 = AtomicU32::new(0x3F80_0000); // 1.0f32
+
+/// Manual internal-resolution override as f32 bits; 0.0 = automatic
+/// (adaptive governor).
+#[cfg(target_arch = "wasm32")]
+pub static RENDER_SCALE_BITS: AtomicU32 = AtomicU32::new(0);
 
 #[cfg(target_arch = "wasm32")]
 #[wasm_bindgen::prelude::wasm_bindgen]
 pub fn set_doom_controls(enabled: bool) {
     DOOM_CONTROLS.store(enabled, Ordering::Relaxed);
+}
+
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen::prelude::wasm_bindgen]
+pub fn set_invert_y(enabled: bool) {
+    INVERT_Y.store(enabled, Ordering::Relaxed);
+}
+
+/// Mouse/touch look sensitivity multiplier (clamped to 0.1–5.0).
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen::prelude::wasm_bindgen]
+pub fn set_mouse_sensitivity(multiplier: f32) {
+    let m = if multiplier.is_finite() {
+        multiplier.clamp(0.1, 5.0)
+    } else {
+        1.0
+    };
+    MOUSE_SENSITIVITY_BITS.store(m.to_bits(), Ordering::Relaxed);
+}
+
+/// Forces the internal render resolution scale (0.25–1.0), or restores the
+/// adaptive governor when `scale` is 0.
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen::prelude::wasm_bindgen]
+pub fn set_render_scale(scale: f32) {
+    let s = if scale.is_finite() && scale > 0.0 {
+        scale.clamp(0.25, 1.0)
+    } else {
+        0.0
+    };
+    RENDER_SCALE_BITS.store(s.to_bits(), Ordering::Relaxed);
 }
 
 #[cfg(target_arch = "wasm32")]

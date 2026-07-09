@@ -2,18 +2,20 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <title>Vackrooms — WASM Voxel Engine</title>
     <!--
         Thin presentation shell. All engine logic — procedural generation,
-        SVO construction, lighting, streaming, physics, WebGL2 raymarching —
-        lives in the Rust wasm module loaded at the bottom of this file.
-        The only JavaScript here is the module bootstrap.
+        SVO construction, lighting, streaming, physics, WebGL2 raymarching,
+        touch/mouse/keyboard input — lives in the Rust wasm module loaded at
+        the bottom of this file. The JavaScript here only bootstraps the
+        module and binds the settings menu to the engine's exported setters.
 
         Query flags:  ?spec=high     -> 20u chunks, 5x5 streaming, 0.1u voxels
                       ?renderer=cpu  -> CPU microvoxel splatting (no GPU/WebGL;
                                         also the automatic WebGL2 fallback)
                       (default)      -> low-spec profile, GPU raymarcher
+                      ?seed=… ?pillars= ?walls= ?atria= ?lights=
     -->
     <style>
         html, body {
@@ -25,6 +27,11 @@
             background: #000;
             font-family: 'Courier New', monospace;
             color: #d8cf9f;
+            /* Touch: the page itself never scrolls or zooms. */
+            touch-action: none;
+            -webkit-user-select: none;
+            user-select: none;
+            overscroll-behavior: none;
         }
         /* Render canvas: backing-store resolution is managed by the engine
            (adaptive scale); CSS stretches it to the full viewport. */
@@ -34,6 +41,7 @@
             width: 100%;
             height: 100%;
             image-rendering: pixelated;
+            touch-action: none;
         }
         #minimap {
             position: absolute;
@@ -54,6 +62,14 @@
             pointer-events: none;
         }
         #hud b { color: #fff3c4; }
+
+        /* Small screens: shrink the chrome so the world stays visible. */
+        @media (max-width: 700px) {
+            #minimap { width: 120px; height: 120px; top: 8px; right: 8px; }
+            #hud { font-size: 11px; padding: 5px 8px; bottom: 8px; left: 8px; }
+            #overlay h1 { font-size: 22px !important; }
+        }
+
         #overlay {
             position: absolute;
             inset: 0;
@@ -73,35 +89,70 @@
             text-shadow: 0 0 18px rgba(255, 240, 180, 0.35);
             margin-bottom: 8px;
         }
-        #overlay p { font-size: 14px; color: #9a916c; }
-        #play-msg { display: none; font-size: 16px; color: #d8cf9f; margin-bottom: 24px; }
+        #overlay p { font-size: 14px; color: #9a916c; padding: 0 16px; }
+        #play-msg { display: none; font-size: 15px; color: #d8cf9f; margin-bottom: 24px; }
+
         #settings-btn {
-            padding: 8px 16px; background: transparent; border: 1px solid #9a916c;
+            padding: 10px 20px; background: transparent; border: 1px solid #9a916c;
             color: #d8cf9f; cursor: pointer; font-family: inherit; font-size: 14px;
-            transition: all 0.2s;
+            transition: all 0.2s; min-height: 44px;
         }
         #settings-btn:hover { background: #4a4433; color: #fff3c4; }
+
+        /* Settings menu: a complete, scrollable panel. */
         #settings-menu {
             display: none; position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
-            background: #111; border: 1px solid #4a4433; padding: 24px; width: 320px;
+            background: #111; border: 1px solid #4a4433; padding: 20px 24px;
+            width: min(400px, calc(100vw - 48px));
+            max-height: min(80vh, 640px);
+            overflow-y: auto;
             z-index: 20; color: #d8cf9f; box-shadow: 0 4px 16px rgba(0,0,0,0.8);
             text-align: left; cursor: default;
+            touch-action: pan-y;   /* the menu itself may scroll */
         }
         #settings-menu h2 { margin-top: 0; color: #fff3c4; font-size: 18px; letter-spacing: 2px; }
-        .setting-row { margin-bottom: 20px; }
-        .setting-row label { display: block; margin-bottom: 6px; font-size: 14px; }
-        .setting-row select, .setting-row input { 
-            width: 100%; padding: 6px; background: #000; border: 1px solid #4a4433;
-            color: #d8cf9f; font-family: inherit; box-sizing: border-box;
+        #settings-menu h3 {
+            color: #fff3c4; font-size: 13px; letter-spacing: 2px;
+            border-bottom: 1px solid #4a4433; padding-bottom: 4px; margin: 20px 0 12px;
         }
-        .settings-actions { display: flex; gap: 8px; margin-top: 24px; }
+        .setting-row { margin-bottom: 14px; }
+        .setting-row label { display: block; margin-bottom: 6px; font-size: 13px; }
+        .setting-row .value { color: #fff3c4; float: right; }
+        .setting-row select, .setting-row input[type="text"], .setting-row input[type="number"] {
+            width: 100%; padding: 8px; background: #000; border: 1px solid #4a4433;
+            color: #d8cf9f; font-family: inherit; box-sizing: border-box; font-size: 14px;
+        }
+        .setting-row input[type="range"] { width: 100%; accent-color: #9a916c; height: 28px; }
+        .setting-row input[type="checkbox"] { width: 20px; height: 20px; accent-color: #9a916c; vertical-align: middle; }
+        .setting-row.inline label { display: inline; margin-left: 8px; }
+        .knob-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px 12px; }
+        .hint { font-size: 11px; color: #6f6851; margin: 4px 0 0; }
+        .settings-actions { display: flex; gap: 8px; margin-top: 20px; }
         .settings-actions button {
-            flex: 1; padding: 8px; background: #222; border: 1px solid #4a4433;
-            color: #fff3c4; cursor: pointer; font-family: inherit;
+            flex: 1; padding: 12px 8px; background: #222; border: 1px solid #4a4433;
+            color: #fff3c4; cursor: pointer; font-family: inherit; min-height: 44px; font-size: 13px;
         }
         .settings-actions button:hover { background: #4a4433; }
         #apply-settings-btn { background: #4a4433; }
         #apply-settings-btn:hover { background: #6b634b; }
+
+        /* Touch play chrome: shown by the engine while a touch session is
+           active. Big hit targets, corners out of the joystick zones. */
+        #touch-ui {
+            display: none;
+            position: absolute; top: 10px; left: 10px;
+            gap: 10px; z-index: 5;
+        }
+        #touch-ui button {
+            width: 52px; height: 52px; font-size: 22px;
+            background: rgba(0, 0, 0, 0.55); color: #d8cf9f;
+            border: 1px solid #4a4433; border-radius: 8px;
+            font-family: inherit; touch-action: none;
+        }
+        #touch-hint {
+            position: absolute; bottom: 10px; width: 100%; text-align: center;
+            font-size: 11px; color: rgba(216, 207, 159, 0.5); pointer-events: none;
+        }
     </style>
 </head>
 <body>
@@ -116,120 +167,223 @@
         Res scale <b id="hud-scale">—</b>
     </div>
 
+    <!-- Touch-session chrome; the wasm driver toggles its visibility. -->
+    <div id="touch-ui">
+        <button id="btn-menu" aria-label="Menu">&#9776;</button>
+        <button id="btn-flashlight" aria-label="Flashlight">&#128294;</button>
+        <div id="touch-hint">left: move &middot; right: look</div>
+    </div>
+
     <div id="overlay">
         <h1>VACKROOMS</h1>
         <p id="status-msg">Generating world in WebAssembly&hellip;</p>
-        <p id="play-msg">Click to enter &mdash; WASD to move, mouse to look, ESC to release<br><br>Press 'F' to toggle flashlight</p>
+        <p id="play-msg">
+            Click to enter &mdash; WASD move &middot; mouse look &middot; F flashlight &middot; ESC release<br>
+            <span style="color:#9a916c">Touch: tap to enter &mdash; left thumb move &middot; right thumb look</span>
+        </p>
         <button id="settings-btn" style="display: none;">Settings</button>
     </div>
 
     <div id="settings-menu">
         <h2>SETTINGS</h2>
+
+        <h3>CONTROLS</h3>
         <div class="setting-row">
-            <label for="control-scheme">Control Scheme:</label>
+            <label for="control-scheme">Control scheme</label>
             <select id="control-scheme">
-                <option value="modern">Modern (WASD Move, Mouse Look)</option>
-                <option value="doom">Doom (AD Rotate, QE Strafe)</option>
+                <option value="modern">Modern (WASD move, mouse look)</option>
+                <option value="doom">Doom (AD rotate, QE strafe)</option>
             </select>
         </div>
         <div class="setting-row">
-            <label for="setting-seed">Seed (text or number):</label>
+            <label for="setting-sensitivity">Look sensitivity <span class="value" id="sensitivity-value">1.0</span></label>
+            <input type="range" id="setting-sensitivity" min="0.2" max="3.0" step="0.1" value="1.0">
+        </div>
+        <div class="setting-row inline">
+            <input type="checkbox" id="setting-invert-y">
+            <label for="setting-invert-y">Invert Y axis</label>
+        </div>
+
+        <h3>GRAPHICS</h3>
+        <div class="setting-row">
+            <label for="setting-quality">World detail <span class="value">reload</span></label>
+            <select id="setting-quality">
+                <option value="low">Standard (0.2u voxels, 3&times;3 chunks)</option>
+                <option value="high">High (0.1u voxels, 5&times;5 chunks)</option>
+            </select>
+        </div>
+        <div class="setting-row">
+            <label for="setting-renderer">Renderer <span class="value">reload</span></label>
+            <select id="setting-renderer">
+                <option value="gpu">GPU raymarcher (WebGL2)</option>
+                <option value="cpu">CPU splatter (no GPU needed)</option>
+            </select>
+        </div>
+        <div class="setting-row">
+            <label for="setting-scale">Render scale</label>
+            <select id="setting-scale">
+                <option value="0">Auto (adaptive)</option>
+                <option value="0.5">50% — fastest</option>
+                <option value="0.65">65%</option>
+                <option value="0.8">80%</option>
+                <option value="1">100% — sharpest</option>
+            </select>
+        </div>
+        <div class="setting-row">
+            <label for="setting-fov">Field of view <span class="value" id="fov-value">75&deg;</span></label>
+            <input type="range" id="setting-fov" min="55" max="100" step="1" value="75">
+        </div>
+
+        <h3>WORLD <span style="color:#6f6851">(Apply &amp; Reload)</span></h3>
+        <div class="setting-row">
+            <label for="setting-seed">Seed (text or number)</label>
             <input type="text" id="setting-seed" placeholder="42">
         </div>
-        <div class="setting-row">
-            <label for="setting-pillars">Pillars (Multiplier):</label>
-            <input type="number" id="setting-pillars" step="0.1" min="0" max="4" value="1.0">
+        <div class="knob-grid">
+            <div class="setting-row">
+                <label for="setting-pillars">Pillars &times;</label>
+                <input type="number" id="setting-pillars" step="0.1" min="0" max="4" value="1.0">
+            </div>
+            <div class="setting-row">
+                <label for="setting-walls">Walls &times;</label>
+                <input type="number" id="setting-walls" step="0.1" min="0" max="4" value="1.0">
+            </div>
+            <div class="setting-row">
+                <label for="setting-atria">Atria &times;</label>
+                <input type="number" id="setting-atria" step="0.1" min="0" max="4" value="1.0">
+            </div>
+            <div class="setting-row">
+                <label for="setting-lights">Lights &times;</label>
+                <input type="number" id="setting-lights" step="0.1" min="0" max="4" value="1.0">
+            </div>
         </div>
-        <div class="setting-row">
-            <label for="setting-walls">Walls (Multiplier):</label>
-            <input type="number" id="setting-walls" step="0.1" min="0" max="4" value="1.0">
-        </div>
-        <div class="setting-row">
-            <label for="setting-atria">Atria (Multiplier):</label>
-            <input type="number" id="setting-atria" step="0.1" min="0" max="4" value="1.0">
-        </div>
-        <div class="setting-row">
-            <label for="setting-lights">Lights (Multiplier):</label>
-            <input type="number" id="setting-lights" step="0.1" min="0" max="4" value="1.0">
-        </div>
+        <p class="hint">Controls &amp; graphics apply instantly and persist on this device. World changes need Apply &amp; Reload.</p>
+
         <div class="settings-actions">
+            <button id="fullscreen-btn">Fullscreen</button>
             <button id="close-settings-btn">Close</button>
-            <button id="apply-settings-btn">Apply & Reload</button>
+            <button id="apply-settings-btn">Apply &amp; Reload</button>
         </div>
     </div>
 
     <script type="module">
-        import init, { set_doom_controls } from './pkg/wasm_frontend.js';
-        
-        const overlay = document.getElementById('overlay');
-        const settingsBtn = document.getElementById('settings-btn');
-        const settingsMenu = document.getElementById('settings-menu');
-        const closeSettingsBtn = document.getElementById('close-settings-btn');
-        const applySettingsBtn = document.getElementById('apply-settings-btn');
-        
-        const controlSchemeSelect = document.getElementById('control-scheme');
-        const seedInput = document.getElementById('setting-seed');
-        const pillarsInput = document.getElementById('setting-pillars');
-        const wallsInput = document.getElementById('setting-walls');
-        const atriaInput = document.getElementById('setting-atria');
-        const lightsInput = document.getElementById('setting-lights');
-        
-        // Parse URL params to populate inputs
-        const urlParams = new URLSearchParams(window.location.search);
-        if (urlParams.has('seed')) seedInput.value = urlParams.get('seed');
-        if (urlParams.has('pillars')) pillarsInput.value = urlParams.get('pillars');
-        if (urlParams.has('walls')) wallsInput.value = urlParams.get('walls');
-        if (urlParams.has('atria')) atriaInput.value = urlParams.get('atria');
-        if (urlParams.has('lights')) lightsInput.value = urlParams.get('lights');
-        
-        // Use localStorage for control scheme so it persists across reloads
-        const savedScheme = localStorage.getItem('vackrooms_controls') || 'modern';
-        controlSchemeSelect.value = savedScheme;
-        
-        let settingsOpen = false;
+        import init, {
+            set_doom_controls,
+            set_mouse_sensitivity,
+            set_invert_y,
+            set_render_scale,
+            set_fov,
+        } from './pkg/wasm_frontend.js';
 
-        settingsBtn.addEventListener('click', (e) => {
-            e.stopPropagation(); // prevent pointer lock click
-            settingsOpen = true;
-            settingsMenu.style.display = 'block';
-            overlay.style.pointerEvents = 'none'; // prevent accidental clicks in background
+        const $ = (id) => document.getElementById(id);
+        const overlay = $('overlay');
+        const settingsMenu = $('settings-menu');
+
+        // ---- Persistence -------------------------------------------------
+        // Live preferences (applied instantly, saved per device).
+        const PREFS_KEY = 'vackrooms_prefs';
+        const defaults = { scheme: 'modern', sensitivity: 1.0, invertY: false, scale: 0, fov: 75 };
+        let prefs = { ...defaults };
+        try { prefs = { ...defaults, ...JSON.parse(localStorage.getItem(PREFS_KEY) || '{}') }; } catch (_) {}
+        // Migrate the old single-key scheme store.
+        const legacyScheme = localStorage.getItem('vackrooms_controls');
+        if (legacyScheme) { prefs.scheme = legacyScheme; localStorage.removeItem('vackrooms_controls'); }
+
+        const savePrefs = () => localStorage.setItem(PREFS_KEY, JSON.stringify(prefs));
+
+        // World/graphics-profile settings travel in the URL so worlds stay
+        // shareable by link.
+        const urlParams = new URLSearchParams(window.location.search);
+
+        // ---- Populate the menu from current state -------------------------
+        $('control-scheme').value = prefs.scheme;
+        $('setting-sensitivity').value = prefs.sensitivity;
+        $('sensitivity-value').textContent = Number(prefs.sensitivity).toFixed(1);
+        $('setting-invert-y').checked = !!prefs.invertY;
+        $('setting-scale').value = String(prefs.scale);
+        $('setting-fov').value = prefs.fov;
+        $('fov-value').textContent = `${prefs.fov}°`;
+
+        $('setting-quality').value = urlParams.get('spec') === 'high' ? 'high' : 'low';
+        $('setting-renderer').value = urlParams.get('renderer') === 'cpu' ? 'cpu' : 'gpu';
+        if (urlParams.has('seed')) $('setting-seed').value = urlParams.get('seed');
+        for (const knob of ['pillars', 'walls', 'atria', 'lights']) {
+            if (urlParams.has(knob)) $(`setting-${knob}`).value = urlParams.get(knob);
+        }
+
+        // ---- Apply live preferences to the engine --------------------------
+        const applyLivePrefs = () => {
+            set_doom_controls(prefs.scheme === 'doom');
+            set_mouse_sensitivity(Number(prefs.sensitivity));
+            set_invert_y(!!prefs.invertY);
+            set_render_scale(Number(prefs.scale));
+            set_fov(Number(prefs.fov));
+        };
+
+        $('control-scheme').addEventListener('change', (e) => {
+            prefs.scheme = e.target.value; savePrefs();
+            set_doom_controls(prefs.scheme === 'doom');
         });
-        
-        closeSettingsBtn.addEventListener('click', () => {
-            settingsOpen = false;
+        $('setting-sensitivity').addEventListener('input', (e) => {
+            prefs.sensitivity = Number(e.target.value); savePrefs();
+            $('sensitivity-value').textContent = prefs.sensitivity.toFixed(1);
+            set_mouse_sensitivity(prefs.sensitivity);
+        });
+        $('setting-invert-y').addEventListener('change', (e) => {
+            prefs.invertY = e.target.checked; savePrefs();
+            set_invert_y(prefs.invertY);
+        });
+        $('setting-scale').addEventListener('change', (e) => {
+            prefs.scale = Number(e.target.value); savePrefs();
+            set_render_scale(prefs.scale);
+        });
+        $('setting-fov').addEventListener('input', (e) => {
+            prefs.fov = Number(e.target.value); savePrefs();
+            $('fov-value').textContent = `${prefs.fov}°`;
+            set_fov(prefs.fov);
+        });
+
+        // ---- Menu open/close/apply ----------------------------------------
+        $('settings-btn').addEventListener('click', (e) => {
+            e.stopPropagation(); // don't trigger pointer lock
+            settingsMenu.style.display = 'block';
+            overlay.style.pointerEvents = 'none';
+        });
+        // A tap on the button must not bubble to the overlay's tap-to-play.
+        $('settings-btn').addEventListener('touchend', (e) => e.stopPropagation());
+        $('close-settings-btn').addEventListener('click', () => {
             settingsMenu.style.display = 'none';
             overlay.style.pointerEvents = 'auto';
         });
-        
-        applySettingsBtn.addEventListener('click', () => {
+        // Clicks/taps inside the menu never reach the play overlay.
+        for (const ev of ['click', 'touchend']) {
+            settingsMenu.addEventListener(ev, (e) => e.stopPropagation());
+        }
+
+        $('fullscreen-btn').addEventListener('click', () => {
+            if (document.fullscreenElement) document.exitFullscreen();
+            else document.documentElement.requestFullscreen?.();
+        });
+
+        $('apply-settings-btn').addEventListener('click', () => {
             const params = new URLSearchParams();
-            if (seedInput.value) params.set('seed', seedInput.value);
-            if (pillarsInput.value !== '1.0') params.set('pillars', pillarsInput.value);
-            if (wallsInput.value !== '1.0') params.set('walls', wallsInput.value);
-            if (atriaInput.value !== '1.0') params.set('atria', atriaInput.value);
-            if (lightsInput.value !== '1.0') params.set('lights', lightsInput.value);
+            const seed = $('setting-seed').value.trim();
+            if (seed) params.set('seed', seed);
+            for (const knob of ['pillars', 'walls', 'atria', 'lights']) {
+                const v = $(`setting-${knob}`).value;
+                if (v !== '' && Number(v) !== 1.0) params.set(knob, v);
+            }
+            if ($('setting-quality').value === 'high') params.set('spec', 'high');
+            if ($('setting-renderer').value === 'cpu') params.set('renderer', 'cpu');
             window.location.search = params.toString();
         });
 
-        // Don't trigger pointer lock if we click inside the settings menu
-        settingsMenu.addEventListener('click', (e) => e.stopPropagation());
-
-        controlSchemeSelect.addEventListener('change', (e) => {
-            localStorage.setItem('vackrooms_controls', e.target.value);
-            if (set_doom_controls) {
-                set_doom_controls(e.target.value === 'doom');
-            }
-        });
-
+        // ---- Boot -----------------------------------------------------------
         init().then(() => {
-            settingsBtn.style.display = 'block';
-            // ensure initial state syncs
-            if (set_doom_controls) {
-                set_doom_controls(controlSchemeSelect.value === 'doom');
-            }
+            $('settings-btn').style.display = 'block';
+            applyLivePrefs();
         }).catch((err) => {
-            document.getElementById('status-msg').textContent =
-                'Failed to start engine: ' + err;
+            $('status-msg').textContent = 'Failed to start engine: ' + err;
         });
     </script>
 </body>
