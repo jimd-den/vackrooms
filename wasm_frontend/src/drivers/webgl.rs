@@ -2,7 +2,7 @@
 //! [`RendererPort`]. Owns the GL context, shader program, fullscreen quad and
 //! the RGBA32UI SVO node-atlas texture.
 
-use wasm_bindgen::{JsCast, JsValue};
+use wasm_bindgen::prelude::*;
 use web_sys::{
     HtmlCanvasElement, WebGl2RenderingContext as Gl, WebGlProgram, WebGlShader, WebGlTexture,
     WebGlUniformLocation, WebGlVertexArrayObject,
@@ -11,6 +11,19 @@ use web_sys::{
 use crate::application::atlas::MAX_CHUNKS;
 use crate::application::ports::{ChunkDraw, FrameParams, RendererPort};
 use crate::drivers::shaders::{FRAGMENT_SHADER, VERTEX_SHADER};
+
+use std::cell::RefCell;
+
+thread_local! {
+    static FACE_WEIGHTS: RefCell<(f32, f32, f32, f32)> = RefCell::new((0.55, 1.0, 0.8, 0.7));
+}
+
+#[wasm_bindgen]
+pub fn set_face_weights(top: f32, bottom: f32, x: f32, z: f32) {
+    FACE_WEIGHTS.with(|w| {
+        *w.borrow_mut() = (top, bottom, x, z);
+    });
+}
 
 /// Row width of the node atlas texture (texels). Must match both the shader's
 /// `decodeNode` constant and the core `OctreeGpuSerializer` row padding.
@@ -22,6 +35,14 @@ struct Uniforms {
     yaw: Option<WebGlUniformLocation>,
     pitch: Option<WebGlUniformLocation>,
     aspect: Option<WebGlUniformLocation>,
+
+    face_weight_top: Option<WebGlUniformLocation>,
+    face_weight_bottom: Option<WebGlUniformLocation>,
+    face_weight_x: Option<WebGlUniformLocation>,
+    face_weight_z: Option<WebGlUniformLocation>,
+
+    flashlight: Option<WebGlUniformLocation>,
+
     node_texture: Option<WebGlUniformLocation>,
     num_chunks: Option<WebGlUniformLocation>,
     chunk_origins: Option<WebGlUniformLocation>,
@@ -60,6 +81,14 @@ impl WebGl2Renderer {
             yaw: gl.get_uniform_location(&program, "uYaw"),
             pitch: gl.get_uniform_location(&program, "uPitch"),
             aspect: gl.get_uniform_location(&program, "uAspect"),
+
+            face_weight_top: gl.get_uniform_location(&program, "uFaceWeightTop"),
+            face_weight_bottom: gl.get_uniform_location(&program, "uFaceWeightBottom"),
+            face_weight_x: gl.get_uniform_location(&program, "uFaceWeightX"),
+            face_weight_z: gl.get_uniform_location(&program, "uFaceWeightZ"),
+
+            flashlight: gl.get_uniform_location(&program, "uFlashlightEnabled"),
+
             node_texture: gl.get_uniform_location(&program, "uNodeTexture"),
             num_chunks: gl.get_uniform_location(&program, "uNumChunks"),
             chunk_origins: gl.get_uniform_location(&program, "uChunkOrigins"),
@@ -78,8 +107,7 @@ impl WebGl2Renderer {
             .ok_or_else(|| JsValue::from_str("failed to create vertex buffer"))?;
         gl.bind_buffer(Gl::ARRAY_BUFFER, Some(&buffer));
         let vertices: [f32; 12] = [
-            -1.0, -1.0, 1.0, -1.0, -1.0, 1.0,
-            -1.0, 1.0, 1.0, -1.0, 1.0, 1.0,
+            -1.0, -1.0, 1.0, -1.0, -1.0, 1.0, -1.0, 1.0, 1.0, -1.0, 1.0, 1.0,
         ];
         let vertex_view = js_sys::Float32Array::from(vertices.as_slice());
         gl.buffer_data_with_array_buffer_view(Gl::ARRAY_BUFFER, &vertex_view, Gl::STATIC_DRAW);
@@ -92,7 +120,15 @@ impl WebGl2Renderer {
         let width = canvas.width() as i32;
         let height = canvas.height() as i32;
 
-        Ok(Self { gl, _program: program, vao, uniforms, texture: None, width, height })
+        Ok(Self {
+            gl,
+            _program: program,
+            vao,
+            uniforms,
+            texture: None,
+            width,
+            height,
+        })
     }
 
     /// Called by the browser driver when the canvas backing store changes
@@ -165,6 +201,16 @@ impl RendererPort for WebGl2Renderer {
             self.uniforms.aspect.as_ref(),
             self.width as f32 / self.height.max(1) as f32,
         );
+
+        FACE_WEIGHTS.with(|w| {
+            let (top, bottom, x, z) = *w.borrow();
+            gl.uniform1f(self.uniforms.face_weight_top.as_ref(), top);
+            gl.uniform1f(self.uniforms.face_weight_bottom.as_ref(), bottom);
+            gl.uniform1f(self.uniforms.face_weight_x.as_ref(), x);
+            gl.uniform1f(self.uniforms.face_weight_z.as_ref(), z);
+        });
+
+        gl.uniform1i(self.uniforms.flashlight.as_ref(), if frame.flashlight { 1 } else { 0 });
 
         let count = chunks.len().min(MAX_CHUNKS);
         gl.uniform1i(self.uniforms.num_chunks.as_ref(), count as i32);

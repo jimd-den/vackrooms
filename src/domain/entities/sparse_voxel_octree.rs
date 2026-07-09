@@ -7,6 +7,7 @@ pub enum SvoNode {
         voxel_type: u8,
         color: u32,
         light_level: u8,
+        face_occlusion: u8,
     },
     /// Internal parent node directing traversal to 8 children
     Internal {
@@ -33,6 +34,7 @@ impl SparseVoxelOctree {
             voxel_type: 0,
             color: 0,
             light_level: 0,
+            face_occlusion: 0,
         };
         Self {
             root: 0,
@@ -51,7 +53,7 @@ impl SparseVoxelOctree {
     }
 
     /// Queries the SVO for voxel attributes at integer coordinates `(x, y, z)`.
-    pub fn get(&self, x: u32, y: u32, z: u32) -> Option<(u8, u32, u8)> {
+    pub fn get(&self, x: u32, y: u32, z: u32) -> Option<(u8, u32, u8, u8)> {
         let max_coord = 1 << self.depth;
         if x >= max_coord || y >= max_coord || z >= max_coord {
             return None;
@@ -59,16 +61,29 @@ impl SparseVoxelOctree {
         self.get_recursive(self.root, x, y, z, self.depth)
     }
 
-    fn get_recursive(&self, node_idx: usize, x: u32, y: u32, z: u32, depth: u32) -> Option<(u8, u32, u8)> {
+    fn get_recursive(
+        &self,
+        node_idx: usize,
+        x: u32,
+        y: u32,
+        z: u32,
+        depth: u32,
+    ) -> Option<(u8, u32, u8, u8)> {
         if node_idx >= self.nodes.len() {
             return None;
         }
 
         match self.nodes[node_idx] {
-            SvoNode::Leaf { voxel_type, color, light_level } => {
-                Some((voxel_type, color, light_level))
-            }
-            SvoNode::Internal { child_base_index, child_mask } => {
+            SvoNode::Leaf {
+                voxel_type,
+                color,
+                light_level,
+                face_occlusion,
+            } => Some((voxel_type, color, light_level, face_occlusion)),
+            SvoNode::Internal {
+                child_base_index,
+                child_mask,
+            } => {
                 if depth == 0 {
                     return None;
                 }
@@ -81,7 +96,7 @@ impl SparseVoxelOctree {
 
                 // Check if the octant is active in the child mask
                 if (child_mask & (1 << octant_idx)) == 0 {
-                    return Some((0, 0, 0)); // Empty air
+                    return Some((0, 0, 0, 0)); // Empty air
                 }
 
                 let child_node_idx = child_base_index as usize + octant_idx as usize;
@@ -92,12 +107,31 @@ impl SparseVoxelOctree {
     }
 
     /// Sets voxel attributes at coordinate `(x, y, z)`. Splits nodes and collapses uniform subtrees recursively.
-    pub fn set(&mut self, x: u32, y: u32, z: u32, voxel_type: u8, color: u32, light_level: u8) {
+    pub fn set(
+        &mut self,
+        x: u32,
+        y: u32,
+        z: u32,
+        voxel_type: u8,
+        color: u32,
+        light_level: u8,
+        face_occlusion: u8,
+    ) {
         let max_coord = 1 << self.depth;
         if x >= max_coord || y >= max_coord || z >= max_coord {
             return;
         }
-        self.set_recursive(self.root, x, y, z, self.depth, voxel_type, color, light_level);
+        self.set_recursive(
+            self.root,
+            x,
+            y,
+            z,
+            self.depth,
+            voxel_type,
+            color,
+            light_level,
+            face_occlusion,
+        );
     }
 
     fn set_recursive(
@@ -110,10 +144,17 @@ impl SparseVoxelOctree {
         v_type: u8,
         col: u32,
         ll: u8,
+        fo: u8,
     ) {
         match self.nodes[node_idx] {
-            SvoNode::Leaf { voxel_type, color, light_level } => {
-                if voxel_type == v_type && color == col && light_level == ll {
+            SvoNode::Leaf {
+                voxel_type,
+                color,
+                light_level,
+                face_occlusion,
+            } => {
+                if voxel_type == v_type && color == col && light_level == ll && face_occlusion == fo
+                {
                     return;
                 }
 
@@ -122,6 +163,7 @@ impl SparseVoxelOctree {
                         voxel_type: v_type,
                         color: col,
                         light_level: ll,
+                        face_occlusion: fo,
                     };
                     return;
                 }
@@ -135,6 +177,7 @@ impl SparseVoxelOctree {
                         voxel_type,
                         color,
                         light_level,
+                        face_occlusion,
                     });
                 }
 
@@ -143,9 +186,12 @@ impl SparseVoxelOctree {
                     child_mask,
                 };
 
-                self.set_recursive(node_idx, x, y, z, depth, v_type, col, ll);
+                self.set_recursive(node_idx, x, y, z, depth, v_type, col, ll, fo);
             }
-            SvoNode::Internal { child_base_index, mut child_mask } => {
+            SvoNode::Internal {
+                child_base_index,
+                mut child_mask,
+            } => {
                 let bit = depth - 1;
                 let octant_x = (x >> bit) & 1;
                 let octant_y = (y >> bit) & 1;
@@ -164,7 +210,17 @@ impl SparseVoxelOctree {
                 };
 
                 let mask = (1 << bit) - 1;
-                self.set_recursive(child_node_idx, x & mask, y & mask, z & mask, depth - 1, v_type, col, ll);
+                self.set_recursive(
+                    child_node_idx,
+                    x & mask,
+                    y & mask,
+                    z & mask,
+                    depth - 1,
+                    v_type,
+                    col,
+                    ll,
+                    fo,
+                );
 
                 // Try to collapse
                 self.collapse_if_uniform(node_idx);
@@ -173,7 +229,10 @@ impl SparseVoxelOctree {
     }
 
     fn collapse_if_uniform(&mut self, node_idx: usize) {
-        if let SvoNode::Internal { child_base_index, .. } = self.nodes[node_idx] {
+        if let SvoNode::Internal {
+            child_base_index, ..
+        } = self.nodes[node_idx]
+        {
             let first_child_idx = child_base_index as usize;
             let mut uniform = true;
             let mut first_val = None;
@@ -184,25 +243,35 @@ impl SparseVoxelOctree {
                         uniform = false;
                         break;
                     }
-                    SvoNode::Leaf { voxel_type, color, light_level } => {
-                        if let Some((vt, col, ll)) = first_val {
-                            if vt != voxel_type || col != color || ll != light_level {
+                    SvoNode::Leaf {
+                        voxel_type,
+                        color,
+                        light_level,
+                        face_occlusion,
+                    } => {
+                        if let Some((vt, col, ll, fo)) = first_val {
+                            if vt != voxel_type
+                                || col != color
+                                || ll != light_level
+                                || fo != face_occlusion
+                            {
                                 uniform = false;
                                 break;
                             }
                         } else {
-                            first_val = Some((voxel_type, color, light_level));
+                            first_val = Some((voxel_type, color, light_level, face_occlusion));
                         }
                     }
                 }
             }
 
             if uniform {
-                if let Some((vt, col, ll)) = first_val {
+                if let Some((vt, col, ll, fo)) = first_val {
                     self.nodes[node_idx] = SvoNode::Leaf {
                         voxel_type: vt,
                         color: col,
                         light_level: ll,
+                        face_occlusion: fo,
                     };
                 }
             }

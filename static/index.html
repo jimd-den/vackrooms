@@ -74,7 +74,34 @@
             margin-bottom: 8px;
         }
         #overlay p { font-size: 14px; color: #9a916c; }
-        #play-msg { display: none; font-size: 16px; color: #d8cf9f; }
+        #play-msg { display: none; font-size: 16px; color: #d8cf9f; margin-bottom: 24px; }
+        #settings-btn {
+            padding: 8px 16px; background: transparent; border: 1px solid #9a916c;
+            color: #d8cf9f; cursor: pointer; font-family: inherit; font-size: 14px;
+            transition: all 0.2s;
+        }
+        #settings-btn:hover { background: #4a4433; color: #fff3c4; }
+        #settings-menu {
+            display: none; position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+            background: #111; border: 1px solid #4a4433; padding: 24px; width: 320px;
+            z-index: 20; color: #d8cf9f; box-shadow: 0 4px 16px rgba(0,0,0,0.8);
+            text-align: left; cursor: default;
+        }
+        #settings-menu h2 { margin-top: 0; color: #fff3c4; font-size: 18px; letter-spacing: 2px; }
+        .setting-row { margin-bottom: 20px; }
+        .setting-row label { display: block; margin-bottom: 6px; font-size: 14px; }
+        .setting-row select, .setting-row input { 
+            width: 100%; padding: 6px; background: #000; border: 1px solid #4a4433;
+            color: #d8cf9f; font-family: inherit; box-sizing: border-box;
+        }
+        .settings-actions { display: flex; gap: 8px; margin-top: 24px; }
+        .settings-actions button {
+            flex: 1; padding: 8px; background: #222; border: 1px solid #4a4433;
+            color: #fff3c4; cursor: pointer; font-family: inherit;
+        }
+        .settings-actions button:hover { background: #4a4433; }
+        #apply-settings-btn { background: #4a4433; }
+        #apply-settings-btn:hover { background: #6b634b; }
     </style>
 </head>
 <body>
@@ -92,12 +119,115 @@
     <div id="overlay">
         <h1>VACKROOMS</h1>
         <p id="status-msg">Generating world in WebAssembly&hellip;</p>
-        <p id="play-msg">Click to enter &mdash; WASD to move, mouse to look, ESC to release</p>
+        <p id="play-msg">Click to enter &mdash; WASD to move, mouse to look, ESC to release<br><br>Press 'F' to toggle flashlight</p>
+        <button id="settings-btn" style="display: none;">Settings</button>
+    </div>
+
+    <div id="settings-menu">
+        <h2>SETTINGS</h2>
+        <div class="setting-row">
+            <label for="control-scheme">Control Scheme:</label>
+            <select id="control-scheme">
+                <option value="modern">Modern (WASD Move, Mouse Look)</option>
+                <option value="doom">Doom (AD Rotate, QE Strafe)</option>
+            </select>
+        </div>
+        <div class="setting-row">
+            <label for="setting-seed">Seed (text or number):</label>
+            <input type="text" id="setting-seed" placeholder="42">
+        </div>
+        <div class="setting-row">
+            <label for="setting-pillars">Pillars (Multiplier):</label>
+            <input type="number" id="setting-pillars" step="0.1" min="0" max="4" value="1.0">
+        </div>
+        <div class="setting-row">
+            <label for="setting-walls">Walls (Multiplier):</label>
+            <input type="number" id="setting-walls" step="0.1" min="0" max="4" value="1.0">
+        </div>
+        <div class="setting-row">
+            <label for="setting-atria">Atria (Multiplier):</label>
+            <input type="number" id="setting-atria" step="0.1" min="0" max="4" value="1.0">
+        </div>
+        <div class="setting-row">
+            <label for="setting-lights">Lights (Multiplier):</label>
+            <input type="number" id="setting-lights" step="0.1" min="0" max="4" value="1.0">
+        </div>
+        <div class="settings-actions">
+            <button id="close-settings-btn">Close</button>
+            <button id="apply-settings-btn">Apply & Reload</button>
+        </div>
     </div>
 
     <script type="module">
-        import init from './pkg/wasm_frontend.js';
-        init().catch((err) => {
+        import init, { set_doom_controls } from './pkg/wasm_frontend.js';
+        
+        const overlay = document.getElementById('overlay');
+        const settingsBtn = document.getElementById('settings-btn');
+        const settingsMenu = document.getElementById('settings-menu');
+        const closeSettingsBtn = document.getElementById('close-settings-btn');
+        const applySettingsBtn = document.getElementById('apply-settings-btn');
+        
+        const controlSchemeSelect = document.getElementById('control-scheme');
+        const seedInput = document.getElementById('setting-seed');
+        const pillarsInput = document.getElementById('setting-pillars');
+        const wallsInput = document.getElementById('setting-walls');
+        const atriaInput = document.getElementById('setting-atria');
+        const lightsInput = document.getElementById('setting-lights');
+        
+        // Parse URL params to populate inputs
+        const urlParams = new URLSearchParams(window.location.search);
+        if (urlParams.has('seed')) seedInput.value = urlParams.get('seed');
+        if (urlParams.has('pillars')) pillarsInput.value = urlParams.get('pillars');
+        if (urlParams.has('walls')) wallsInput.value = urlParams.get('walls');
+        if (urlParams.has('atria')) atriaInput.value = urlParams.get('atria');
+        if (urlParams.has('lights')) lightsInput.value = urlParams.get('lights');
+        
+        // Use localStorage for control scheme so it persists across reloads
+        const savedScheme = localStorage.getItem('vackrooms_controls') || 'modern';
+        controlSchemeSelect.value = savedScheme;
+        
+        let settingsOpen = false;
+
+        settingsBtn.addEventListener('click', (e) => {
+            e.stopPropagation(); // prevent pointer lock click
+            settingsOpen = true;
+            settingsMenu.style.display = 'block';
+            overlay.style.pointerEvents = 'none'; // prevent accidental clicks in background
+        });
+        
+        closeSettingsBtn.addEventListener('click', () => {
+            settingsOpen = false;
+            settingsMenu.style.display = 'none';
+            overlay.style.pointerEvents = 'auto';
+        });
+        
+        applySettingsBtn.addEventListener('click', () => {
+            const params = new URLSearchParams();
+            if (seedInput.value) params.set('seed', seedInput.value);
+            if (pillarsInput.value !== '1.0') params.set('pillars', pillarsInput.value);
+            if (wallsInput.value !== '1.0') params.set('walls', wallsInput.value);
+            if (atriaInput.value !== '1.0') params.set('atria', atriaInput.value);
+            if (lightsInput.value !== '1.0') params.set('lights', lightsInput.value);
+            window.location.search = params.toString();
+        });
+
+        // Don't trigger pointer lock if we click inside the settings menu
+        settingsMenu.addEventListener('click', (e) => e.stopPropagation());
+
+        controlSchemeSelect.addEventListener('change', (e) => {
+            localStorage.setItem('vackrooms_controls', e.target.value);
+            if (set_doom_controls) {
+                set_doom_controls(e.target.value === 'doom');
+            }
+        });
+
+        init().then(() => {
+            settingsBtn.style.display = 'block';
+            // ensure initial state syncs
+            if (set_doom_controls) {
+                set_doom_controls(controlSchemeSelect.value === 'doom');
+            }
+        }).catch((err) => {
             document.getElementById('status-msg').textContent =
                 'Failed to start engine: ' + err;
         });

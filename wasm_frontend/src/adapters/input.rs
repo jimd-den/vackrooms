@@ -15,6 +15,7 @@ pub struct InputCollector {
     pending_dx: f32,
     pending_dy: f32,
     locked: bool,
+    flashlight: bool,
 }
 
 impl InputCollector {
@@ -25,12 +26,36 @@ impl InputCollector {
     /// Handles a keydown/keyup pair by `KeyboardEvent.code` value.
     /// Unknown codes are ignored. Both WASD and arrow keys are mapped.
     pub fn key_event(&mut self, code: &str, pressed: bool) {
-        match code {
-            "KeyW" | "ArrowUp" => self.intent.forward = pressed,
-            "KeyS" | "ArrowDown" => self.intent.backward = pressed,
-            "KeyA" | "ArrowLeft" => self.intent.left = pressed,
-            "KeyD" | "ArrowRight" => self.intent.right = pressed,
-            _ => {}
+        #[cfg(target_arch = "wasm32")]
+        let doom = crate::DOOM_CONTROLS.load(std::sync::atomic::Ordering::Relaxed);
+        
+        #[cfg(not(target_arch = "wasm32"))]
+        let doom = false;
+
+        if pressed && code == "KeyF" {
+            self.flashlight = !self.flashlight;
+        }
+
+        if doom {
+            match code {
+                "KeyW" | "ArrowUp" => self.intent.forward = pressed,
+                "KeyS" | "ArrowDown" => self.intent.backward = pressed,
+                "KeyQ" => self.intent.left = pressed,
+                "KeyE" => self.intent.right = pressed,
+                "KeyA" | "ArrowLeft" => self.intent.turn_left = pressed,
+                "KeyD" | "ArrowRight" => self.intent.turn_right = pressed,
+                _ => {}
+            }
+        } else {
+            match code {
+                "KeyW" | "ArrowUp" => self.intent.forward = pressed,
+                "KeyS" | "ArrowDown" => self.intent.backward = pressed,
+                "KeyA" | "ArrowLeft" => self.intent.left = pressed,
+                "KeyD" | "ArrowRight" => self.intent.right = pressed,
+                "KeyQ" => self.intent.turn_left = pressed,
+                "KeyE" => self.intent.turn_right = pressed,
+                _ => {}
+            }
         }
     }
 
@@ -65,6 +90,7 @@ impl InputCollector {
             look_dx: self.pending_dx,
             look_dy: self.pending_dy,
             locked: self.locked,
+            flashlight: self.flashlight,
         };
         self.pending_dx = 0.0;
         self.pending_dy = 0.0;

@@ -6,11 +6,11 @@
 //! No browser types appear anywhere in this file, so the whole game loop is
 //! natively unit-testable.
 
-use crate::application::atlas::{build_atlas, MAX_CHUNKS};
+use crate::application::atlas::{MAX_CHUNKS, build_atlas};
 use crate::application::collision::CollisionWorld;
 use crate::application::player::{MoveIntent, Player};
 use crate::application::ports::{ChunkDraw, ChunkSourcePort, FrameParams, RendererPort};
-use crate::application::streaming::{chunk_key, ChunkStore, LoadedChunk, StreamingPolicy};
+use crate::application::streaming::{ChunkStore, LoadedChunk, StreamingPolicy, chunk_key};
 
 /// Static configuration chosen by the composition root.
 #[derive(Debug, Clone, Copy)]
@@ -49,6 +49,7 @@ pub struct InputFrame {
     pub look_dy: f32,
     /// Whether pointer lock is engaged; movement is frozen otherwise.
     pub locked: bool,
+    pub flashlight: bool,
 }
 
 /// Snapshot for the HUD presenter.
@@ -76,7 +77,11 @@ impl PerfGovernor {
     const SCALES: [f32; 4] = [0.5, 0.65, 0.8, 1.0];
 
     pub fn new() -> Self {
-        Self { ema_frame_ms: 16.0, scale: 0.8, cooldown_frames: 0 }
+        Self {
+            ema_frame_ms: 16.0,
+            scale: 0.8,
+            cooldown_frames: 0,
+        }
     }
 
     pub fn scale(&self) -> f32 {
@@ -89,7 +94,10 @@ impl PerfGovernor {
             self.cooldown_frames -= 1;
             return;
         }
-        let idx = Self::SCALES.iter().position(|&s| s == self.scale).unwrap_or(2);
+        let idx = Self::SCALES
+            .iter()
+            .position(|&s| s == self.scale)
+            .unwrap_or(2);
         if self.ema_frame_ms > 33.0 && idx > 0 {
             // Sustained under ~30 fps: drop one resolution step.
             self.scale = Self::SCALES[idx - 1];
@@ -140,7 +148,10 @@ impl Engine {
         let radius = config.chunk_radius.clamp(0, 2); // 5x5 max = shader table size
         Self {
             player: Player::new(config.spawn),
-            policy: StreamingPolicy { chunk_size: config.chunk_size, radius },
+            policy: StreamingPolicy {
+                chunk_size: config.chunk_size,
+                radius,
+            },
             store: ChunkStore::new(),
             world: CollisionWorld::new(),
             draws: Vec::new(),
@@ -231,6 +242,7 @@ impl Engine {
             camera_pos: self.player.position,
             yaw: self.player.yaw,
             pitch: self.player.pitch,
+            flashlight: input.flashlight,
         };
         self.renderer.draw(&frame, &self.draws);
     }
@@ -254,7 +266,13 @@ impl Engine {
             let key = chunk_key(ox, oz);
             if !self.store.contains(key) {
                 let payload = self.source.load(ox, oz, self.level);
-                self.store.insert(key, LoadedChunk { origin: (ox, oz), payload });
+                self.store.insert(
+                    key,
+                    LoadedChunk {
+                        origin: (ox, oz),
+                        payload,
+                    },
+                );
                 loads += 1;
                 changed = true;
             }
@@ -326,10 +344,7 @@ mod tests {
                 root: 0,
                 nodes: [1u32, 0, 0, 0].repeat(1024), // one padded row of air leaves
                 world_size: 12.8,
-                collision: vec![Aabb::new(
-                    [origin_x, 0.0, 0.0],
-                    [origin_x + 0.2, 3.0, 0.2],
-                )],
+                collision: vec![Aabb::new([origin_x, 0.0, 0.0], [origin_x + 0.2, 3.0, 0.2])],
             }
         }
     }
@@ -368,7 +383,7 @@ mod tests {
     fn streams_multiple_chunks_per_tick_up_to_max_loads() {
         let (mut engine, uploads, _draws) = engine_with_recorder();
         let input = InputFrame::default();
-        
+
         // 9 chunks total are desired (radius 1). With max_loads_per_tick=2:
         // 2+2+2+2+1 over five ticks.
         for expected in [2usize, 4, 6, 8, 9] {
@@ -393,7 +408,11 @@ mod tests {
         for _ in 0..20 {
             engine.tick(1.0 / 60.0, &input);
         }
-        assert_eq!(uploads.borrow().len(), 5, "no uploads once resident set is stable");
+        assert_eq!(
+            uploads.borrow().len(),
+            5,
+            "no uploads once resident set is stable"
+        );
     }
 
     #[test]
@@ -412,14 +431,19 @@ mod tests {
         let mut engine = Engine::new(
             EngineConfig::default(),
             Box::new(RecordingRenderer::default()),
-            Box::new(TrappingChunkSource { levels: levels.clone() }),
+            Box::new(TrappingChunkSource {
+                levels: levels.clone(),
+            }),
         );
         assert_eq!(engine.level(), 0);
 
         // Hold forward into the wall. 20% per roll, one roll per second of
         // pushing: 120 simulated seconds without a switch is ~1e-11 likely.
         let input = InputFrame {
-            intent: crate::application::player::MoveIntent { forward: true, ..Default::default() },
+            intent: crate::application::player::MoveIntent {
+                forward: true,
+                ..Default::default()
+            },
             locked: true,
             ..Default::default()
         };
@@ -431,7 +455,11 @@ mod tests {
                 break;
             }
         }
-        assert_eq!(engine.level(), 34, "never noclipped (switched_at={switched_at:?})");
+        assert_eq!(
+            engine.level(),
+            34,
+            "never noclipped (switched_at={switched_at:?})"
+        );
         // New chunks must be requested for the grassland level.
         for _ in 0..5 {
             engine.tick(1.0 / 60.0, &input);
@@ -447,7 +475,10 @@ mod tests {
     fn walking_freely_never_noclips() {
         let (mut engine, _, _) = engine_with_recorder();
         let input = InputFrame {
-            intent: crate::application::player::MoveIntent { forward: true, ..Default::default() },
+            intent: crate::application::player::MoveIntent {
+                forward: true,
+                ..Default::default()
+            },
             locked: true,
             ..Default::default()
         };

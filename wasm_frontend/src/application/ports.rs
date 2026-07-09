@@ -23,6 +23,7 @@ pub struct FrameParams {
     pub camera_pos: [f32; 3],
     pub yaw: f32,
     pub pitch: f32,
+    pub flashlight: bool,
 }
 
 /// Abstraction over the actual rasterizer/raymarcher back end.

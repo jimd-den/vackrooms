@@ -23,7 +23,7 @@ impl SimpleNoiseProvider {
         h ^= h >> 13;
         h = h.wrapping_mul(0xC2B2AE35);
         h ^= h >> 16;
-        
+
         // Normalize to [-1.0, 1.0]
         ((h as f32) / (std::u32::MAX as f32)) * 2.0 - 1.0
     }
@@ -53,7 +53,7 @@ impl NoiseProvider for SimpleNoiseProvider {
 
         let tx = x - (x0 as f32);
         let ty = y - (y0 as f32);
-        
+
         let u = Self::smoothstep(tx);
         let v = Self::smoothstep(ty);
 
@@ -77,11 +77,11 @@ mod tests {
     fn test_noise_determinism() {
         let provider = SimpleNoiseProvider::new();
         let pos = Position::new(42.5, -17.2);
-        
+
         let val1 = provider.evaluate_2d(123, pos);
         let val2 = provider.evaluate_2d(123, pos);
         let val3 = provider.evaluate_2d(999, pos);
-        
+
         assert_eq!(val1, val2);
         assert_ne!(val1, val3);
     }

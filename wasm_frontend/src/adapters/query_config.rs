@@ -23,10 +23,15 @@ pub struct GenerationParams {
 /// Parses `window.location.search` (with or without the leading `?`).
 /// Unknown keys are ignored; malformed values fall back to defaults.
 pub fn parse_generation_params(query: &str, default_seed: u32) -> GenerationParams {
-    let mut params = GenerationParams { seed: default_seed, tuning: LevelTuning::default() };
+    let mut params = GenerationParams {
+        seed: default_seed,
+        tuning: LevelTuning::default(),
+    };
 
     for pair in query.trim_start_matches('?').split('&') {
-        let Some((key, value)) = pair.split_once('=') else { continue };
+        let Some((key, value)) = pair.split_once('=') else {
+            continue;
+        };
         let knob = |t: &mut f32| {
             if let Ok(v) = value.parse::<f32>() {
                 if v.is_finite() {

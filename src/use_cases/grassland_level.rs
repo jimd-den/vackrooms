@@ -11,7 +11,7 @@
 //! world-space coordinates so chunks tile seamlessly.
 
 use crate::domain::entities::voxel_grid::{
-    VoxelGrid, VOXEL_GRASS, VOXEL_LIGHT, VOXEL_TREE, VOXEL_WATER,
+    VOXEL_GRASS, VOXEL_LIGHT, VOXEL_TREE, VOXEL_WATER, VoxelGrid,
 };
 use crate::entities::models::Position;
 use crate::use_cases::generate_chunk::GeneratorConfig;
@@ -62,7 +62,11 @@ impl LevelGenerator for GrasslandLevel {
 
                 // Lakes: smooth blobs of the world-space noise field.
                 let lake = noise.evaluate_2d(seed ^ 0x1A5E, Position::new(wx * 0.7, wz * 0.7));
-                let ground = if lake > 0.62 { VOXEL_WATER } else { VOXEL_GRASS };
+                let ground = if lake > 0.62 {
+                    VOXEL_WATER
+                } else {
+                    VOXEL_GRASS
+                };
                 grid.set(x, 0, z, ground);
 
                 // Sky glow: an unbroken luminous layer overhead.
@@ -81,10 +85,10 @@ impl LevelGenerator for GrasslandLevel {
                 let cell_z = (wz / TREE_PERIOD).floor() as i64;
                 if Self::hash(noise, seed, 0x7EE5, cell_x, cell_z) > 0.6 && ground == VOXEL_GRASS {
                     // Trunk position jittered inside the cell.
-                    let jx = Self::hash(noise, seed, 0x7EE6, cell_x, cell_z) * (TREE_PERIOD - 2.0)
-                        + 1.0;
-                    let jz = Self::hash(noise, seed, 0x7EE7, cell_x, cell_z) * (TREE_PERIOD - 2.0)
-                        + 1.0;
+                    let jx =
+                        Self::hash(noise, seed, 0x7EE6, cell_x, cell_z) * (TREE_PERIOD - 2.0) + 1.0;
+                    let jz =
+                        Self::hash(noise, seed, 0x7EE7, cell_x, cell_z) * (TREE_PERIOD - 2.0) + 1.0;
                     let tx = cell_x as f32 * TREE_PERIOD + jx;
                     let tz = cell_z as f32 * TREE_PERIOD + jz;
                     let dx = wx - tx;
@@ -145,7 +149,10 @@ mod tests {
         }
         let total = grid.width() * grid.depth();
         assert!(grass > total / 2, "mostly grass, got {grass}/{total}");
-        assert!(open_at_eye > total * 9 / 10, "plane must be open at eye height");
+        assert!(
+            open_at_eye > total * 9 / 10,
+            "plane must be open at eye height"
+        );
     }
 
     #[test]
@@ -182,6 +189,9 @@ mod tests {
                 }
             }
         }
-        assert!(total_trees > 0, "expected at least one tree trunk in 4 chunks");
+        assert!(
+            total_trees > 0,
+            "expected at least one tree trunk in 4 chunks"
+        );
     }
 }

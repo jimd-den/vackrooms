@@ -36,6 +36,13 @@ uniform float uYaw;
 uniform float uPitch;
 uniform float uAspect;
 
+uniform float uFaceWeightTop;
+uniform float uFaceWeightBottom;
+uniform float uFaceWeightX;
+uniform float uFaceWeightZ;
+
+uniform int uFlashlightEnabled;
+
 uniform usampler2D uNodeTexture;
 uniform int uNumChunks;
 uniform vec3 uChunkOrigins[25];
@@ -95,7 +102,7 @@ bool raymarchSVO(
     int chunk_root_idx,
     float t_entry, float t_exit,
     float world_size,
-    out vec4 hitColor, out vec3 hitNormal, out bool isLight, out float hit_t
+    out vec4 hitColor, out vec3 hitNormal, out bool isLight, out uint hitVoxelType, out float hit_t, out uint hitOcclusion
 ) {
     float t = t_entry;
     vec3 p = ro + t * rd;
@@ -120,10 +127,13 @@ bool raymarchSVO(
                 float r = float((node.color >> 16) & 0xFFu) / 255.0;
                 float g = float((node.color >> 8) & 0xFFu) / 255.0;
                 float b = float(node.color & 0xFFu) / 255.0;
-                float light = float(node.lightLevel) / 15.0;
+                float light = float(node.lightLevel & 0xFFu) / 15.0;
+                uint occlusionBits = (node.lightLevel >> 8u) & 0xFFu;
 
                 hitColor = vec4(r, g, b, light);
-                isLight = (node.voxelType == 4u);
+                isLight = (node.voxelType == 4u || node.voxelType == 9u);
+                hitVoxelType = node.voxelType;
+                hitOcclusion = occlusionBits;
 
                 vec3 hit_p = ro + t * rd;
                 vec3 center = (current_min + current_max) * 0.5;
@@ -299,6 +309,8 @@ void main() {
     vec3 finalNormal = vec3(0.0);
     bool hitSolid = false;
     bool hitIsLight = false;
+    uint finalVoxelType = 0u;
+    uint finalOcclusion = 0u;
     float closest_t = 1e6;
     int hit_chunk_idx = -1;
 
@@ -309,16 +321,20 @@ void main() {
         vec4 col;
         vec3 norm;
         bool isL;
+        uint h_voxel_type;
         float h_t;
+        uint h_occlusion;
         // Literate Documentation:
         // Pass safe_rd instead of the raw direction vector rd to prevent division-by-zero and
         // resulting NaN states in SVO traversal when the view direction aligns with any coordinate axis.
         if (raymarchSVO(local_ro, safe_rd, uChunkRootIndices[i], hits[k].t_min, hits[k].t_max,
-                        uChunkWorldSizes[i], col, norm, isL, h_t)) {
+                        uChunkWorldSizes[i], col, norm, isL, h_voxel_type, h_t, h_occlusion)) {
             finalColor = col;
             finalNormal = norm;
             hitSolid = true;
             hitIsLight = isL;
+            finalVoxelType = h_voxel_type;
+            finalOcclusion = h_occlusion;
             closest_t = h_t;
             hit_chunk_idx = i;
             break;
@@ -332,9 +348,8 @@ void main() {
         vec3 N = finalNormal;
         vec3 V = -rd; // View direction pointing back to camera
         
-        // Emissive light source: render as constant white
         if (hitIsLight) {
-            fragColor = vec4(vec3(1.5), 1.0);
+            fragColor = vec4(finalColor.rgb * 1.5, 1.0);
             return;
         }
         
@@ -353,25 +368,95 @@ void main() {
         }
         
         // Brighter and warmer ambient colors for a natural Backrooms look
+        float bfs_term = 0.4 + 0.8 * staticLight; // Boosted base brightness
+        vec3 vSq = V * V;
+        float y_val = V.y > 0.0 ? uFaceWeightTop : uFaceWeightBottom;
+        float face_shading_scalar = vSq.x * uFaceWeightX + vSq.y * y_val + vSq.z * uFaceWeightZ;
+
+        // Decode per-face occlusion from the 6-bit mask
+        bool isOccluded = false;
+        if (N.x > 0.5) { isOccluded = ((finalOcclusion & 1u) != 0u); }
+        else if (N.x < -0.5) { isOccluded = ((finalOcclusion & 2u) != 0u); }
+        else if (N.y > 0.5) { isOccluded = ((finalOcclusion & 4u) != 0u); }
+        else if (N.y < -0.5) { isOccluded = ((finalOcclusion & 8u) != 0u); }
+        else if (N.z > 0.5) { isOccluded = ((finalOcclusion & 16u) != 0u); }
+        else if (N.z < -0.5) { isOccluded = ((finalOcclusion & 32u) != 0u); }
+        
+        bool isRedLight = ((finalOcclusion & 64u) != 0u);
+        vec3 lightTint = isRedLight ? vec3(1.0, 0.4, 0.4) : vec3(1.0, 0.98, 0.90);
+        
+        float face_occlusion_factor = isOccluded ? 0.35 : 1.0;
+        
         vec3 groundColor = vec3(0.24, 0.21, 0.16);
         vec3 skyColor = vec3(0.52, 0.48, 0.40);
-        vec3 ambient = mix(groundColor, skyColor, N.y * 0.5 + 0.5) * (0.45 + 0.55 * staticLight) * edgeAO;
+        vec3 ambient = mix(groundColor, skyColor, N.y * 0.5 + 0.5) * (bfs_term * face_shading_scalar * face_occlusion_factor) * edgeAO;
+        ambient *= isRedLight ? vec3(1.0, 0.7, 0.7) : vec3(1.0);
         
-        // 2. Static Room/Ceiling Lights
-        vec3 staticL = vec3(0.0, 1.0, 0.0); // Directional light from ceiling pointing down
-        float staticDiffuse = max(dot(N, staticL), 0.0) * staticLight * 0.8;
-        vec3 staticDiffuseContrib = staticDiffuse * albedo * vec3(1.0, 0.98, 0.90);
+        // 2. Beautiful Faux-Directional Room/Ceiling Lights
+        // Assume a point light is roughly at the center of the nearest 10x10 cell (3 world units)
+        vec2 cell_center = floor(local_hit_p.xz / 3.0) * 3.0 + 1.5;
+        vec3 light_pos = vec3(cell_center.x, 3.6, cell_center.y);
+        vec3 auto_L = normalize(light_pos - local_hit_p);
         
-        // Specular reflections - active on walls and ceiling, but disabled on carpet floor
-        float specularMask = 1.0 - smoothstep(0.3, 0.7, N.y);
-        vec3 staticH = normalize(staticL + V);
-        float staticSpecular = pow(max(dot(N, staticH), 0.0), 24.0) * staticLight * 0.18 * specularMask;
-        vec3 staticSpecularContrib = staticSpecular * vec3(1.0, 0.98, 0.90);
+        // Wrapped diffuse allows vertical walls to catch ambient overhead light realistically
+        float wrappedNdotL = dot(N, auto_L) * 0.5 + 0.5;
+        float staticDiffuse = wrappedNdotL * staticLight * 0.9;
+        vec3 staticDiffuseContrib = staticDiffuse * albedo * lightTint;
+        
+        // Per-voxel material lookup (Fixed mappings)
+        float roughness = 0.9;
+        float specularStrength = 0.0;
+        if (finalVoxelType == 1u) { // VOXEL_WALL
+            roughness = 0.85;
+            specularStrength = 0.02;
+        } else if (finalVoxelType == 2u) { // VOXEL_FLOOR (carpet)
+            roughness = 1.0;
+            specularStrength = 0.0; // Completely diffuse
+        } else if (finalVoxelType == 3u) { // VOXEL_CEILING
+            roughness = 0.5;
+            specularStrength = 0.15;
+        } else if (finalVoxelType == 5u) { // VOXEL_RED_WALL
+            roughness = 0.7;
+            specularStrength = 0.08;
+        } else if (finalVoxelType == 8u) { // VOXEL_TREE / PILLAR
+            roughness = 0.4;
+            specularStrength = 0.25;
+        }
+
+        // Blinn-Phong specular term modulated by per-voxel roughness
+        float shininess = mix(256.0, 4.0, roughness);
+        vec3 staticH = normalize(auto_L + V);
+        float staticSpecular = pow(max(dot(N, staticH), 0.0), shininess) * staticLight * specularStrength;
+        vec3 staticSpecularContrib = staticSpecular * lightTint;
         
         vec3 staticContrib = (staticDiffuseContrib + staticSpecularContrib) * edgeAO;
         
-        // Total Lighting (No Flashlight)
+        // Total Lighting
         vec3 litColor = albedo * ambient + staticContrib;
+        
+        if (uFlashlightEnabled == 1) {
+            // Flashlight points forward from the camera (in world space, the view direction is roughly V = -rd).
+            // L is the vector from the surface point to the light.
+            // Since the flashlight is attached to the camera, L is essentially V.
+            vec3 flashL = V;
+            
+            // Attenuation based on distance (closest_t is ray length)
+            float dist = closest_t;
+            float atten = 1.0 / (1.0 + 0.1 * dist + 0.05 * dist * dist);
+            
+            // Spotlight effect: how close is the fragment to the center of the screen?
+            // The camera forward vector in world space is roughly the center ray, but we don't have it directly.
+            // However, we can approximate the spotlight falloff by comparing 'rd' to the center ray...
+            // Actually, a simpler headlamp effect is just to use N dot V.
+            float flashNdotL = max(dot(N, flashL), 0.0);
+            vec3 flashDiffuse = albedo * flashNdotL * atten * 1.5;
+            
+            // Specular for flashlight
+            vec3 flashH = normalize(flashL + V);
+            float flashSpecular = pow(max(dot(N, flashH), 0.0), shininess) * atten * specularStrength * 1.5;
+            
+            litColor += (flashDiffuse + flashSpecular) * vec3(1.0, 0.95, 0.9);
+        }
         
         // 3. Fog and Vignette
         float dist = closest_t;

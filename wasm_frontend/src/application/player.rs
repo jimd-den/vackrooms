@@ -23,6 +23,8 @@ pub struct MoveIntent {
     pub backward: bool,
     pub left: bool,
     pub right: bool,
+    pub turn_left: bool,
+    pub turn_right: bool,
 }
 
 /// Player state. Position is the *eye* position in world space.
@@ -71,6 +73,15 @@ impl Player {
         self.vel_strafe -= self.vel_strafe * FRICTION * dt;
         self.vel_forward -= self.vel_forward * FRICTION * dt;
 
+        // Turn via keyboard (Doom controls)
+        let turn_speed = 3.0; // radians per second
+        if intent.turn_left {
+            self.yaw += turn_speed * dt;
+        }
+        if intent.turn_right {
+            self.yaw -= turn_speed * dt;
+        }
+
         let mut wish_forward = (intent.forward as i32 - intent.backward as i32) as f32;
         let mut wish_strafe = (intent.right as i32 - intent.left as i32) as f32;
         let len = (wish_forward * wish_forward + wish_strafe * wish_strafe).sqrt();
@@ -118,8 +129,20 @@ mod tests {
     fn forward_intent_moves_along_negative_z_at_zero_yaw() {
         let world = CollisionWorld::new();
         let mut p = Player::new([0.0, 1.7, 0.0]);
-        walk(&mut p, &world, MoveIntent { forward: true, ..Default::default() }, 2.0);
-        assert!(p.position[2] < -0.5, "expected forward motion, z = {}", p.position[2]);
+        walk(
+            &mut p,
+            &world,
+            MoveIntent {
+                forward: true,
+                ..Default::default()
+            },
+            2.0,
+        );
+        assert!(
+            p.position[2] < -0.5,
+            "expected forward motion, z = {}",
+            p.position[2]
+        );
         assert!(p.position[0].abs() < 1e-3);
     }
 
@@ -127,9 +150,25 @@ mod tests {
     fn speed_converges_to_terminal_velocity() {
         let world = CollisionWorld::new();
         let mut p = Player::new([0.0, 1.7, 0.0]);
-        walk(&mut p, &world, MoveIntent { forward: true, ..Default::default() }, 5.0);
+        walk(
+            &mut p,
+            &world,
+            MoveIntent {
+                forward: true,
+                ..Default::default()
+            },
+            5.0,
+        );
         let before = p.position[2];
-        walk(&mut p, &world, MoveIntent { forward: true, ..Default::default() }, 1.0);
+        walk(
+            &mut p,
+            &world,
+            MoveIntent {
+                forward: true,
+                ..Default::default()
+            },
+            1.0,
+        );
         let speed = (before - p.position[2]).abs();
         // Terminal speed = ACCELERATION / FRICTION = 2.5 u/s (was 0.5 u/s).
         assert!((speed - 2.5).abs() < 0.05, "speed was {speed}");
@@ -145,10 +184,18 @@ mod tests {
         walk(
             &mut p,
             &world,
-            MoveIntent { forward: true, right: true, ..Default::default() },
+            MoveIntent {
+                forward: true,
+                right: true,
+                ..Default::default()
+            },
             4.0,
         );
         assert!(p.position[2] > -1.5, "should be stopped by wall");
-        assert!(p.position[0] > 0.5, "should have slid along the wall, x = {}", p.position[0]);
+        assert!(
+            p.position[0] > 0.5,
+            "should have slid along the wall, x = {}",
+            p.position[0]
+        );
     }
 }

@@ -20,11 +20,23 @@
 //! * The `#[wasm_bindgen(start)]` entry point below is the composition root:
 //!   it wires concrete drivers into the application's ports.
 
-pub mod application;
 pub mod adapters;
+pub mod application;
 
 #[cfg(target_arch = "wasm32")]
 pub mod drivers;
+
+#[cfg(target_arch = "wasm32")]
+use std::sync::atomic::{AtomicBool, Ordering};
+
+#[cfg(target_arch = "wasm32")]
+pub static DOOM_CONTROLS: AtomicBool = AtomicBool::new(false);
+
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen::prelude::wasm_bindgen]
+pub fn set_doom_controls(enabled: bool) {
+    DOOM_CONTROLS.store(enabled, Ordering::Relaxed);
+}
 
 #[cfg(target_arch = "wasm32")]
 mod entry {

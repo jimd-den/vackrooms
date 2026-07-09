@@ -28,7 +28,9 @@ pub trait TelemetryPort {
 pub struct NullTelemetry;
 
 impl TelemetryPort for NullTelemetry {
-    fn now_micros(&self) -> u64 { 0 }
+    fn now_micros(&self) -> u64 {
+        0
+    }
     fn log(&self, _message: &str) {}
 }
 

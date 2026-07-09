@@ -45,13 +45,21 @@ impl OctreeGpuSerializer {
 
         for node in &octree.nodes {
             match *node {
-                SvoNode::Leaf { voxel_type, color, light_level } => {
+                SvoNode::Leaf {
+                    voxel_type,
+                    color,
+                    light_level,
+                    face_occlusion,
+                } => {
                     texel_data.push(1); // R
                     texel_data.push(voxel_type as u32); // G
                     texel_data.push(color); // B
-                    texel_data.push(light_level as u32); // A
+                    texel_data.push((face_occlusion as u32) << 8 | (light_level as u32)); // A
                 }
-                SvoNode::Internal { child_base_index, child_mask } => {
+                SvoNode::Internal {
+                    child_base_index,
+                    child_mask,
+                } => {
                     texel_data.push(0); // R
                     texel_data.push(child_base_index); // G
                     texel_data.push(child_mask as u32); // B
@@ -86,13 +94,16 @@ mod tests {
     #[test]
     fn test_gpu_serialization_padding() {
         let mut octree = SparseVoxelOctree::new(2, 4.0);
-        octree.set(0, 0, 0, 1, 0xFF00FF, 15);
+        octree.set(0, 0, 0, 1, 0xFF00FF, 15, 0);
 
         let gpu_data = OctreeGpuSerializer::serialize_to_gpu_data(&octree);
 
         // Verification tests
         assert_eq!(gpu_data.texture_width, 1024);
-        assert_eq!(gpu_data.texel_data.len(), (gpu_data.texture_width * gpu_data.texture_height * 4) as usize);
+        assert_eq!(
+            gpu_data.texel_data.len(),
+            (gpu_data.texture_width * gpu_data.texture_height * 4) as usize
+        );
 
         // Index 0 maps to texel (0, 0)
         let index = 0;
@@ -103,7 +114,10 @@ mod tests {
 
         // Ensure child_base_index values stay within texture range
         for node in &octree.nodes {
-            if let SvoNode::Internal { child_base_index, .. } = *node {
+            if let SvoNode::Internal {
+                child_base_index, ..
+            } = *node
+            {
                 let max_index = child_base_index + 7;
                 assert!(max_index < (gpu_data.texture_width * gpu_data.texture_height));
             }

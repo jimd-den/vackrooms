@@ -101,12 +101,22 @@ mod tests {
         let chunks = [
             LoadedChunk {
                 origin: (0.0, 0.0),
-                payload: ChunkPayload { root: 0, nodes: chunk_0_nodes, world_size: 10.0, collision: vec![] }
+                payload: ChunkPayload {
+                    root: 0,
+                    nodes: chunk_0_nodes,
+                    world_size: 10.0,
+                    collision: vec![],
+                },
             },
             LoadedChunk {
                 origin: (10.0, 0.0),
-                payload: ChunkPayload { root: 0, nodes: chunk_1_nodes, world_size: 10.0, collision: vec![] }
-            }
+                payload: ChunkPayload {
+                    root: 0,
+                    nodes: chunk_1_nodes,
+                    world_size: 10.0,
+                    collision: vec![],
+                },
+            },
         ];
 
         let build = build_atlas(chunks.iter());

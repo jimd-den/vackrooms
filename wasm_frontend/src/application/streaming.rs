@@ -17,7 +17,10 @@ use crate::application::ports::ChunkPayload;
 pub type ChunkKey = (i64, i64);
 
 pub fn chunk_key(origin_x: f32, origin_z: f32) -> ChunkKey {
-    ((origin_x * 1000.0).round() as i64, (origin_z * 1000.0).round() as i64)
+    (
+        (origin_x * 1000.0).round() as i64,
+        (origin_z * 1000.0).round() as i64,
+    )
 }
 
 /// Decides which chunks should be resident for a given player position.
@@ -48,8 +51,10 @@ impl StreamingPolicy {
             }
         }
         origins.sort_by(|a, b| {
-            let da = (a.0 + self.chunk_size * 0.5 - px).powi(2) + (a.1 + self.chunk_size * 0.5 - pz).powi(2);
-            let db = (b.0 + self.chunk_size * 0.5 - px).powi(2) + (b.1 + self.chunk_size * 0.5 - pz).powi(2);
+            let da = (a.0 + self.chunk_size * 0.5 - px).powi(2)
+                + (a.1 + self.chunk_size * 0.5 - pz).powi(2);
+            let db = (b.0 + self.chunk_size * 0.5 - px).powi(2)
+                + (b.1 + self.chunk_size * 0.5 - pz).powi(2);
             da.total_cmp(&db)
         });
         origins
@@ -73,7 +78,10 @@ pub struct ChunkStore {
 
 impl ChunkStore {
     pub fn new() -> Self {
-        Self { chunks: HashMap::new(), order: Vec::new() }
+        Self {
+            chunks: HashMap::new(),
+            order: Vec::new(),
+        }
     }
 
     pub fn len(&self) -> usize {
@@ -120,7 +128,10 @@ mod tests {
 
     #[test]
     fn desired_origins_covers_square_around_player() {
-        let policy = StreamingPolicy { chunk_size: 10.0, radius: 1 };
+        let policy = StreamingPolicy {
+            chunk_size: 10.0,
+            radius: 1,
+        };
         let origins = policy.desired_origins(5.0, 5.0);
         assert_eq!(origins.len(), 9);
         // Nearest-first: the chunk containing the player comes first.
@@ -131,7 +142,10 @@ mod tests {
 
     #[test]
     fn desired_origins_handles_negative_coordinates() {
-        let policy = StreamingPolicy { chunk_size: 10.0, radius: 1 };
+        let policy = StreamingPolicy {
+            chunk_size: 10.0,
+            radius: 1,
+        };
         let origins = policy.desired_origins(-0.1, -0.1);
         assert_eq!(origins[0], (-10.0, -10.0));
     }
@@ -139,9 +153,26 @@ mod tests {
     #[test]
     fn store_eviction_reports_change() {
         let mut store = ChunkStore::new();
-        let payload = ChunkPayload { root: 0, nodes: vec![], world_size: 10.0, collision: vec![] };
-        store.insert(chunk_key(0.0, 0.0), LoadedChunk { origin: (0.0, 0.0), payload: payload.clone() });
-        store.insert(chunk_key(10.0, 0.0), LoadedChunk { origin: (10.0, 0.0), payload });
+        let payload = ChunkPayload {
+            root: 0,
+            nodes: vec![],
+            world_size: 10.0,
+            collision: vec![],
+        };
+        store.insert(
+            chunk_key(0.0, 0.0),
+            LoadedChunk {
+                origin: (0.0, 0.0),
+                payload: payload.clone(),
+            },
+        );
+        store.insert(
+            chunk_key(10.0, 0.0),
+            LoadedChunk {
+                origin: (10.0, 0.0),
+                payload,
+            },
+        );
         assert_eq!(store.len(), 2);
         assert!(store.retain_keys(&[chunk_key(0.0, 0.0)]));
         assert_eq!(store.len(), 1);

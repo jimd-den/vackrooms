@@ -6,6 +6,7 @@ pub struct VoxelGrid {
     depth: usize,
     data: Vec<u8>,
     light_data: Vec<u8>,
+    face_occlusion: Vec<u8>,
 }
 
 pub const VOXEL_AIR: u8 = 0;
@@ -20,6 +21,7 @@ pub const VOXEL_GRASS: u8 = 6;
 pub const VOXEL_WATER: u8 = 7;
 /// Tree trunk (grassland). Solid: blocks the player like WALL.
 pub const VOXEL_TREE: u8 = 8;
+pub const VOXEL_RED_LIGHT: u8 = 9;
 
 impl VoxelGrid {
     pub fn new(width: usize, height: usize, depth: usize) -> Self {
@@ -30,12 +32,19 @@ impl VoxelGrid {
             depth,
             data: vec![VOXEL_AIR; size],
             light_data: vec![0; size],
+            face_occlusion: vec![0; size],
         }
     }
 
-    pub fn width(&self) -> usize { self.width }
-    pub fn height(&self) -> usize { self.height }
-    pub fn depth(&self) -> usize { self.depth }
+    pub fn width(&self) -> usize {
+        self.width
+    }
+    pub fn height(&self) -> usize {
+        self.height
+    }
+    pub fn depth(&self) -> usize {
+        self.depth
+    }
 
     fn index(&self, x: usize, y: usize, z: usize) -> Option<usize> {
         if x < self.width && y < self.height && z < self.depth {
@@ -68,6 +77,20 @@ impl VoxelGrid {
     pub fn get_light(&self, x: usize, y: usize, z: usize) -> u8 {
         if let Some(idx) = self.index(x, y, z) {
             self.light_data[idx]
+        } else {
+            0
+        }
+    }
+
+    pub fn set_face_occlusion(&mut self, x: usize, y: usize, z: usize, mask: u8) {
+        if let Some(idx) = self.index(x, y, z) {
+            self.face_occlusion[idx] = mask;
+        }
+    }
+
+    pub fn get_face_occlusion(&self, x: usize, y: usize, z: usize) -> u8 {
+        if let Some(idx) = self.index(x, y, z) {
+            self.face_occlusion[idx]
         } else {
             0
         }

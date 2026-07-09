@@ -15,7 +15,7 @@ impl Grid {
     pub fn new(width: usize, depth: usize) -> Self {
         let size = width * depth;
         let cells = vec![Cell::new(); size];
-        
+
         Self {
             width,
             depth,
@@ -67,10 +67,10 @@ mod tests {
         let width = 10;
         let depth = 10;
         let grid = Grid::new(width, depth);
-        
+
         assert_eq!(grid.width(), width);
         assert_eq!(grid.depth(), depth);
-        
+
         // Ensure all cells are initialized correctly
         for y in 0..depth {
             for x in 0..width {
@@ -80,7 +80,7 @@ mod tests {
             }
         }
     }
-    
+
     #[test]
     fn test_grid_out_of_bounds() {
         let mut grid = Grid::new(5, 5);

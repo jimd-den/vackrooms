@@ -204,7 +204,7 @@ impl SoftwareRasterizer {
             center[1] - cam.pos[1],
             center[2] - cam.pos[2],
         ];
-        
+
         let dx_sq = to_cam[0] * to_cam[0];
         let dy_sq = to_cam[1] * to_cam[1];
         let dz_sq = to_cam[2] * to_cam[2];
@@ -241,7 +241,6 @@ impl SoftwareRasterizer {
 
         self.splat(px, py, half_px, dist, r, g, b);
     }
-
 
     /// Recursive front-to-back node renderer.
     ///
@@ -549,13 +548,18 @@ mod tests {
     /// depth-2 SVO (4^3) with one solid voxel, serialized like production.
     fn one_voxel_atlas(color: u32, light: u8) -> (Vec<u32>, u32) {
         let mut svo = SparseVoxelOctree::new(2, 4.0);
-        svo.set(1, 1, 1, 1, color, light);
+        svo.set(1, 1, 1, 1, color, light, 0);
         let gpu = OctreeGpuSerializer::serialize_to_gpu_data(&svo);
         (gpu.texel_data, svo.root as u32)
     }
 
     fn frame_at(pos: [f32; 3], yaw: f32) -> FrameParams {
-        FrameParams { camera_pos: pos, yaw, pitch: 0.0 }
+        FrameParams {
+            camera_pos: pos,
+            yaw,
+            pitch: 0.0,
+            flashlight: false,
+        }
     }
 
     fn center_pixel(r: &SoftwareRasterizer) -> [u8; 4] {
@@ -571,7 +575,11 @@ mod tests {
         r.upload_atlas(&atlas);
 
         // Voxel spans (1..2)^3; look at its center from -z (yaw = PI faces +z).
-        let chunks = [ChunkDraw { origin: [0.0, 0.0, 0.0], root_index: root as i32, world_size: 4.0 }];
+        let chunks = [ChunkDraw {
+            origin: [0.0, 0.0, 0.0],
+            root_index: root as i32,
+            world_size: 4.0,
+        }];
         r.draw(&frame_at([1.5, 1.5, -2.0], std::f32::consts::PI), &chunks);
 
         let px = center_pixel(&r);
@@ -588,10 +596,18 @@ mod tests {
         let (atlas, root) = one_voxel_atlas(0xFFFFFF, 15);
         let mut r = SoftwareRasterizer::new(32, 32);
         r.upload_atlas(&atlas);
-        let chunks = [ChunkDraw { origin: [0.0, 0.0, 0.0], root_index: root as i32, world_size: 4.0 }];
+        let chunks = [ChunkDraw {
+            origin: [0.0, 0.0, 0.0],
+            root_index: root as i32,
+            world_size: 4.0,
+        }];
         // yaw = 0 looks toward -z; the voxel is at +z relative to the camera.
         r.draw(&frame_at([1.5, 1.5, -2.0], 0.0), &chunks);
-        assert!(r.framebuffer().chunks_exact(4).all(|p| p[0] == 0 && p[1] == 0 && p[2] == 0));
+        assert!(
+            r.framebuffer()
+                .chunks_exact(4)
+                .all(|p| p[0] == 0 && p[1] == 0 && p[2] == 0)
+        );
     }
 
     #[test]
@@ -608,13 +624,25 @@ mod tests {
         r.upload_atlas(&atlas);
         let chunks = [
             // Far chunk listed first to prove sorting/z-buffer handles order.
-            ChunkDraw { origin: [0.0, 0.0, 6.0], root_index: (red_nodes + white_root) as i32, world_size: 4.0 },
-            ChunkDraw { origin: [0.0, 0.0, 0.0], root_index: red_root as i32, world_size: 4.0 },
+            ChunkDraw {
+                origin: [0.0, 0.0, 6.0],
+                root_index: (red_nodes + white_root) as i32,
+                world_size: 4.0,
+            },
+            ChunkDraw {
+                origin: [0.0, 0.0, 0.0],
+                root_index: red_root as i32,
+                world_size: 4.0,
+            },
         ];
         r.draw(&frame_at([1.5, 1.5, -2.0], std::f32::consts::PI), &chunks);
 
         let px = center_pixel(&r);
-        assert!(px[0] > 60 && px[2] < px[0] / 2, "near red voxel must win: {:?}", px);
+        assert!(
+            px[0] > 60 && px[2] < px[0] / 2,
+            "near red voxel must win: {:?}",
+            px
+        );
     }
 
     #[test]
@@ -622,7 +650,7 @@ mod tests {
         // BuildOctreeUseCase (the production chunk pipeline) pushes children
         // BEFORE their parent, so the root is the LAST node — the opposite
         // order of SparseVoxelOctree::set. build_mips must handle both.
-        use vackrooms::domain::entities::voxel_grid::{VoxelGrid, VOXEL_WALL};
+        use vackrooms::domain::entities::voxel_grid::{VOXEL_WALL, VoxelGrid};
         use vackrooms::domain::use_cases::build_octree::BuildOctreeUseCase;
 
         let mut grid = VoxelGrid::new(4, 4, 4);
@@ -643,8 +671,8 @@ mod tests {
     fn mip_aggregation_averages_child_colors() {
         let mut svo = SparseVoxelOctree::new(1, 2.0);
         // Two solid children: pure red + pure blue -> average purple-ish.
-        svo.set(0, 0, 0, 1, 0xFF0000, 10);
-        svo.set(1, 1, 1, 1, 0x0000FF, 4);
+        svo.set(0, 0, 0, 1, 0xFF0000, 10, 0);
+        svo.set(1, 1, 1, 1, 0x0000FF, 4, 0);
         let gpu = OctreeGpuSerializer::serialize_to_gpu_data(&svo);
         let mips = build_mips(&gpu.texel_data);
 
@@ -660,7 +688,11 @@ mod tests {
         let (atlas, root) = one_voxel_atlas(0xFFFFFF, 15);
         let mut r = SoftwareRasterizer::new(64, 64);
         r.upload_atlas(&atlas);
-        let chunks = [ChunkDraw { origin: [0.0, 0.0, 0.0], root_index: root as i32, world_size: 4.0 }];
+        let chunks = [ChunkDraw {
+            origin: [0.0, 0.0, 0.0],
+            root_index: root as i32,
+            world_size: 4.0,
+        }];
         // Very far away: the voxel projects to well under a pixel, and the
         // root's occupancy (1/64) is below MIN_SPLAT_OCCUPANCY -> no draw,
         // proving the LOD path (not the leaf path) handled it.
@@ -675,11 +707,21 @@ mod tests {
         let center = [0.0, 0.0, 0.0];
 
         // Case A: Camera Y is 1.01 (above the center, Y-dominant)
-        let frame_a = FrameParams { camera_pos: [-1.0, 1.01, -0.1], yaw: 0.0, pitch: 0.0 };
+        let frame_a = FrameParams {
+            camera_pos: [-1.0, 1.01, -0.1],
+            yaw: 0.0,
+            pitch: 0.0,
+            flashlight: false,
+        };
         let cam_a = Camera::new(&frame_a, 16, 16);
 
         // Case B: Camera Y is 0.99 (below Case A, X-dominant)
-        let frame_b = FrameParams { camera_pos: [-1.0, 0.99, -0.1], yaw: 0.0, pitch: 0.0 };
+        let frame_b = FrameParams {
+            camera_pos: [-1.0, 0.99, -0.1],
+            yaw: 0.0,
+            pitch: 0.0,
+            flashlight: false,
+        };
         let cam_b = Camera::new(&frame_b, 16, 16);
 
         // Clear rasterizer
@@ -688,12 +730,14 @@ mod tests {
         r.shade_and_splat(
             &cam_a,
             center,
-            8.0, 8.0, 1.0,
-            1.0, // dist
+            8.0,
+            8.0,
+            1.0,
+            1.0,                   // dist
             [100.0, 100.0, 100.0], // base color
-            15.0, // light level
-            false, // is_emissive
-            1, // crowded siblings
+            15.0,                  // light level
+            false,                 // is_emissive
+            1,                     // crowded siblings
         );
         let color_a = center_pixel(&r);
 
@@ -703,12 +747,14 @@ mod tests {
         r.shade_and_splat(
             &cam_b,
             center,
-            8.0, 8.0, 1.0,
-            1.0, // dist
+            8.0,
+            8.0,
+            1.0,
+            1.0,                   // dist
             [100.0, 100.0, 100.0], // base color
-            15.0, // light level
-            false, // is_emissive
-            1, // crowded siblings
+            15.0,                  // light level
+            false,                 // is_emissive
+            1,                     // crowded siblings
         );
         let color_b = center_pixel(&r);
 
@@ -716,15 +762,26 @@ mod tests {
         // This is a 20% difference, leading to a difference in color (e.g. 20 out of 255).
         // Assert that the difference is very small (e.g., <= 2) to prove continuity/smoothness.
         let diff = (color_a[0] as i32 - color_b[0] as i32).abs();
-        assert!(diff <= 2, "Discontinuity found: diff was {} (color_a = {:?}, color_b = {:?})", diff, color_a, color_b);
+        assert!(
+            diff <= 2,
+            "Discontinuity found: diff was {} (color_a = {:?}, color_b = {:?})",
+            diff,
+            color_a,
+            color_b
+        );
     }
 
     #[test]
     fn test_adjacent_voxels_shading_variation() {
         let mut r = SoftwareRasterizer::new(16, 16);
-        
+
         // Camera positioned above the floor plane (Y = 5.0)
-        let frame = FrameParams { camera_pos: [1.0, 5.0, 1.0], yaw: 0.0, pitch: 0.0 };
+        let frame = FrameParams {
+            camera_pos: [1.0, 5.0, 1.0],
+            yaw: 0.0,
+            pitch: 0.0,
+            flashlight: false,
+        };
         let cam = Camera::new(&frame, 16, 16);
 
         // Voxel 1 center: [0.5, 0.0, 0.5]
@@ -733,7 +790,9 @@ mod tests {
         r.shade_and_splat(
             &cam,
             [0.5, 0.0, 0.5],
-            8.0, 8.0, 1.0,
+            8.0,
+            8.0,
+            1.0,
             5.0497,
             [100.0, 100.0, 100.0],
             15.0,
@@ -748,7 +807,9 @@ mod tests {
         r.shade_and_splat(
             &cam,
             [2.5, 0.0, 0.5],
-            8.0, 8.0, 1.0,
+            8.0,
+            8.0,
+            1.0,
             5.2440,
             [100.0, 100.0, 100.0],
             15.0,
@@ -761,13 +822,21 @@ mod tests {
         // This diagnostic test proves that rendering flat surfaces voxel-by-voxel
         // without quad-merging causes individual tiles to have slightly different
         // shading, creating a visible grid pattern.
-        assert_ne!(color_1[0], color_2[0], "Expected adjacent voxels to have slightly different shading due to center-based lighting calculations");
+        assert_ne!(
+            color_1[0], color_2[0],
+            "Expected adjacent voxels to have slightly different shading due to center-based lighting calculations"
+        );
     }
 
     #[test]
     fn test_splat_flat_shading_limitation() {
         let mut r = SoftwareRasterizer::new(16, 16);
-        let frame = FrameParams { camera_pos: [1.0, 5.0, 1.0], yaw: 0.0, pitch: 0.0 };
+        let frame = FrameParams {
+            camera_pos: [1.0, 5.0, 1.0],
+            yaw: 0.0,
+            pitch: 0.0,
+            flashlight: false,
+        };
         let cam = Camera::new(&frame, 16, 16);
 
         // Draw a single large splat (half_px = 4.0) centered at [8.0, 8.0]
@@ -775,7 +844,9 @@ mod tests {
         r.shade_and_splat(
             &cam,
             [0.5, 0.0, 0.5],
-            8.0, 8.0, 4.0, // large size
+            8.0,
+            8.0,
+            4.0, // large size
             5.0,
             [100.0, 100.0, 100.0],
             15.0,
@@ -787,15 +858,15 @@ mod tests {
         let idx_left = (8 * r.width() + 5) * 4;
         let idx_right = (8 * r.width() + 10) * 4;
         let fb = r.framebuffer();
-        let color_left = [fb[idx_left], fb[idx_left+1], fb[idx_left+2]];
-        let color_right = [fb[idx_right], fb[idx_right+1], fb[idx_right+2]];
+        let color_left = [fb[idx_left], fb[idx_left + 1], fb[idx_left + 2]];
+        let color_right = [fb[idx_right], fb[idx_right + 1], fb[idx_right + 2]];
 
         // Confirm they are identical, which proves that the entire projected area
         // of a single splat is displayed with one flat color, causing lighting to look
         // like big blocks/squares on screen.
-        assert_eq!(color_left, color_right, "Expected a single splat to be flat-shaded (all its pixels have identical color)");
+        assert_eq!(
+            color_left, color_right,
+            "Expected a single splat to be flat-shaded (all its pixels have identical color)"
+        );
     }
-
 }
-
-

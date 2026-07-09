@@ -1,6 +1,6 @@
 use crate::domain::entities::grid::Grid;
 use crate::domain::entities::voxel_grid::{
-    VoxelGrid, VOXEL_AIR, VOXEL_WALL, VOXEL_FLOOR, VOXEL_CEILING, VOXEL_LIGHT, VOXEL_RED_WALL
+    VOXEL_AIR, VOXEL_CEILING, VOXEL_FLOOR, VOXEL_LIGHT, VOXEL_RED_WALL, VOXEL_WALL, VoxelGrid,
 };
 
 /// Strategy Pattern for generating dense VoxelGrids from abstract room Grids.
@@ -20,12 +20,12 @@ impl LevelBuilder for Level0Builder {
     fn build_voxels(&self, grid: &Grid) -> VoxelGrid {
         let rs = self.room_size;
         let wh = self.wall_height;
-        
+
         // Voxel grid dimensions
         let vw = grid.width() * rs;
         let vh = wh + 3; // Floor (1) + Walls (wh) + Ceiling (1) + Recessed Lights (1)
         let vd = grid.depth() * rs;
-        
+
         let mut voxels = VoxelGrid::new(vw, vh, vd);
 
         for gy in 0..grid.depth() {
@@ -38,7 +38,7 @@ impl LevelBuilder for Level0Builder {
                     for lz in 0..rs {
                         let vx = base_x + lx;
                         let vz = base_z + lz;
-                        
+
                         // Floor
                         voxels.set(vx, 0, vz, VOXEL_FLOOR);
 
@@ -48,7 +48,12 @@ impl LevelBuilder for Level0Builder {
                         let is_south_wall = lz == rs - 1 && cell.walls[2];
                         let is_west_wall = lx == 0 && cell.walls[3];
 
-                        let wall_type = if cell.is_red { VOXEL_RED_WALL } else { VOXEL_WALL };
+                        use crate::domain::entities::cell::MicrobiomeZone;
+                        let wall_type = if cell.zone == MicrobiomeZone::RedRoom {
+                            VOXEL_RED_WALL
+                        } else {
+                            VOXEL_WALL
+                        };
 
                         if is_north_wall || is_east_wall || is_south_wall || is_west_wall {
                             for h in 1..=wh {
@@ -59,7 +64,7 @@ impl LevelBuilder for Level0Builder {
                         // Checkerboard fluorescent lights (Realistic light sources)
                         // With 16x16 rooms, we can model actual recessed 2x6 fluorescent fixtures.
                         let mut is_light = false;
-                        if !cell.is_dark {
+                        if cell.zone != MicrobiomeZone::Blackout {
                             // Two fixtures per room
                             let fixture1 = lx >= 4 && lx < 6 && lz >= 5 && lz < 11;
                             let fixture2 = lx >= 10 && lx < 12 && lz >= 5 && lz < 11;
@@ -79,7 +84,7 @@ impl LevelBuilder for Level0Builder {
                 }
             }
         }
-        
+
         voxels
     }
 }

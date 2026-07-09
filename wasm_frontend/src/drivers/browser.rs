@@ -8,8 +8,8 @@
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
-use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
+use wasm_bindgen::prelude::*;
 use web_sys::{
     CanvasRenderingContext2d, Document, HtmlCanvasElement, HtmlElement, KeyboardEvent, MouseEvent,
     Window,
@@ -118,7 +118,9 @@ fn create_renderer(canvas: &HtmlCanvasElement, query: &str) -> Result<DriverRend
 
 pub fn boot() -> Result<(), JsValue> {
     let window = web_sys::window().ok_or_else(|| JsValue::from_str("no window"))?;
-    let document = window.document().ok_or_else(|| JsValue::from_str("no document"))?;
+    let document = window
+        .document()
+        .ok_or_else(|| JsValue::from_str("no document"))?;
 
     let canvas: HtmlCanvasElement = element(&document, "view")?;
     let minimap: HtmlCanvasElement = element(&document, "minimap")?;
@@ -146,7 +148,10 @@ pub fn boot() -> Result<(), JsValue> {
     } else {
         (
             GeneratorConfig::low_spec().with_tuning(gen_params.tuning),
-            EngineConfig { seed: gen_params.seed, ..EngineConfig::default() },
+            EngineConfig {
+                seed: gen_params.seed,
+                ..EngineConfig::default()
+            },
         )
     };
 
@@ -233,8 +238,10 @@ fn attach_input_listeners(
                 .style()
                 .set_property("display", if locked { "none" } else { "flex" });
         });
-        document
-            .add_event_listener_with_callback("pointerlockchange", closure.as_ref().unchecked_ref())?;
+        document.add_event_listener_with_callback(
+            "pointerlockchange",
+            closure.as_ref().unchecked_ref(),
+        )?;
         closure.forget();
     }
 
@@ -287,10 +294,18 @@ fn run_frame_loop(
         {
             let scale = engine.borrow().stats().resolution_scale as f64
                 * renderer.borrow().resolution_factor();
-            let target_w = (loop_window.inner_width().ok().and_then(|v| v.as_f64()).unwrap_or(800.0)
+            let target_w = (loop_window
+                .inner_width()
+                .ok()
+                .and_then(|v| v.as_f64())
+                .unwrap_or(800.0)
                 * scale)
                 .max(1.0) as u32;
-            let target_h = (loop_window.inner_height().ok().and_then(|v| v.as_f64()).unwrap_or(600.0)
+            let target_h = (loop_window
+                .inner_height()
+                .ok()
+                .and_then(|v| v.as_f64())
+                .unwrap_or(600.0)
                 * scale)
                 .max(1.0) as u32;
             if canvas.width() != target_w || canvas.height() != target_h {

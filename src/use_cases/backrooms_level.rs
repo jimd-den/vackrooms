@@ -23,7 +23,7 @@
 //!   obstacles. A BFS test enforces >95% connectivity.
 
 use crate::domain::entities::voxel_grid::{
-    VoxelGrid, VOXEL_CEILING, VOXEL_FLOOR, VOXEL_LIGHT, VOXEL_RED_WALL, VOXEL_WALL,
+    VOXEL_CEILING, VOXEL_FLOOR, VOXEL_LIGHT, VOXEL_RED_WALL, VOXEL_WALL, VoxelGrid,
 };
 use crate::entities::models::Position;
 use crate::use_cases::generate_chunk::{GeneratorConfig, LevelTuning};
@@ -119,8 +119,7 @@ impl BackroomsLevel {
     ) -> (f32, f32) {
         let k = ((w - HALL_PERIOD * 0.5) / HALL_PERIOD).round();
         let nominal = k * HALL_PERIOD + HALL_PERIOD * 0.5;
-        let center =
-            nominal + HALL_WANDER * Self::n(noise, seed, salt, along, k * 37.7, 0.45);
+        let center = nominal + HALL_WANDER * Self::n(noise, seed, salt, along, k * 37.7, 0.45);
         let half_width = (HALL_WIDTH_BASE
             + HALL_WIDTH_VAR * Self::n(noise, seed, salt ^ 0x5A5A, along, k * 19.3, 0.8))
             * 0.5;
@@ -154,17 +153,15 @@ impl BackroomsLevel {
         let coarse = Self::n(noise, seed, 0xB200, wx, wz, 0.55);
         let fine = Self::n(noise, seed, 0xB300, wx, wz, 1.6);
         let mut ceiling_units = (2.8 + 0.15 * coarse + 0.05 * fine).clamp(2.7, 3.0);
-        
+
         // Coffered ceiling grid
-        let on_beam = wx.rem_euclid(COFFER_PERIOD) < 0.22
-            || wz.rem_euclid(COFFER_PERIOD) < 0.22;
+        let on_beam = wx.rem_euclid(COFFER_PERIOD) < 0.22 || wz.rem_euclid(COFFER_PERIOD) < 0.22;
         if on_beam {
             ceiling_units -= COFFER_DROP;
         }
 
         // ---- solids ------------------------------------------------------
-        let spawn_d2 =
-            (wx - SPAWN.0) * (wx - SPAWN.0) + (wz - SPAWN.1) * (wz - SPAWN.1);
+        let spawn_d2 = (wx - SPAWN.0) * (wx - SPAWN.0) + (wz - SPAWN.1) * (wz - SPAWN.1);
         let in_spawn = spawn_d2 < SPAWN_CLEAR_RADIUS * SPAWN_CLEAR_RADIUS;
 
         let mut solid = false;
@@ -192,7 +189,7 @@ impl BackroomsLevel {
                 if f_wall >= 0.25 {
                     return (false, false);
                 }
-                
+
                 let (cx, cz) = if is_z_wall {
                     (cell_x - 1, cell_z)
                 } else {
@@ -266,10 +263,16 @@ impl BackroomsLevel {
         };
 
         let red = solid
-            && Self::cell_hash(noise, seed, 0xF100, (wx / 1.4) as i64, (wz / 1.4) as i64)
-                > 0.94;
+            && Self::cell_hash(noise, seed, 0xF100, (wx / 1.4) as i64, (wz / 1.4) as i64) > 0.94;
 
-        ColumnPlan { solid, red, ceiling_units, light, lintel_from_units, sconce }
+        ColumnPlan {
+            solid,
+            red,
+            ceiling_units,
+            light,
+            lintel_from_units,
+            sconce,
+        }
     }
 }
 
@@ -393,8 +396,10 @@ mod tests {
             .flat_map(|x| (margin..d - margin).map(move |z| (x, z)))
             .filter(|&(x, z)| is_open(&grid, x, z))
             .collect();
-        assert!(open.len() > (w - 2 * margin) * (d - 2 * margin) / 2,
-            "backrooms must be mostly open space");
+        assert!(
+            open.len() > (w - 2 * margin) * (d - 2 * margin) / 2,
+            "backrooms must be mostly open space"
+        );
 
         // BFS from the spawn clearing (world 5,5 = local 25,25 in chunk 0,0).
         let mut visited = vec![false; w * d];
@@ -405,8 +410,10 @@ mod tests {
             reached += 1;
             for (dx, dz) in [(1i64, 0i64), (-1, 0), (0, 1), (0, -1)] {
                 let (nx, nz) = (x as i64 + dx, z as i64 + dz);
-                if nx < margin as i64 || nz < margin as i64
-                    || nx >= (w - margin) as i64 || nz >= (d - margin) as i64
+                if nx < margin as i64
+                    || nz < margin as i64
+                    || nx >= (w - margin) as i64
+                    || nz >= (d - margin) as i64
                 {
                     continue;
                 }
@@ -445,8 +452,8 @@ mod tests {
                     (gx as f32 + 0.5) * config.voxel_scale,
                     (z as f32 + 0.5) * config.voxel_scale,
                 );
-                let got_solid = grid.get(lx, 1, z) == VOXEL_WALL
-                    || grid.get(lx, 1, z) == VOXEL_RED_WALL;
+                let got_solid =
+                    grid.get(lx, 1, z) == VOXEL_WALL || grid.get(lx, 1, z) == VOXEL_RED_WALL;
                 assert_eq!(
                     got_solid, plan.solid,
                     "column mismatch at world x={gx} z={z}"
@@ -564,14 +571,32 @@ mod tests {
             n
         };
 
-        let none = count_solids(LevelTuning { pillars: 0.0, walls: 0.0, ..Default::default() });
-        let sparse = count_solids(LevelTuning { pillars: 0.3, walls: 0.3, ..Default::default() });
+        let none = count_solids(LevelTuning {
+            pillars: 0.0,
+            walls: 0.0,
+            ..Default::default()
+        });
+        let sparse = count_solids(LevelTuning {
+            pillars: 0.3,
+            walls: 0.3,
+            ..Default::default()
+        });
         let default = count_solids(LevelTuning::default());
-        let dense = count_solids(LevelTuning { pillars: 2.0, walls: 2.0, ..Default::default() });
+        let dense = count_solids(LevelTuning {
+            pillars: 2.0,
+            walls: 2.0,
+            ..Default::default()
+        });
 
         assert_eq!(none, 0, "pillars=0 walls=0 must produce an empty plane");
-        assert!(sparse < default, "sparse ({sparse}) must be < default ({default})");
-        assert!(default < dense, "default ({default}) must be < dense ({dense})");
+        assert!(
+            sparse < default,
+            "sparse ({sparse}) must be < default ({default})"
+        );
+        assert!(
+            default < dense,
+            "default ({default}) must be < dense ({dense})"
+        );
     }
 
     /// The spawn point has a clear floor and a light overhead.
@@ -626,5 +651,3 @@ mod tests {
         std::fs::write("./ascii_map.txt", map).unwrap();
     }
 }
-
-

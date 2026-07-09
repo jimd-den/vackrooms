@@ -13,24 +13,26 @@ pub struct AsciiRenderer;
 impl GridRenderer for AsciiRenderer {
     fn render(&self, grid: &Grid) -> String {
         let mut output = String::new();
-        
+
         for y in 0..grid.depth() {
             // Top walls for this row
             for x in 0..grid.width() {
                 let cell = grid.get(x, y).unwrap();
                 output.push('+');
-                if cell.walls[0] { // North
+                if cell.walls[0] {
+                    // North
                     output.push_str("---");
                 } else {
                     output.push_str("   ");
                 }
             }
             output.push_str("+\n");
-            
+
             // Side walls for this row
             for x in 0..grid.width() {
                 let cell = grid.get(x, y).unwrap();
-                if cell.walls[3] { // West
+                if cell.walls[3] {
+                    // West
                     output.push('|');
                 } else {
                     output.push(' ');
@@ -39,26 +41,28 @@ impl GridRenderer for AsciiRenderer {
             }
             // East wall of the last cell in the row
             let last_cell = grid.get(grid.width() - 1, y).unwrap();
-            if last_cell.walls[1] { // East
+            if last_cell.walls[1] {
+                // East
                 output.push('|');
             } else {
                 output.push(' ');
             }
             output.push('\n');
         }
-        
+
         // Bottom walls for the last row
         for x in 0..grid.width() {
             let cell = grid.get(x, grid.depth() - 1).unwrap();
             output.push('+');
-            if cell.walls[2] { // South
+            if cell.walls[2] {
+                // South
                 output.push_str("---");
             } else {
                 output.push_str("   ");
             }
         }
         output.push_str("+\n");
-        
+
         output
     }
 }
@@ -81,7 +85,7 @@ mod tests {
 
         let renderer = AsciiRenderer;
         let output = renderer.render(&grid);
-        
+
         // Very basic validation, actual visual check is better in integration tests
         assert!(output.contains("+---+---+"));
     }

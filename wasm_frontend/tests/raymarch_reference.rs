@@ -64,9 +64,18 @@ fn raymarch_svo(
             // Snap every tied axis past its exit plane (a ray exactly
             // through a corner advances diagonally; leaving an axis ON its
             // plane stalls the march instead).
-            if (t_exit - tx).abs() < 1e-4 { p[0] = (if rd[0] > 0.0 { cmax[0] } else { cmin[0] }) + (if rd[0] > 0.0 { 0.001 } else { -0.001 }); }
-            if (t_exit - ty).abs() < 1e-4 { p[1] = (if rd[1] > 0.0 { cmax[1] } else { cmin[1] }) + (if rd[1] > 0.0 { 0.001 } else { -0.001 }); }
-            if (t_exit - tz).abs() < 1e-4 { p[2] = (if rd[2] > 0.0 { cmax[2] } else { cmin[2] }) + (if rd[2] > 0.0 { 0.001 } else { -0.001 }); }
+            if (t_exit - tx).abs() < 1e-4 {
+                p[0] = (if rd[0] > 0.0 { cmax[0] } else { cmin[0] })
+                    + (if rd[0] > 0.0 { 0.001 } else { -0.001 });
+            }
+            if (t_exit - ty).abs() < 1e-4 {
+                p[1] = (if rd[1] > 0.0 { cmax[1] } else { cmin[1] })
+                    + (if rd[1] > 0.0 { 0.001 } else { -0.001 });
+            }
+            if (t_exit - tz).abs() < 1e-4 {
+                p[2] = (if rd[2] > 0.0 { cmax[2] } else { cmin[2] })
+                    + (if rd[2] > 0.0 { 0.001 } else { -0.001 });
+            }
             // Multi-level pop, mirroring the shader: the skip may cross
             // boundaries shared by several ancestor boxes at once.
             while outside(p, cmin, cmax) {
@@ -90,9 +99,21 @@ fn raymarch_svo(
                 if stack.len() < 8 {
                     stack.push((current_node, cmin, cmax));
                 }
-                if ox == 1 { cmin[0] = center[0] } else { cmax[0] = center[0] }
-                if oy == 1 { cmin[1] = center[1] } else { cmax[1] = center[1] }
-                if oz == 1 { cmin[2] = center[2] } else { cmax[2] = center[2] }
+                if ox == 1 {
+                    cmin[0] = center[0]
+                } else {
+                    cmax[0] = center[0]
+                }
+                if oy == 1 {
+                    cmin[1] = center[1]
+                } else {
+                    cmax[1] = center[1]
+                }
+                if oz == 1 {
+                    cmin[2] = center[2]
+                } else {
+                    cmax[2] = center[2]
+                }
                 current_node = a as usize + child_idx;
             } else {
                 let omin = [
@@ -113,9 +134,18 @@ fn raymarch_svo(
                 let t_exit = tx.min(ty).min(tz);
                 t = t_exit;
                 p = [ro[0] + t * rd[0], ro[1] + t * rd[1], ro[2] + t * rd[2]];
-                if (t_exit - tx).abs() < 1e-4 { p[0] = (if rd[0] > 0.0 { omax[0] } else { omin[0] }) + (if rd[0] > 0.0 { 0.001 } else { -0.001 }); }
-                if (t_exit - ty).abs() < 1e-4 { p[1] = (if rd[1] > 0.0 { omax[1] } else { omin[1] }) + (if rd[1] > 0.0 { 0.001 } else { -0.001 }); }
-                if (t_exit - tz).abs() < 1e-4 { p[2] = (if rd[2] > 0.0 { omax[2] } else { omin[2] }) + (if rd[2] > 0.0 { 0.001 } else { -0.001 }); }
+                if (t_exit - tx).abs() < 1e-4 {
+                    p[0] = (if rd[0] > 0.0 { omax[0] } else { omin[0] })
+                        + (if rd[0] > 0.0 { 0.001 } else { -0.001 });
+                }
+                if (t_exit - ty).abs() < 1e-4 {
+                    p[1] = (if rd[1] > 0.0 { omax[1] } else { omin[1] })
+                        + (if rd[1] > 0.0 { 0.001 } else { -0.001 });
+                }
+                if (t_exit - tz).abs() < 1e-4 {
+                    p[2] = (if rd[2] > 0.0 { omax[2] } else { omin[2] })
+                        + (if rd[2] > 0.0 { 0.001 } else { -0.001 });
+                }
                 while outside(p, cmin, cmax) {
                     let Some(f) = stack.pop() else { return None };
                     current_node = f.0;
@@ -129,7 +159,11 @@ fn raymarch_svo(
 }
 
 fn outside(p: [f32; 3], min: [f32; 3], max: [f32; 3]) -> bool {
-    p[0] < min[0] || p[0] > max[0] || p[1] < min[1] || p[1] > max[1] || p[2] < min[2]
+    p[0] < min[0]
+        || p[0] > max[0]
+        || p[1] < min[1]
+        || p[1] > max[1]
+        || p[2] < min[2]
         || p[2] > max[2]
 }
 
@@ -141,14 +175,24 @@ fn march_scene(
     ro: [f32; 3],
     rd: [f32; 3],
 ) -> Option<Hit> {
-    let safe = |v: f32| if v.abs() < 1e-4 { 1e-4f32.copysign(v) } else { v };
+    let safe = |v: f32| {
+        if v.abs() < 1e-4 {
+            1e-4f32.copysign(v)
+        } else {
+            v
+        }
+    };
     // The shader passes safe_rd (not raw rd) into raymarchSVO too.
     let rd = [safe(rd[0]), safe(rd[1]), safe(rd[2])];
     let inv = [1.0 / rd[0], 1.0 / rd[1], 1.0 / rd[2]];
 
     let mut hits: Vec<(usize, f32)> = Vec::new();
     for (i, d) in draws.iter().enumerate() {
-        let lro = [ro[0] - d.origin[0], ro[1] - d.origin[1], ro[2] - d.origin[2]];
+        let lro = [
+            ro[0] - d.origin[0],
+            ro[1] - d.origin[1],
+            ro[2] - d.origin[2],
+        ];
         let mut t_entry = f32::MIN;
         let mut t_exit = f32::MAX;
         for a in 0..3 {
@@ -165,11 +209,21 @@ fn march_scene(
 
     for (i, t_min) in hits {
         let d = &draws[i];
-        let lro = [ro[0] - d.origin[0], ro[1] - d.origin[1], ro[2] - d.origin[2]];
+        let lro = [
+            ro[0] - d.origin[0],
+            ro[1] - d.origin[1],
+            ro[2] - d.origin[2],
+        ];
         if let Some((t, bmin, bmax, vt)) =
             raymarch_svo(atlas, lro, rd, d.root_index as usize, t_min, d.world_size)
         {
-            return Some(Hit { chunk: i, t, box_min: bmin, box_max: bmax, voxel_type: vt });
+            return Some(Hit {
+                chunk: i,
+                t,
+                box_min: bmin,
+                box_max: bmax,
+                voxel_type: vt,
+            });
         }
     }
     None
@@ -189,7 +243,10 @@ fn multi_chunk_raymarch_reports_no_phantom_geometry() {
     for dz in -1..=1 {
         for dx in -1..=1 {
             let (ox, oz) = (dx as f32 * 10.0, dz as f32 * 10.0);
-            chunks.push(LoadedChunk { origin: (ox, oz), payload: source.load(ox, oz, 0) });
+            chunks.push(LoadedChunk {
+                origin: (ox, oz),
+                payload: source.load(ox, oz, 0),
+            });
         }
     }
     let build = build_atlas(chunks.iter());
@@ -199,11 +256,7 @@ fn multi_chunk_raymarch_reports_no_phantom_geometry() {
         .iter()
         .map(|c| {
             let generator = GenerateChunkArchitectureUseCase::new(&noise);
-            let grid = generator.execute(
-                Position::new(c.origin.0, c.origin.1),
-                seed,
-                config,
-            );
+            let grid = generator.execute(Position::new(c.origin.0, c.origin.1), seed, config);
             BuildOctreeUseCase::new().execute(&grid, config.svo_depth(), config.svo_world_size())
         })
         .collect();
@@ -221,7 +274,9 @@ fn multi_chunk_raymarch_reports_no_phantom_geometry() {
             let (sp, cp) = pitch.sin_cos();
             let rd = [-cp * sy, sp, -cp * cy];
 
-            let Some(hit) = march_scene(&build.texels, &build.draws, ro, rd) else { continue };
+            let Some(hit) = march_scene(&build.texels, &build.draws, ro, rd) else {
+                continue;
+            };
             hit_count += 1;
 
             // The leaf box center, in voxel coordinates of the owning chunk.
@@ -231,17 +286,23 @@ fn multi_chunk_raymarch_reports_no_phantom_geometry() {
                 (hit.box_min[1] + hit.box_max[1]) * 0.5,
                 (hit.box_min[2] + hit.box_max[2]) * 0.5,
             ];
-            let (vx, vy, vz) =
-                ((c[0] / scale) as u32, (c[1] / scale) as u32, (c[2] / scale) as u32);
+            let (vx, vy, vz) = (
+                (c[0] / scale) as u32,
+                (c[1] / scale) as u32,
+                (c[2] / scale) as u32,
+            );
             let truth = svos[hit.chunk].get(vx, vy, vz);
-            let solid = truth.map(|(vt, _, _)| vt != 0).unwrap_or(false);
+            let solid = truth.map(|(vt, _, _, _)| vt != 0).unwrap_or(false);
             if !solid {
                 phantoms.push((yaw, pitch, hit));
             }
         }
     }
 
-    assert!(hit_count > 200, "sanity: the sweep must actually hit walls, got {hit_count}");
+    assert!(
+        hit_count > 200,
+        "sanity: the sweep must actually hit walls, got {hit_count}"
+    );
     assert!(
         phantoms.is_empty(),
         "{} phantom hits out of {}; first 5: {:#?}",
@@ -265,7 +326,10 @@ fn pitched_rays_never_escape_through_cracks() {
     for dz in -1..=1 {
         for dx in -1..=1 {
             let (ox, oz) = (dx as f32 * 10.0, dz as f32 * 10.0);
-            chunks.push(LoadedChunk { origin: (ox, oz), payload: source.load(ox, oz, 0) });
+            chunks.push(LoadedChunk {
+                origin: (ox, oz),
+                payload: source.load(ox, oz, 0),
+            });
         }
     }
     let build = build_atlas(chunks.iter());
@@ -290,5 +354,8 @@ fn pitched_rays_never_escape_through_cracks() {
             }
         }
     }
-    assert_eq!(misses, 0, "{misses} of {total} pitched rays escaped through cracks");
+    assert_eq!(
+        misses, 0,
+        "{misses} of {total} pitched rays escaped through cracks"
+    );
 }

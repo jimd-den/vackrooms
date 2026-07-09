@@ -1,12 +1,29 @@
+#[derive(Debug, Clone, PartialEq, Eq, Copy, Hash)]
+pub enum MicrobiomeZone {
+    Standard,
+    Arch,
+    PillarField,
+    Holes,
+    Blackout,
+    RedRoom,
+    Atrium,
+}
+
+impl Default for MicrobiomeZone {
+    fn default() -> Self {
+        Self::Standard
+    }
+}
+
 /// Represents a single room or cell in the Backrooms maze.
 /// We use simple booleans for walls (North, East, South, West) to adhere to KISS principle.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Cell {
     pub visited: bool,
     pub walls: [bool; 4], // [North, East, South, West]
-    pub is_red: bool,     // Rare anomaly: Red room
-    pub is_dark: bool,    // Rare anomaly: Pitch-black room
-    pub light_level: u8,  // Pre-calculated baked light (0-15)
+    pub zone: MicrobiomeZone,
+    pub light_level: u8,   // Pre-calculated baked light (0-15)
+    pub is_corridor: bool, // Part 1: Hallways
 }
 
 impl Cell {
@@ -15,9 +32,9 @@ impl Cell {
         Self {
             visited: false,
             walls: [true, true, true, true],
-            is_red: false,
-            is_dark: false,
+            zone: MicrobiomeZone::Standard,
             light_level: 0,
+            is_corridor: false,
         }
     }
 }

@@ -14,7 +14,7 @@ use vackrooms::domain::entities::sparse_voxel_octree::{SparseVoxelOctree, SvoNod
 use vackrooms::domain::use_cases::build_octree::BuildOctreeUseCase;
 use vackrooms::entities::models::Position;
 use vackrooms::use_cases::generate_chunk::{GenerateChunkArchitectureUseCase, GeneratorConfig};
-use vackrooms::use_cases::ports::{NoiseProvider, TelemetryPort, NULL_TELEMETRY};
+use vackrooms::use_cases::ports::{NULL_TELEMETRY, NoiseProvider, TelemetryPort};
 
 use crate::application::collision::Aabb;
 use crate::application::ports::{ChunkPayload, ChunkSourcePort};
@@ -37,7 +37,12 @@ pub struct LocalChunkSource<N: NoiseProvider> {
 
 impl<N: NoiseProvider> LocalChunkSource<N> {
     pub fn new(noise: N, seed: u32, config: GeneratorConfig) -> Self {
-        Self { noise, telemetry: &NULL_TELEMETRY, seed, config }
+        Self {
+            noise,
+            telemetry: &NULL_TELEMETRY,
+            seed,
+            config,
+        }
     }
 
     pub fn with_telemetry(
@@ -46,7 +51,12 @@ impl<N: NoiseProvider> LocalChunkSource<N> {
         config: GeneratorConfig,
         telemetry: &'static dyn TelemetryPort,
     ) -> Self {
-        Self { noise, telemetry, seed, config }
+        Self {
+            noise,
+            telemetry,
+            seed,
+            config,
+        }
     }
 }
 
@@ -67,8 +77,7 @@ impl<N: NoiseProvider> ChunkSourcePort for LocalChunkSource<N> {
         );
 
         let gpu = OctreeGpuSerializer::serialize_to_gpu_data(&svo);
-        let collision =
-            extract_collision_boxes(&svo, origin_x, origin_z, self.config.voxel_scale);
+        let collision = extract_collision_boxes(&svo, origin_x, origin_z, self.config.voxel_scale);
 
         ChunkPayload {
             root: svo.root as u32,
@@ -90,7 +99,18 @@ pub fn extract_collision_boxes(
 ) -> Vec<Aabb> {
     let mut boxes = Vec::new();
     let size = 1u32 << svo.depth;
-    walk(svo, svo.root, 0, 0, 0, size, origin_x, origin_z, voxel_scale, &mut boxes);
+    walk(
+        svo,
+        svo.root,
+        0,
+        0,
+        0,
+        size,
+        origin_x,
+        origin_z,
+        voxel_scale,
+        &mut boxes,
+    );
     boxes
 }
 
@@ -116,10 +136,16 @@ fn walk(
                     origin_z + z as f32 * voxel_scale,
                 ];
                 let extent = size as f32 * voxel_scale;
-                out.push(Aabb::new(min, [min[0] + extent, min[1] + extent, min[2] + extent]));
+                out.push(Aabb::new(
+                    min,
+                    [min[0] + extent, min[1] + extent, min[2] + extent],
+                ));
             }
         }
-        SvoNode::Internal { child_base_index, child_mask } => {
+        SvoNode::Internal {
+            child_base_index,
+            child_mask,
+        } => {
             let half = size / 2;
             for child in 0..8u32 {
                 if child_mask & (1 << child) != 0 {
@@ -144,7 +170,7 @@ fn walk(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use vackrooms::domain::entities::voxel_grid::{VoxelGrid, VOXEL_FLOOR, VOXEL_WALL};
+    use vackrooms::domain::entities::voxel_grid::{VOXEL_FLOOR, VOXEL_WALL, VoxelGrid};
     use vackrooms::frameworks_drivers::simple_noise::SimpleNoiseProvider;
 
     #[test]
@@ -163,15 +189,15 @@ mod tests {
 
     #[test]
     fn generated_chunk_produces_row_padded_nodes_and_some_collision() {
-        let source = LocalChunkSource::new(
-            SimpleNoiseProvider::new(),
-            42,
-            GeneratorConfig::low_spec(),
-        );
+        let source =
+            LocalChunkSource::new(SimpleNoiseProvider::new(), 42, GeneratorConfig::low_spec());
         let payload = source.load(10.0, 10.0, 0);
         // Row padding: node stream is a whole number of 1024-texel rows.
         assert_eq!(payload.nodes.len() % (1024 * 4), 0);
         assert!(payload.world_size > 0.0);
-        assert!(!payload.collision.is_empty(), "a maze chunk must have walls");
+        assert!(
+            !payload.collision.is_empty(),
+            "a maze chunk must have walls"
+        );
     }
 }

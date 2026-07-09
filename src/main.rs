@@ -10,7 +10,7 @@ use vackrooms::interface_adapters::web_renderer::WebRendererAdapter;
 use vackrooms::use_cases::generate_chunk::GenerateChunkArchitectureUseCase;
 
 /// Presentation Layer & Driver:
-/// A minimalist, zero-dependency HTTP server that connects our 
+/// A minimalist, zero-dependency HTTP server that connects our
 /// Clean Architecture engine to the Browser Voxel Renderer.
 fn main() {
     let port = 8080;
@@ -42,16 +42,16 @@ fn handle_client(mut stream: TcpStream) {
 
         let request = String::from_utf8_lossy(&buffer[..bytes_read]);
         let request_line = request.lines().next().unwrap_or("");
-        
+
         if request_line.starts_with("GET /maze") {
             // Serve the Procedural Voxel Data with support for coordinate query parameters
             let parts: Vec<&str> = request_line.split_whitespace().collect();
             let url = parts.get(1).unwrap_or(&"/maze");
-            
+
             let mut chunk_x = 0.0;
             let mut chunk_z = 0.0;
             let mut spec = "high";
-            
+
             if let Some(query_idx) = url.find('?') {
                 let query = &url[query_idx + 1..];
                 for param in query.split('&') {
@@ -66,38 +66,38 @@ fn handle_client(mut stream: TcpStream) {
                     }
                 }
             }
-            
+
             let config = if spec == "low" {
                 vackrooms::use_cases::generate_chunk::GeneratorConfig::low_spec()
             } else {
                 vackrooms::use_cases::generate_chunk::GeneratorConfig::high_spec()
             };
-            
+
             let noise_provider = SimpleNoiseProvider::new();
             let telemetry = StdTelemetry;
-            let generator = GenerateChunkArchitectureUseCase::with_telemetry(&noise_provider, &telemetry);
-            
+            let generator =
+                GenerateChunkArchitectureUseCase::with_telemetry(&noise_provider, &telemetry);
+
             let chunk = generator.execute(Position::new(chunk_x, chunk_z), 42, config);
-            
+
             // Adapt to Web Format (greedy meshed faces)
             let json = WebRendererAdapter::to_json(&chunk, config.chunk_size);
-            
+
             let response = format!(
                 "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
                 json.len(),
                 json
             );
             let _ = stream.write_all(response.as_bytes());
-            
         } else if request_line.starts_with("GET /octree") {
             // Serve the SVO Packed Data
             let parts: Vec<&str> = request_line.split_whitespace().collect();
             let url = parts.get(1).unwrap_or(&"/octree");
-            
+
             let mut chunk_x = 0.0;
             let mut chunk_z = 0.0;
             let mut spec = "high";
-            
+
             if let Some(query_idx) = url.find('?') {
                 let query = &url[query_idx + 1..];
                 for param in query.split('&') {
@@ -112,25 +112,32 @@ fn handle_client(mut stream: TcpStream) {
                     }
                 }
             }
-            
+
             let config = if spec == "low" {
                 vackrooms::use_cases::generate_chunk::GeneratorConfig::low_spec()
             } else {
                 vackrooms::use_cases::generate_chunk::GeneratorConfig::high_spec()
             };
-            
+
             let noise_provider = SimpleNoiseProvider::new();
             let telemetry = StdTelemetry;
-            let generator = GenerateChunkArchitectureUseCase::with_telemetry(&noise_provider, &telemetry);
-            
+            let generator =
+                GenerateChunkArchitectureUseCase::with_telemetry(&noise_provider, &telemetry);
+
             // Generate chunk at position with GeneratorConfig
             let chunk = generator.execute(Position::new(chunk_x, chunk_z), 42, config);
-            
+
             // Adapt to Web Format using SVO representation
             let depth = config.svo_depth();
             let world_size = config.svo_world_size();
-            let binary = WebRendererAdapter::to_octree_binary(&chunk, depth, world_size, config.voxel_scale, config.chunk_size);
-            
+            let binary = WebRendererAdapter::to_octree_binary(
+                &chunk,
+                depth,
+                world_size,
+                config.voxel_scale,
+                config.chunk_size,
+            );
+
             let header = format!(
                 "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\n\r\n",
                 binary.len()
@@ -139,7 +146,6 @@ fn handle_client(mut stream: TcpStream) {
             response.extend_from_slice(header.as_bytes());
             response.extend_from_slice(&binary);
             let _ = stream.write_all(&response);
-
         } else if request_line.starts_with("GET ") {
             // Static file service for the wasm front end (and the legacy page).
             let parts: Vec<&str> = request_line.split_whitespace().collect();

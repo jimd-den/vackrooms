@@ -1,5 +1,5 @@
 use crate::domain::entities::voxel_grid::{
-    VoxelGrid, VOXEL_AIR, VOXEL_WALL, VOXEL_FLOOR, VOXEL_CEILING, VOXEL_LIGHT, VOXEL_RED_WALL,
+    VOXEL_AIR, VOXEL_CEILING, VOXEL_FLOOR, VOXEL_LIGHT, VOXEL_RED_WALL, VOXEL_WALL, VOXEL_RED_LIGHT, VoxelGrid,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -61,7 +61,7 @@ impl VoxelMapper {
                 VOXEL_WALL => VoxelType::Wall,
                 VOXEL_FLOOR => VoxelType::Floor,
                 VOXEL_CEILING => VoxelType::Ceiling,
-                VOXEL_LIGHT => VoxelType::Light,
+                VOXEL_LIGHT | VOXEL_RED_LIGHT => VoxelType::Light,
                 VOXEL_RED_WALL => VoxelType::RedWall,
                 _ => VoxelType::Wall,
             }
@@ -75,12 +75,13 @@ impl VoxelMapper {
                 VOXEL_FLOOR => 0x998811,
                 VOXEL_CEILING => 0xcccccc,
                 VOXEL_LIGHT => 0xffffff,
+                VOXEL_RED_LIGHT => 0xff4444,
                 VOXEL_RED_WALL => 0x880000,
                 _ => 0x000000,
             };
 
-            if v_id == VOXEL_LIGHT {
-                0xffffff
+            if v_id == VOXEL_LIGHT || v_id == VOXEL_RED_LIGHT {
+                base_color
             } else {
                 apply_light(base_color, ll)
             }
@@ -316,10 +317,10 @@ mod tests {
     fn test_voxel_mapping() {
         let mut grid = VoxelGrid::new(2, 2, 2);
         grid.set(0, 0, 0, VOXEL_WALL);
-        
+
         let mapper = VoxelMapper::new(1.0);
         let quads = mapper.map_voxel_grid(&grid);
-        
+
         // Single isolated wall block should have 6 faces merged as 6 quads of size 1x1
         assert_eq!(quads.len(), 6);
         for q in quads {
@@ -335,12 +336,15 @@ mod tests {
         grid.set(1, 0, 0, VOXEL_WALL);
         grid.set(2, 0, 0, VOXEL_WALL);
         grid.set(3, 0, 0, VOXEL_WALL);
-        
+
         let mapper = VoxelMapper::new(1.0);
         let quads = mapper.map_voxel_grid(&grid);
-        
+
         // The Up faces of these 4 aligned blocks should merge into a single 4x1 quad!
-        let up_quads: Vec<&MergedQuad> = quads.iter().filter(|q| q.dir == FaceDirection::Up).collect();
+        let up_quads: Vec<&MergedQuad> = quads
+            .iter()
+            .filter(|q| q.dir == FaceDirection::Up)
+            .collect();
         assert_eq!(up_quads.len(), 1);
         assert_eq!(up_quads[0].w, 4.0);
         assert_eq!(up_quads[0].h, 1.0);

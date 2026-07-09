@@ -1,3 +1,6 @@
+use vackrooms::domain::entities::voxel_grid::{VOXEL_FLOOR, VOXEL_WALL};
+use vackrooms::entities::models::Position;
+use vackrooms::frameworks_drivers::simple_noise::SimpleNoiseProvider;
 /// Collision Diagnostic Tests — TDD Phase 1
 ///
 /// WHY THESE TESTS EXIST:
@@ -14,11 +17,7 @@
 ///
 /// If test 2 or 3 fails, it proves the bug.  Then we add a fix and verify
 /// the test passes.
-
 use vackrooms::use_cases::generate_chunk::{GenerateChunkArchitectureUseCase, GeneratorConfig};
-use vackrooms::entities::models::Position;
-use vackrooms::frameworks_drivers::simple_noise::SimpleNoiseProvider;
-use vackrooms::domain::entities::voxel_grid::{VOXEL_WALL, VOXEL_FLOOR};
 
 /// The JavaScript side extracts wall collision boxes from the SVO.
 /// This Rust analogue extracts the same information directly from the VoxelGrid
@@ -75,7 +74,11 @@ fn floor_boxes(chunk_x: f32, chunk_z: f32) -> Vec<(f32, f32, f32, f32, f32, f32)
 }
 
 /// Player AABB: eye-level at pos.y, feet at pos.y - 1.65, head at pos.y + 0.1
-fn player_overlaps(pos: (f32, f32, f32), radius: f32, vbox: (f32, f32, f32, f32, f32, f32)) -> bool {
+fn player_overlaps(
+    pos: (f32, f32, f32),
+    radius: f32,
+    vbox: (f32, f32, f32, f32, f32, f32),
+) -> bool {
     let (px, py, pz) = pos;
     let p_min_x = px - radius;
     let p_max_x = px + radius;
@@ -85,9 +88,12 @@ fn player_overlaps(pos: (f32, f32, f32), radius: f32, vbox: (f32, f32, f32, f32,
     let p_max_z = pz + radius;
     let (v_min_x, v_max_x, v_min_y, v_max_y, v_min_z, v_max_z) = vbox;
 
-    p_max_x > v_min_x && p_min_x < v_max_x &&
-    p_max_y > v_min_y && p_min_y < v_max_y &&
-    p_max_z > v_min_z && p_min_z < v_max_z
+    p_max_x > v_min_x
+        && p_min_x < v_max_x
+        && p_max_y > v_min_y
+        && p_min_y < v_max_y
+        && p_max_z > v_min_z
+        && p_min_z < v_max_z
 }
 
 // ============================================================
@@ -102,7 +108,8 @@ fn test_hub_chunk_interior_is_wall_free() {
     let spawn = (5.0_f32, 1.7_f32, 5.0_f32);
     let radius = 0.35_f32;
 
-    let overlapping: Vec<_> = walls.iter()
+    let overlapping: Vec<_> = walls
+        .iter()
         .filter(|&&b| player_overlaps(spawn, radius, b))
         .collect();
 
@@ -111,7 +118,9 @@ fn test_hub_chunk_interior_is_wall_free() {
         "FAIL: Spawn point {:?} overlaps {} wall voxel(s).\n\
          First overlap: {:?}\n\
          This proves the spawn-in-wall bug.",
-        spawn, overlapping.len(), overlapping.first()
+        spawn,
+        overlapping.len(),
+        overlapping.first()
     );
 }
 
@@ -134,7 +143,8 @@ fn test_floor_geometry_overlaps_player_proving_the_bug() {
     let spawn = (5.0_f32, 1.7_f32, 5.0_f32);
     let radius = 0.35_f32;
 
-    let floor_at_spawn: Vec<_> = floors.iter()
+    let floor_at_spawn: Vec<_> = floors
+        .iter()
         .filter(|&&b| player_overlaps(spawn, radius, b))
         .collect();
 
@@ -145,10 +155,10 @@ fn test_floor_geometry_overlaps_player_proving_the_bug() {
          This causes the player to spawn 'stuck' and unable to move.\n\
          Fix: exclude FLOOR and CEILING voxels from collision extraction.\n\
          First overlapping floor box: {:?}",
-        floor_at_spawn.len(), floor_at_spawn.first()
+        floor_at_spawn.len(),
+        floor_at_spawn.first()
     );
 }
-
 
 // ============================================================
 // TEST 3: Terminal velocity must be sane (≤ 5 world-units/second)
@@ -158,7 +168,7 @@ fn test_terminal_velocity_is_sane() {
     // JS formula: velocity.z -= direction.z * speed * delta
     //             velocity.z -= velocity.z * friction * delta   (drag)
     // Terminal velocity = speed / friction
-    let speed: f32 = 4.0;    // target walk speed (world units/sec)
+    let speed: f32 = 4.0; // target walk speed (world units/sec)
     let friction: f32 = 10.0; // damping coefficient
     let terminal = speed / friction;
 
@@ -168,7 +178,9 @@ fn test_terminal_velocity_is_sane() {
         "FAIL: Terminal velocity {:.2} u/s exceeds 5 u/s.\n\
          This causes the 'too fast' movement bug.\n\
          Use speed <= {:.1} with friction = {:.1}",
-        terminal, friction * 5.0, friction
+        terminal,
+        friction * 5.0,
+        friction
     );
 }
 
@@ -186,7 +198,8 @@ fn test_fix_only_walls_collide_at_spawn() {
     let spawn = (5.0_f32, 1.7_f32, 5.0_f32);
     let radius = 0.35_f32;
 
-    let blocked: Vec<_> = walls.iter()
+    let blocked: Vec<_> = walls
+        .iter()
         .filter(|&&b| player_overlaps(spawn, radius, b))
         .collect();
 
@@ -195,7 +208,7 @@ fn test_fix_only_walls_collide_at_spawn() {
         "FAIL: Player still collides with {} wall box(es) at spawn even after floor fix.\n\
          First collision: {:?}\n\
          This is a separate bug — the hub chunk has a wall at the spawn point.",
-        blocked.len(), blocked.first()
+        blocked.len(),
+        blocked.first()
     );
 }
-

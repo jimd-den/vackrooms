@@ -1,8 +1,8 @@
-use crate::domain::entities::voxel_grid::VoxelGrid;
-use crate::adapters::voxel_mapper::VoxelMapper;
 use crate::adapters::json_presenter::JsonPresenter;
-use crate::domain::use_cases::build_octree::BuildOctreeUseCase;
 use crate::adapters::octree_gpu_serializer::OctreeGpuSerializer;
+use crate::adapters::voxel_mapper::VoxelMapper;
+use crate::domain::entities::voxel_grid::VoxelGrid;
+use crate::domain::use_cases::build_octree::BuildOctreeUseCase;
 
 /// WebRendererAdapter acts as a Presenter in Clean Architecture.
 /// It translates the core domain object (VoxelGrid) into formats
@@ -103,7 +103,7 @@ mod tests {
         let mut grid = VoxelGrid::new(2, 2, 2);
         grid.set(0, 0, 0, VOXEL_WALL);
         let binary = WebRendererAdapter::to_octree_binary(&grid, 8, 25.6, 0.1, 20.0);
-        
+
         // Header is 28 bytes
         assert!(binary.len() >= 28);
         // Total bytes must be aligned to 4-byte boundaries

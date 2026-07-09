@@ -78,26 +78,35 @@ impl MazeGenerator for GrowingTreeGenerator {
                     cell.walls[wall_there] = false;
                     cell.visited = true;
                 }
-                
+
                 frontier.push((nx, ny));
             }
         }
-        
+
         // Add loops to break the "perfect maze" property and make it feel like the Backrooms
         let base_openings = (width * depth) as f32 / 4.0;
         let extra_openings = (base_openings * self.junction_density) as usize;
-        for _ in 0..extra_openings {
+        let mut actual_openings = 0;
+        let mut attempts = 0;
+
+        while actual_openings < extra_openings && attempts < extra_openings * 3 {
+            attempts += 1;
             let x = rng.random_range(0..width);
             let y = rng.random_range(0..depth);
+
+            // Blackout zones are knot-like dead-ends; suppress extra loops in them
+            if let Some(cell) = grid.get(x, y) {
+                if cell.zone == crate::domain::entities::cell::MicrobiomeZone::Blackout {
+                    continue;
+                }
+            }
+
             let dir = rng.random_range(0..4);
-            
+
             if let Some(cell) = grid.get_mut(x, y) {
                 cell.walls[dir] = false;
             }
-            
-            // Note: In a perfect implementation we would also knock down the corresponding wall
-            // of the adjacent cell. But for simplicity and abstract logic, knocking down one side 
-            // is effectively "no wall" in this direction. Let's do it properly though.
+
             let (nx, ny) = match dir {
                 0 => (x as isize, y as isize - 1),
                 1 => (x as isize + 1, y as isize),
@@ -105,7 +114,7 @@ impl MazeGenerator for GrowingTreeGenerator {
                 3 => (x as isize - 1, y as isize),
                 _ => unreachable!(),
             };
-            
+
             if nx >= 0 && nx < width as isize && ny >= 0 && ny < depth as isize {
                 let (nx, ny) = (nx as usize, ny as usize);
                 let opposite_dir = (dir + 2) % 4;
@@ -113,22 +122,8 @@ impl MazeGenerator for GrowingTreeGenerator {
                     n_cell.walls[opposite_dir] = false;
                 }
             }
-        }
 
-        // Pass 3: Anomalies (Red rooms and dark rooms)
-        for y in 0..depth {
-            for x in 0..width {
-                if let Some(cell) = grid.get_mut(x, y) {
-                    // 5% chance of red room
-                    if rng.random_bool(0.05) {
-                        cell.is_red = true;
-                    }
-                    // 10% chance of dark room (no lights)
-                    if rng.random_bool(0.10) {
-                        cell.is_dark = true;
-                    }
-                }
-            }
+            actual_openings += 1;
         }
     }
 }
@@ -144,10 +139,12 @@ mod tests {
     fn test_generate_maze_visits_all_cells() {
         let mut grid = Grid::new(10, 10);
         let mut rng = StdRng::seed_from_u64(42);
-        
-        let generator = GrowingTreeGenerator { junction_density: 1.0 };
+
+        let generator = GrowingTreeGenerator {
+            junction_density: 1.0,
+        };
         generator.generate(&mut grid, &mut rng);
-        
+
         for y in 0..grid.depth() {
             for x in 0..grid.width() {
                 let cell = grid.get(x, y).unwrap();

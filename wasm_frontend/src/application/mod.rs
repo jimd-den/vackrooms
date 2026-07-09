@@ -4,9 +4,9 @@
 //! it can be exercised by native unit tests. Outer layers communicate with
 //! it exclusively through the ports declared in [`ports`].
 
-pub mod ports;
-pub mod collision;
-pub mod player;
-pub mod streaming;
 pub mod atlas;
+pub mod collision;
 pub mod engine;
+pub mod player;
+pub mod ports;
+pub mod streaming;
