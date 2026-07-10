@@ -20,7 +20,7 @@ use crate::drivers::shaders::{SURFACE_FRAGMENT_SHADER, SURFACE_VERTEX_SHADER};
 const TIME_ELAPSED_EXT: u32 = 0x88BF;
 const GPU_DISJOINT_EXT: u32 = 0x8FBB;
 const VERTEX_STRIDE: i32 = 10;
-const MAX_DRAW_DISTANCE: f32 = 100.0;
+pub(crate) const MAX_DRAW_DISTANCE: f32 = 100.0;
 
 struct Uniforms {
     projection: Option<WebGlUniformLocation>,
@@ -203,6 +203,9 @@ impl SurfaceRenderer {
 
         let light_texture = gl.create_texture().expect("create light texture");
         gl.bind_texture(Gl::TEXTURE_3D, Some(&light_texture));
+        // RGB rows are width*3 bytes — rarely 4-aligned, and the default
+        // unpack alignment of 4 makes texImage3D reject the upload.
+        gl.pixel_storei(Gl::UNPACK_ALIGNMENT, 1);
         gl.tex_image_3d_with_opt_u8_array(
             Gl::TEXTURE_3D,
             0,
@@ -444,7 +447,7 @@ impl RendererPort for SurfaceRenderer {
                 global_light_colors[i * 3 + 1] = light.color[1];
                 global_light_colors[i * 3 + 2] = light.color[2];
                 global_light_params[i * 4] = light.radius;
-                global_light_params[i * 4 + 1] = if light.radius > 20.0 { 3.0 } else { 1.0 }; // intensity
+                global_light_params[i * 4 + 1] = light.intensity;
                 global_light_params[i * 4 + 2] = light.half_size[0];
                 global_light_params[i * 4 + 3] = light.half_size[1];
             }
@@ -548,7 +551,7 @@ impl RendererPort for SurfaceRenderer {
     }
 }
 
-fn camera_matrices(frame: &FrameParams, width: i32, height: i32) -> ([f32; 16], [f32; 16]) {
+pub(crate) fn camera_matrices(frame: &FrameParams, width: i32, height: i32) -> ([f32; 16], [f32; 16]) {
     let (sp, cp) = frame.pitch.sin_cos();
     let (sy, cy) = frame.yaw.sin_cos();
     let right = [cy, 0.0, -sy];
@@ -599,7 +602,7 @@ fn camera_matrices(frame: &FrameParams, width: i32, height: i32) -> ([f32; 16], 
     (projection, view)
 }
 
-fn ortho_matrix(left: f32, right: f32, bottom: f32, top: f32, near: f32, far: f32) -> [f32; 16] {
+pub(crate) fn ortho_matrix(left: f32, right: f32, bottom: f32, top: f32, near: f32, far: f32) -> [f32; 16] {
     let mut m = [0.0; 16];
     m[0] = 2.0 / (right - left);
     m[5] = 2.0 / (top - bottom);
@@ -611,7 +614,7 @@ fn ortho_matrix(left: f32, right: f32, bottom: f32, top: f32, near: f32, far: f3
     m
 }
 
-fn look_at_matrix_down(eye: [f32; 3]) -> [f32; 16] {
+pub(crate) fn look_at_matrix_down(eye: [f32; 3]) -> [f32; 16] {
     // Looking straight down (-Y), up is -Z
     let forward = [0.0, -1.0, 0.0];
     let up = [0.0, 0.0, -1.0];
@@ -637,7 +640,7 @@ fn look_at_matrix_down(eye: [f32; 3]) -> [f32; 16] {
     m
 }
 
-fn multiply_matrices(a: &[f32; 16], b: &[f32; 16]) -> [f32; 16] {
+pub(crate) fn multiply_matrices(a: &[f32; 16], b: &[f32; 16]) -> [f32; 16] {
     let mut m = [0.0; 16];
     for col in 0..4 {
         for row in 0..4 {
@@ -651,7 +654,7 @@ fn multiply_matrices(a: &[f32; 16], b: &[f32; 16]) -> [f32; 16] {
     m
 }
 
-fn compile_shader(gl: &Gl, kind: u32, source: &str) -> Result<WebGlShader, JsValue> {
+pub(crate) fn compile_shader(gl: &Gl, kind: u32, source: &str) -> Result<WebGlShader, JsValue> {
     let shader = gl
         .create_shader(kind)
         .ok_or_else(|| JsValue::from_str("failed to create shader object"))?;
@@ -670,7 +673,7 @@ fn compile_shader(gl: &Gl, kind: u32, source: &str) -> Result<WebGlShader, JsVal
     }
 }
 
-fn link_program(gl: &Gl, vertex: &str, fragment: &str) -> Result<WebGlProgram, JsValue> {
+pub(crate) fn link_program(gl: &Gl, vertex: &str, fragment: &str) -> Result<WebGlProgram, JsValue> {
     let vs = compile_shader(gl, Gl::VERTEX_SHADER, vertex)?;
     let fs = compile_shader(gl, Gl::FRAGMENT_SHADER, fragment)?;
     let program = gl

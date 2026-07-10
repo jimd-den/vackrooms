@@ -27,6 +27,7 @@ use crate::application::ports::{
 };
 use crate::drivers::console_telemetry::CONSOLE_TELEMETRY;
 use crate::drivers::cpu_canvas::CpuCanvasRenderer;
+use crate::drivers::splat_webgl::{SplatProfile, SplatRenderer};
 use crate::drivers::surface_webgl::SurfaceRenderer;
 use crate::drivers::webgl::WebGl2Renderer;
 
@@ -46,6 +47,7 @@ const MINIMAP_SCALE: f64 = 12.0;
 /// debugging; `?renderer=cpu` chooses the software fallback.
 enum DriverRenderer {
     Surface(SurfaceRenderer),
+    Splat(SplatRenderer),
     Raymarch(WebGl2Renderer),
     Cpu(CpuCanvasRenderer),
 }
@@ -54,6 +56,7 @@ impl DriverRenderer {
     fn resize(&mut self, width: u32, height: u32) {
         match self {
             DriverRenderer::Surface(r) => r.resize(width, height),
+            DriverRenderer::Splat(r) => r.resize(width, height),
             DriverRenderer::Raymarch(r) => r.resize(width, height),
             DriverRenderer::Cpu(r) => r.resize(width, height),
         }
@@ -65,7 +68,9 @@ impl DriverRenderer {
     /// lets CSS upscale with `image-rendering: pixelated`.
     fn resolution_factor(&self) -> f64 {
         match self {
-            DriverRenderer::Surface(_) | DriverRenderer::Raymarch(_) => 1.0,
+            DriverRenderer::Surface(_)
+            | DriverRenderer::Splat(_)
+            | DriverRenderer::Raymarch(_) => 1.0,
             DriverRenderer::Cpu(_) => 0.25,
         }
     }
@@ -73,6 +78,7 @@ impl DriverRenderer {
     fn label(&self) -> &'static str {
         match self {
             DriverRenderer::Surface(_) => "GPU surfaces",
+            DriverRenderer::Splat(_) => "GPU face splats",
             DriverRenderer::Raymarch(_) => "GPU raymarch (debug)",
             DriverRenderer::Cpu(_) => "CPU splat",
         }
@@ -81,26 +87,33 @@ impl DriverRenderer {
 
 impl RendererPort for DriverRenderer {
     fn uses_surface_meshes(&self) -> bool {
-        matches!(self, DriverRenderer::Surface(_))
+        matches!(self, DriverRenderer::Surface(_) | DriverRenderer::Splat(_))
     }
     fn upload_surfaces(&mut self, chunks: &[SurfaceChunk<'_>]) {
-        if let DriverRenderer::Surface(r) = self {
-            r.upload_surfaces(chunks);
+        match self {
+            DriverRenderer::Surface(r) => r.upload_surfaces(chunks),
+            DriverRenderer::Splat(r) => r.upload_surfaces(chunks),
+            _ => {}
         }
     }
     fn remove_surfaces(&mut self, keys: &[SurfaceChunkKey]) {
-        if let DriverRenderer::Surface(r) = self {
-            r.remove_surfaces(keys);
+        match self {
+            DriverRenderer::Surface(r) => r.remove_surfaces(keys),
+            DriverRenderer::Splat(r) => r.remove_surfaces(keys),
+            _ => {}
         }
     }
     fn clear_surfaces(&mut self) {
-        if let DriverRenderer::Surface(r) = self {
-            r.clear_surfaces();
+        match self {
+            DriverRenderer::Surface(r) => r.clear_surfaces(),
+            DriverRenderer::Splat(r) => r.clear_surfaces(),
+            _ => {}
         }
     }
     fn gpu_frame_ms(&self) -> Option<f32> {
         match self {
             DriverRenderer::Surface(r) => r.gpu_frame_ms(),
+            DriverRenderer::Splat(r) => r.gpu_frame_ms(),
             DriverRenderer::Raymarch(_) | DriverRenderer::Cpu(_) => None,
         }
     }
@@ -108,19 +121,21 @@ impl RendererPort for DriverRenderer {
         match self {
             DriverRenderer::Cpu(r) => r.cpu_telemetry_string(),
             DriverRenderer::Surface(r) => r.cpu_telemetry_string(),
+            DriverRenderer::Splat(r) => r.cpu_telemetry_string(),
             DriverRenderer::Raymarch(r) => r.cpu_telemetry_string(),
         }
     }
     fn upload_atlas(&mut self, texels: &[u32]) {
         match self {
             DriverRenderer::Surface(r) => r.upload_atlas(texels),
+            DriverRenderer::Splat(r) => r.upload_atlas(texels),
             DriverRenderer::Raymarch(r) => r.upload_atlas(texels),
             DriverRenderer::Cpu(r) => r.upload_atlas(texels),
         }
     }
     fn upload_atlas_rows(&mut self, first_row: u32, texels: &[u32]) -> bool {
         match self {
-            DriverRenderer::Surface(_) => false,
+            DriverRenderer::Surface(_) | DriverRenderer::Splat(_) => false,
             DriverRenderer::Raymarch(r) => r.upload_atlas_rows(first_row, texels),
             // The CPU splatter rebuilds its mip pyramid from the whole
             // atlas, so it only supports full uploads.
@@ -130,6 +145,7 @@ impl RendererPort for DriverRenderer {
     fn draw(&mut self, frame: &FrameParams, chunks: &[ChunkDraw]) {
         match self {
             DriverRenderer::Surface(r) => r.draw(frame, chunks),
+            DriverRenderer::Splat(r) => r.draw(frame, chunks),
             DriverRenderer::Raymarch(r) => r.draw(frame, chunks),
             DriverRenderer::Cpu(r) => r.draw(frame, chunks),
         }
@@ -185,14 +201,34 @@ struct TouchState {
     look_last: (f64, f64),
 }
 
-/// Renderer selection: surfaces by default, `?renderer=raymarch` for the
-/// retained SVO debug path, `?renderer=cpu` for software fallback.
+/// Renderer selection: surfaces by default, `?renderer=splat` for the
+/// instanced face-splat path (default candidate once parity/perf is
+/// confirmed), `?renderer=raymarch` for the retained SVO debug path,
+/// `?renderer=cpu` for software fallback.
 fn create_renderer(canvas: &HtmlCanvasElement, query: &str) -> Result<DriverRenderer, JsValue> {
     if query.contains("renderer=cpu") {
         return Ok(DriverRenderer::Cpu(CpuCanvasRenderer::new(canvas)?));
     }
     if query.contains("renderer=raymarch") {
         return WebGl2Renderer::new(canvas).map(DriverRenderer::Raymarch);
+    }
+    if query.contains("renderer=splat") {
+        let profile = if query.contains("spec=high") {
+            SplatProfile::high()
+        } else {
+            SplatProfile::low()
+        };
+        match SplatRenderer::new(canvas, profile) {
+            Ok(gpu) => return Ok(DriverRenderer::Splat(gpu)),
+            Err(err) => {
+                web_sys::console::warn_2(
+                    &JsValue::from_str(
+                        "splat renderer unavailable, falling back to surface meshes:",
+                    ),
+                    &err,
+                );
+            }
+        }
     }
     match SurfaceRenderer::new(canvas) {
         Ok(gpu) => Ok(DriverRenderer::Surface(gpu)),
@@ -254,16 +290,44 @@ pub fn boot() -> Result<(), JsValue> {
     if let Ok(hud_renderer) = element::<HtmlElement>(&document, "hud-renderer") {
         hud_renderer.set_text_content(Some(renderer.borrow().label()));
     }
-    let source = LocalChunkSource::with_telemetry(
-        SimpleNoiseProvider::new(),
-        gen_params.seed,
-        generator_config,
-        &CONSOLE_TELEMETRY,
-    );
+    // Chunk generation runs on a Web Worker pool so crossing a streaming
+    // boundary never stalls the frame loop. `?workers=0` forces the old
+    // synchronous in-thread source (also the fallback if workers fail).
+    let source: Box<dyn crate::application::ports::ChunkSourcePort> = if query.contains("workers=0") {
+        Box::new(LocalChunkSource::with_telemetry(
+            SimpleNoiseProvider::new(),
+            gen_params.seed,
+            generator_config,
+            &CONSOLE_TELEMETRY,
+        ))
+    } else {
+        match crate::drivers::worker_source::WorkerChunkSource::new(&query, WORLD_SEED) {
+            Ok(pool) => {
+                web_sys::console::log_1(
+                    &format!("chunk generation: {} worker threads", pool.pool_size()).into(),
+                );
+                Box::new(pool)
+            }
+            Err(err) => {
+                web_sys::console::warn_2(
+                    &JsValue::from_str(
+                        "worker pool unavailable, falling back to in-thread generation:",
+                    ),
+                    &err,
+                );
+                Box::new(LocalChunkSource::with_telemetry(
+                    SimpleNoiseProvider::new(),
+                    gen_params.seed,
+                    generator_config,
+                    &CONSOLE_TELEMETRY,
+                ))
+            }
+        }
+    };
     let engine = Rc::new(RefCell::new(Engine::new(
         engine_config,
         Box::new(SharedRenderer(renderer.clone())),
-        Box::new(source),
+        source,
     )));
     let input = Rc::new(RefCell::new(InputCollector::new()));
     let touch = Rc::new(RefCell::new(TouchState::default()));

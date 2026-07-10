@@ -228,10 +228,6 @@ impl SoftwareRasterizer {
         is_emissive: bool,
         crowded_siblings: u32,
     ) {
-        // Per-face directional shading from the face we actually see:
-        // We project the view vector onto the three axes. Instead of taking
-        // the max (discontinuous step), we blend the face shading factors
-        // continuously using the normalized squared vector components as weights.
         let to_cam = [
             center[0] - cam.pos[0],
             center[1] - cam.pos[1],
@@ -243,34 +239,94 @@ impl SoftwareRasterizer {
         let dz_sq = to_cam[2] * to_cam[2];
         let sum = dx_sq + dy_sq + dz_sq;
 
-        let face = if sum > 1e-6 {
-            // Y-face: bottom face (0.55) if looking up, top face (1.0) if looking down.
-            let y_val = if to_cam[1] > 0.0 { 0.55 } else { 1.0 };
-            let x_val = 0.8;
-            let dz_val = 0.7;
-            (dx_sq * x_val + dy_sq * y_val + dz_sq * dz_val) / sum
+        // Reconstruct face response and normal approximation
+        let face_response = if sum > 1e-6 {
+            let nx_sign = if to_cam[0] > 0.0 { -1.0 } else { 1.0 };
+            let ny_sign = if to_cam[1] > 0.0 { -1.0 } else { 1.0 };
+            let nz_sign = if to_cam[2] > 0.0 { -1.0 } else { 1.0 };
+
+            let wx = dx_sq / sum;
+            let wy = dy_sq / sum;
+            let wz = dz_sq / sum;
+
+            // Upward-facing surfaces (floor normal points up): 1.0
+            // Downward-facing surfaces (ceiling normal points down): 0.35
+            // Walls: 0.65 + 0.1 * nx + 0.05 * nz
+            let y_resp = if ny_sign > 0.0 { 1.0 } else { 0.35 };
+            let wall_resp = 0.65 + 0.1 * nx_sign + 0.05 * nz_sign;
+            wy * y_resp + (wx + wz) * wall_resp
         } else {
-            1.0
+            0.8
         };
 
-        // Contact AO: leaves packed tightly among solid siblings darken,
-        // approximating corner occlusion for free from the child mask.
-        let ao = 1.0 - 0.04 * crowded_siblings.saturating_sub(1) as f32;
+        // Strengthen voxel AO, clamped to prevent pure black
+        let raw_ao = 1.0 - 0.04 * crowded_siblings.saturating_sub(1) as f32;
+        let ao = (raw_ao * 1.3).clamp(0.22, 1.0);
 
-        // BFS light + player torch (quadratic falloff) + fog.
-        let bfs = 0.25 + 0.75 * (light_level / 15.0);
-        let torch = (1.2 / (1.0 + 0.35 * dist + 0.10 * dist * dist)).min(1.0);
-        let lum = if is_emissive {
-            1.0
+        let light_norm = light_level / 15.0;
+
+        // Fluorescent yellow-green ambient top vs dark olive ambient bottom mix
+        let n_y = if sum > 1e-6 {
+            (dy_sq / sum) * (if to_cam[1] > 0.0 { -1.0 } else { 1.0 })
         } else {
-            (bfs.max(torch * 0.9) * face * ao).min(1.0)
+            0.0
         };
+        let t_mix = n_y * 0.5 + 0.5;
+        
+        let ambient_up = [1.05 * light_norm, 1.0 * light_norm, 0.7 * light_norm];
+        let ambient_down = [0.6 * light_norm, 0.55 * light_norm, 0.35 * light_norm];
+        
+        let ambient = [
+            (ambient_down[0] * (1.0 - t_mix) + ambient_up[0] * t_mix) * ao * face_response,
+            (ambient_down[1] * (1.0 - t_mix) + ambient_up[1] * t_mix) * ao * face_response,
+            (ambient_down[2] * (1.0 - t_mix) + ambient_up[2] * t_mix) * ao * face_response,
+        ];
+
+        // Flashlight beam (spotlight cone of ~30 degrees)
+        let mut flashlight_color = [0.0; 3];
+        if cam.flashlight && sum > 1e-6 {
+            let inv_dist = 1.0 / dist;
+            let dir_to_cam = [to_cam[0] * inv_dist, to_cam[1] * inv_dist, to_cam[2] * inv_dist];
+            
+            // Camera forward vector points away from cam.pos towards looking dir.
+            // Alignment checks if the splat is within the spotlight cone.
+            let alignment = dot(dir_to_cam, cam.forward);
+            if alignment > 0.85 {
+                let edge_fade = ((alignment - 0.85) / 0.15).min(1.0);
+                // Inverse quadratic flashlight attenuation up to 24 units
+                let dist_fade = (1.0 - (dist / 24.0)).max(0.0).powi(2);
+                let intensity = edge_fade * dist_fade * 1.5;
+                
+                // Warm cream highlights
+                flashlight_color = [intensity * 1.0, intensity * 0.96, intensity * 0.85];
+            }
+        }
+
+        // Apply lighting to base color
+        let final_r = if is_emissive {
+            base_color[0] * 1.5
+        } else {
+            base_color[0] * (ambient[0] + flashlight_color[0])
+        };
+        let final_g = if is_emissive {
+            base_color[1] * 1.5
+        } else {
+            base_color[1] * (ambient[1] + flashlight_color[1])
+        };
+        let final_b = if is_emissive {
+            base_color[2] * 1.5
+        } else {
+            base_color[2] * (ambient[2] + flashlight_color[2])
+        };
+
+        // Exponential fog blending
         let fog = (-FOG_DENSITY * dist).exp();
 
-        let scale = lum * fog * if is_emissive { 1.0 } else { 1.0 };
-        let r = (base_color[0] * scale).min(255.0) as u8;
-        let g = (base_color[1] * scale).min(255.0) as u8;
-        let b = (base_color[2] * scale).min(255.0) as u8;
+        // Blend with the background sickly-brown clear color: (0.15, 0.125, 0.055)
+        let clear_color = [0.15 * 255.0, 0.125 * 255.0, 0.055 * 255.0];
+        let r = (final_r * fog + clear_color[0] * (1.0 - fog)).clamp(0.0, 255.0) as u8;
+        let g = (final_g * fog + clear_color[1] * (1.0 - fog)).clamp(0.0, 255.0) as u8;
+        let b = (final_b * fog + clear_color[2] * (1.0 - fog)).clamp(0.0, 255.0) as u8;
 
         self.splat(px, py, half_px, dist, r, g, b);
     }

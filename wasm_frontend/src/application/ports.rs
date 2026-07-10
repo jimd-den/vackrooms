@@ -30,8 +30,67 @@ pub struct LightSource {
     pub half_size: [f32; 2],
     pub color: [f32; 3],
     pub radius: f32,
+    /// Authored luminous strength. Kept independent from radius so a large
+    /// atrium light can be brighter without relying on a driver heuristic.
+    pub intensity: f32,
     pub flicker_mode: u8,
     pub enabled: bool,
+}
+
+/// One error-selected, axis-aligned visible surface rectangle for the splat
+/// renderer: a greedy-merged face at the chunk's current LOD, extent-capped
+/// so one flat light/shadow sample never smears across a whole wall. 16
+/// bytes, uploaded verbatim as per-instance vertex attributes.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PackedFaceInstance {
+    /// Face-center, chunk-local fixed point ([`POSITION_FIXED_SCALE`]).
+    pub position: [u16; 3],
+    /// Extents in voxel cells along the face's U axis (X for Y/Z faces,
+    /// Y for X faces) and V axis (Z for Y/X faces, Y for Z faces).
+    pub extent_u: u8,
+    pub extent_v: u8,
+    /// Same encoding as [`PackedVertex::normal_axis`].
+    pub normal_axis: u8,
+    pub material: u8,
+    /// Scalar baked voxel light, 0–15.
+    pub baked_light: u8,
+    /// Directional face occlusion bit (0 or 1).
+    pub ao: u8,
+    /// Bit 0: emissive material.
+    pub flags: u8,
+    pub reserved: [u8; 3],
+}
+
+pub const FACE_INSTANCE_FLAG_EMISSIVE: u8 = 1;
+
+/// Contiguous run of face instances inside one culling cell.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FaceCellRange {
+    /// Cell coordinate, chunk-local, in units of [`FaceInstanceSet::cell_size`].
+    pub cell: [u8; 3],
+    pub offset: u32,
+    pub count: u32,
+}
+
+/// Per-chunk face-instance page: instances sorted by culling cell so the
+/// renderer can draw or skip contiguous ranges without per-frame rebuilds.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FaceInstanceSet {
+    pub instances: Vec<PackedFaceInstance>,
+    pub cells: Vec<FaceCellRange>,
+    /// World size of one culling cell in units.
+    pub cell_size: f32,
+}
+
+impl FaceInstanceSet {
+    pub fn empty() -> Self {
+        Self {
+            instances: Vec::new(),
+            cells: Vec::new(),
+            cell_size: 1.0,
+        }
+    }
 }
 
 /// Indexed greedy-mesh payload for one chunk. The SVO payload remains
@@ -46,6 +105,11 @@ pub struct SurfaceMeshPayload {
     pub light_volume: Vec<u8>,
     pub light_volume_size: [u32; 3],
     pub lights: Vec<LightSource>,
+    /// Face-instance page for the splat renderer, derived from the same
+    /// greedy quads as `vertices`, so both paths describe the same boundary.
+    pub faces: FaceInstanceSet,
+    /// World size of one voxel cell at this payload's LOD.
+    pub voxel_scale: f32,
 }
 
 impl SurfaceMeshPayload {
@@ -58,6 +122,8 @@ impl SurfaceMeshPayload {
             light_volume: Vec::new(),
             light_volume_size: [0, 0, 0],
             lights: Vec::new(),
+            faces: FaceInstanceSet::empty(),
+            voxel_scale: 1.0,
         }
     }
 }
@@ -157,9 +223,28 @@ pub struct ChunkPayload {
     pub collision: Vec<Aabb>,
 }
 
+/// One background chunk-load order, echoed back verbatim with its result so
+/// the engine can reject stale work (wrong level, chunk no longer desired,
+/// or already refined past this LOD).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ChunkRequest {
+    pub origin_x: f32,
+    pub origin_z: f32,
+    pub level: u32,
+    pub lod: u8,
+}
+
+/// A finished background load.
+#[derive(Debug)]
+pub struct CompletedChunk {
+    pub request: ChunkRequest,
+    pub payload: ChunkPayload,
+}
+
 /// Abstraction over where chunks come from. The browser build implements
-/// this with in-wasm procedural generation (`adapters::local_chunk_source`);
-/// a networked build could implement it with HTTP fetches instead.
+/// this with in-wasm procedural generation (`adapters::local_chunk_source`)
+/// or a Web Worker pool (`drivers::worker_source`); a networked build could
+/// implement it with HTTP fetches instead.
 pub trait ChunkSourcePort {
     /// Loads the chunk at `origin` for the given Backrooms level
     /// (0 = backrooms, 34 = grassland; see the core's `level_generator`).
@@ -169,4 +254,20 @@ pub trait ChunkSourcePort {
     /// LOD of a chunk covers the same world cube (`world_size` invariant),
     /// so payloads are interchangeable to the renderer.
     fn load(&self, origin_x: f32, origin_z: f32, level: u32, lod: u8) -> ChunkPayload;
+
+    /// True when the source generates in the background. The engine then
+    /// drives it with [`Self::request`]/[`Self::poll_completed`] instead of
+    /// the blocking [`Self::load`], keeping the frame loop responsive.
+    fn is_async(&self) -> bool {
+        false
+    }
+
+    /// Queues a background load. Deduplication is the caller's concern.
+    fn request(&mut self, _request: ChunkRequest) {}
+
+    /// Takes every finished background load. Results may arrive in any
+    /// order and may be stale; the caller validates against its own state.
+    fn poll_completed(&mut self) -> Vec<CompletedChunk> {
+        Vec::new()
+    }
 }

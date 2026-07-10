@@ -88,9 +88,69 @@ mod entry {
 
     /// Composition root. Runs automatically when the wasm module is
     /// instantiated by `static/index.html`.
+    ///
+    /// `static/worker.js` instantiates this same module inside a Web Worker
+    /// with `#[wasm_bindgen(start)]` skipped (`init` is passed
+    /// `{ skip_start: true }` is not available for start fns, so instead the
+    /// worker checks for a missing DOM and bails out here).
     #[wasm_bindgen(start)]
     pub fn start() -> Result<(), JsValue> {
         console_error_panic_hook::set_once();
+        // Inside a Web Worker there is no `window`/DOM: this module was
+        // loaded as the generation worker, which drives itself through
+        // `worker_init`/`worker_generate` instead of `boot`.
+        if web_sys::window().is_none() {
+            return Ok(());
+        }
         crate::drivers::browser::boot()
+    }
+}
+
+/// Generation-worker entry points. A worker is a second instance of this
+/// same wasm module: `worker_init` builds a chunk source from the *same*
+/// URL query the main thread used (identical world by construction), and
+/// `worker_generate` runs the full chunk pipeline — architectural
+/// generation, BFS lighting, greedy mesh + face instances, SVO build and
+/// serialization, collision extraction — returning one transferable byte
+/// buffer (see `adapters::chunk_codec`).
+#[cfg(target_arch = "wasm32")]
+mod worker_entry {
+    use std::cell::RefCell;
+
+    use wasm_bindgen::prelude::*;
+
+    use crate::adapters::chunk_codec::encode_chunk_payload;
+    use crate::adapters::local_chunk_source::LocalChunkSource;
+    use crate::adapters::query_config::generator_setup_from_query;
+    use crate::application::ports::ChunkSourcePort;
+    use vackrooms::frameworks_drivers::simple_noise::SimpleNoiseProvider;
+
+    thread_local! {
+        static SOURCE: RefCell<Option<LocalChunkSource<SimpleNoiseProvider>>> =
+            const { RefCell::new(None) };
+    }
+
+    /// `default_seed` must match the main thread's `WORLD_SEED`.
+    #[wasm_bindgen]
+    pub fn worker_init(query: &str, default_seed: u32) {
+        let (seed, config) = generator_setup_from_query(query, default_seed);
+        SOURCE.with(|s| {
+            *s.borrow_mut() = Some(LocalChunkSource::new(
+                SimpleNoiseProvider::new(),
+                seed,
+                config,
+            ));
+        });
+    }
+
+    #[wasm_bindgen]
+    pub fn worker_generate(origin_x: f32, origin_z: f32, level: u32, lod: u8) -> Vec<u8> {
+        SOURCE.with(|s| {
+            let source = s.borrow();
+            let source = source
+                .as_ref()
+                .expect("worker_generate called before worker_init");
+            encode_chunk_payload(&source.load(origin_x, origin_z, level, lod))
+        })
     }
 }

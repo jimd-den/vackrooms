@@ -42,15 +42,21 @@ const DOOR_HEIGHT: f32 = 2.2;
 /// Column grid spacing inside expanses.
 const EXPANSE_COLUMN_PERIOD: f32 = 7.2;
 
-/// Coffered-ceiling beam grid period and beam drop, world units.
-const COFFER_PERIOD: f32 = 2.8;
-const COFFER_DROP: f32 = 0.2;
-
-/// Ceiling light panel spacing (aligned to coffer panel centers).
+/// Ceiling light panel spacing. The coffer beam grid shares this period,
+/// but beams are now a renderer shading pattern (see the splat fragment
+/// shader's 2.8 u grid), never stepped ceiling geometry.
 const LIGHT_PERIOD: f32 = 2.8;
 
 /// Sconce band height on atrium pillars.
 const SCONCE_UNITS: f32 = 2.4;
+
+/// Runtime direct lights sit below their visible ceiling panel. Tall atria
+/// need a longer pendant drop so the light reaches occupied space and casts
+/// useful column shadows instead of flattening against the vault.
+fn runtime_light_height(ceiling_units: f32, is_atrium: bool) -> f32 {
+    let pendant_drop = if is_atrium { 1.6 } else { 1.1 };
+    (ceiling_units - pendant_drop).max(2.4)
+}
 
 /// Keep a clearing around the world spawn point.
 const SPAWN: (f32, f32) = (5.0, 5.0);
@@ -127,6 +133,11 @@ impl BackroomsLevel {
         }
     }
 
+    /// Ceiling heights are architectural tiers, not terrain. The common
+    /// bands are perfectly flat; open volumes vary per ~8 u ceiling *zone*
+    /// (one suspended-grid bay run), never per column, and every height
+    /// snaps to the fine voxel lattice so voxelization cannot add
+    /// sub-voxel stair-stepping on top.
     fn fabric_ceiling_height(
         noise: &dyn NoiseProvider,
         seed: u32,
@@ -134,13 +145,19 @@ impl BackroomsLevel {
         wz: f32,
         band: FabricCeilingBand,
     ) -> f32 {
-        let detail = Self::n(noise, seed, 0xB300, wx, wz, 0.72);
-        match band {
-            FabricCeilingBand::Compression => (2.65 + 0.15 * detail).clamp(2.5, 2.8),
-            FabricCeilingBand::Regular => (3.4 + 0.2 * detail).clamp(3.2, 3.6),
-            FabricCeilingBand::Expanse => (4.1 + 0.3 * detail).clamp(3.8, 4.4),
-            FabricCeilingBand::Vault => (4.95 + 0.45 * detail).clamp(4.5, 5.4),
-        }
+        const ZONE: f32 = 8.0;
+        let zone_x = (wx / ZONE).floor() * ZONE + ZONE * 0.5;
+        let zone_z = (wz / ZONE).floor() * ZONE + ZONE * 0.5;
+        let detail = Self::n(noise, seed, 0xB300, zone_x, zone_z, 0.72);
+        let (height, lo, hi) = match band {
+            FabricCeilingBand::Compression => (2.6, 2.5, 2.8),
+            FabricCeilingBand::Regular => (3.4, 3.2, 3.6),
+            FabricCeilingBand::Expanse => (4.1 + 0.3 * detail, 3.8, 4.4),
+            FabricCeilingBand::Vault => (4.95 + 0.45 * detail, 4.5, 5.4),
+        };
+        // Snap to the fine voxel lattice, then clamp last: 21 * 0.2 is
+        // 4.2000003 in f32 and must not escape the band's range.
+        ((height / 0.2).round() * 0.2).clamp(lo, hi)
     }
 
     /// Is (wx, wz) inside an open expanse of the fabric?
@@ -162,7 +179,7 @@ impl BackroomsLevel {
     ) -> ColumnPlan {
         // ---- ceiling field -------------------------------------------------
         let ceiling_band = Self::fabric_ceiling_band(noise, seed, wx, wz);
-        let mut ceiling_units = Self::fabric_ceiling_height(noise, seed, wx, wz, ceiling_band);
+        let ceiling_units = Self::fabric_ceiling_height(noise, seed, wx, wz, ceiling_band);
 
         // In open and vaulted regions, partitions dissolve and only sparse
         // structural columns remain. The cheap dropped-ceiling material is
@@ -172,11 +189,10 @@ impl BackroomsLevel {
             FabricCeilingBand::Expanse | FabricCeilingBand::Vault
         );
 
-        // Coffered ceiling grid (expanses run an open plenum instead).
-        let on_beam = wx.rem_euclid(COFFER_PERIOD) < 0.22 || wz.rem_euclid(COFFER_PERIOD) < 0.22;
-        if !expanse && on_beam {
-            ceiling_units -= COFFER_DROP;
-        }
+        // Coffer beams are shading detail in the renderer, not geometry: a
+        // 0.2 u drop at a 0.2 u voxel scale turned every beam into a
+        // full-voxel step and read as noisy terrain overhead. The splat
+        // shader darkens the same COFFER_PERIOD grid instead.
 
         // ---- solids ------------------------------------------------------
         let spawn_d2 = (wx - SPAWN.0) * (wx - SPAWN.0) + (wz - SPAWN.1) * (wz - SPAWN.1);
@@ -360,11 +376,8 @@ impl BackroomsLevel {
         let zone = a.ceiling_zones.first();
         let mut ceiling_units = zone.map_or(3.4, |c| c.height_units);
         match zone.map(|c| c.language) {
-            Some(CeilingLanguage::Coffered) => {
-                if wx.rem_euclid(COFFER_PERIOD) < 0.22 || wz.rem_euclid(COFFER_PERIOD) < 0.22 {
-                    ceiling_units -= COFFER_DROP;
-                }
-            }
+            // Coffered reads as a shading pattern now (see the splat
+            // shader), not stepped geometry.
             Some(CeilingLanguage::ExposedSoffit) => ceiling_units -= 0.2,
             _ => {}
         }
@@ -470,12 +483,20 @@ impl BackroomsLevel {
         wx: f32,
         wz: f32,
     ) -> f32 {
-        let drift = Self::n(noise, seed, 0xCA00_u32.wrapping_add(spine.id), wx, wz, 0.35);
-        match spine.spine_kind {
-            SpaceProgram::MainCorridor => (3.8 + 0.4 * drift).clamp(3.4, 4.2),
-            SpaceProgram::SecondaryHall => (3.3 + 0.3 * drift).clamp(3.0, 3.6),
-            _ => 3.4,
-        }
+        // Slow, quantized drift: one sample per 12 u corridor zone snapped
+        // to the voxel lattice, so long runs hold one height and then step
+        // once — instead of per-column ripple overhead.
+        const DRIFT_ZONE: f32 = 12.0;
+        let zone_x = (wx / DRIFT_ZONE).floor() * DRIFT_ZONE + DRIFT_ZONE * 0.5;
+        let zone_z = (wz / DRIFT_ZONE).floor() * DRIFT_ZONE + DRIFT_ZONE * 0.5;
+        let drift = Self::n(noise, seed, 0xCA00_u32.wrapping_add(spine.id), zone_x, zone_z, 0.35);
+        let (height, lo, hi) = match spine.spine_kind {
+            SpaceProgram::MainCorridor => (3.8 + 0.4 * drift, 3.4, 4.2),
+            SpaceProgram::SecondaryHall => (3.3 + 0.3 * drift, 3.0, 3.6),
+            _ => (3.4, 3.4, 3.4),
+        };
+        // Snap first, clamp last (f32 lattice snap can overshoot the band).
+        ((height / 0.2).round() * 0.2).clamp(lo, hi)
     }
 
     /// Whether a corridor-side wall dissolves into the adjacent room/fabric.
@@ -644,10 +665,15 @@ impl LevelGenerator for BackroomsLevel {
                     let cx = f.at.x - chunk_pos.x;
                     let cz = f.at.z - chunk_pos.z;
                     if cx >= -15.0 && cx <= config.chunk_size + 15.0 && cz >= -15.0 && cz <= config.chunk_size + 15.0 {
-                        let y = a.ceiling_zones.iter()
+                        let ceiling_units = a.ceiling_zones.iter()
                             .find(|z| z.area.contains(f.at.x, f.at.z))
                             .map(|z| z.height_units)
-                            .unwrap_or(4.0) - 1.1; // Hang below the ceiling (never flush)
+                            .unwrap_or(4.0);
+                        let is_atrium = matches!(
+                            a.program,
+                            crate::domain::entities::architecture::SpaceProgram::Atrium
+                        );
+                        let y = runtime_light_height(ceiling_units, is_atrium);
                             
                         let kind = if f.half_x > f.half_z * 2.0 || f.half_z > f.half_x * 2.0 {
                             LightKind::Strip
@@ -655,29 +681,26 @@ impl LevelGenerator for BackroomsLevel {
                             LightKind::CeilingPanel
                         };
 
-                        // Ensure we don't spawn a light buried inside a pillar
-                        let mut is_buried = false;
-                        if cx >= 0.0 && cx < config.chunk_size && cz >= 0.0 && cz < config.chunk_size {
-                            let vx = cx.floor() as usize;
-                            let vz = cz.floor() as usize;
-                            let vy = (y / config.voxel_scale).floor() as usize;
-                            if vy < grid.height() {
-                                let v = grid.get(vx, vy, vz);
-                                if v != crate::domain::entities::voxel_grid::VOXEL_AIR && v != crate::domain::entities::voxel_grid::VOXEL_LIGHT {
-                                    is_buried = true;
-                                }
-                            }
-                        }
+                        // Runtime lights are collected before voxelization, so
+                        // query the architectural column plan rather than the
+                        // still-empty grid when rejecting pillar intersections.
+                        let is_buried = BackroomsLevel::plan_column(
+                            plan_of(f.at.x, f.at.z),
+                            noise,
+                            seed,
+                            &config.tuning,
+                            f.at.x,
+                            f.at.z,
+                        )
+                        .solid;
 
                         if !is_buried {
-                            let is_atrium = matches!(a.program, crate::domain::entities::architecture::SpaceProgram::Atrium);
-                            
                             grid.runtime_lights.push(RuntimeLight {
                                 world_pos: [f.at.x, y, f.at.z],
                                 half_size: [f.half_x, f.half_z],
                                 rgb: [1.0, 0.95, 0.8],
                                 range: if is_atrium { 24.0 } else { 16.0 },
-                                intensity: if is_atrium { 3.0 } else { 1.0 },
+                                intensity: if is_atrium { 4.0 } else { 1.0 },
                                 enabled: true,
                                 kind,
                             });

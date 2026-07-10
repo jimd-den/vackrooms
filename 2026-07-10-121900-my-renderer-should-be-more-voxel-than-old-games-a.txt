@@ -1,0 +1,3041 @@
+ ▐▛███▜▌   Claude Code v2.1.206
+▝▜█████▛▘  Fable 5 · Claude Pro
+  ▘▘ ▝▝    ~/vackrooms
+
+ ⚠ Your login expires in 2 days · run /login to renew
+
+ ▎ Extended: Fable 5 is included in your weekly limit
+ ▎ Through July 12, you can use up to 50% of your weekly usage limit on Fable 5. If you hit your limit, you can continue on Fable 5 with usage credits. Fable 5 draws down usage faster than Opus 4.8. Run /model and select Fable to use it. Learn more
+
+❯ my renderer should be more voxel than old games and i want to lean in to      
+  microvoxel gpu work but i want to render it so the shadows show and render on 
+  something as small as a rasberry pi running better than minecraft:            
+  Yes—**points are a good fit** for an infinite Backrooms, but not as “one      
+  point per voxel forever.” The finished renderer should be an **error-driven   
+  point/surfel world**: nearby surfaces resolve into dense, stable              
+  micro-points; distant rooms become larger filtered splats; invisible regions  
+  are not processed; lighting is computed only where it changes the image. This 
+  borrows Atomontage’s selection logic, point-rendering research, and modern    
+  visibility-first rendering—not the fantasy that everything renders at full    
+  resolution. [arxiv](https://arxiv.org/pdf/1904.08225v1.pdf)                   
+                                                                                
+  ## The finished experience                                                    
+                                                                                
+  The player walks through a seamless, indefinitely generated interior that     
+  feels architected before it feels strange: office-scale rooms, service        
+  corridors, atria, half-finished renovations, storage zones, maintenance       
+  voids, and occasional spaces whose proportions are subtly wrong. The world    
+  has no visible chunk seams, loading pauses, or abrupt render-distance wall;   
+  it fades into fluorescent haze and coarser spatial detail.                    
+                                                                                
+  Visually, it is **sharp, low-resolution physical space**, not a VHS filter    
+  and not ordinary Minecraft blocks. Near surfaces have tiny visible point      
+  grain; distant surfaces fuse into stable planes. Fluorescent fixtures create  
+  a soft pool of light, columns and partitions cast readable shadows, and       
+  dust/fog makes the space feel occupied by air.                                
+                                                                                
+  ## Point-based world                                                          
+                                                                                
+  Use **oriented surface points**, often called *surfels*, rather than cube     
+  sprites. A surfel stores position, normal, radius, material, baked            
+  indirect-light value, and optionally an emitter flag. Surface elements are an 
+  established point-rendering primitive, while progressive blue-surfel work     
+  demonstrates GPU-oriented progressive point LOD for complex heterogeneous     
+  scenes. [arxiv](https://arxiv.org/pdf/1904.08225v1.pdf)                       
+                                                                                
+  ```text                                                                       
+  Surfel {                                                                      
+    local_position: u16x3,                                                      
+    normal_axis: u8,                                                            
+    radius_or_lod: u8,                                                          
+    material: u8,                                                               
+    static_light_rgb: u8x3,                                                     
+    ao: u8,                                                                     
+    flags: u8                                                                   
+  }                                                                             
+  ```                                                                           
+                                                                                
+  Render each surfel as a **screen-facing or normal-oriented elliptical         
+  splat**, with a soft-but-clipped edge, depth test/write, and blue-noise       
+  dither. Do not use transparent round sprites: they create halos, overdraw,    
+  and the “particle cloud” look. Instead, use an opaque coverage mask and       
+  depth-correct                                                                 
+  ──── (89 lines hidden) ────────────────────────────────────────────────────── 
+  rium railing, carpet color change, or an unusually quiet service hall creates 
+  memory and navigation.                                                        
+                                                                                
+  This matches your stated goal of an authored-feeling procedural architecture  
+  with distinct points of interest and rooms that differ for reasons, not       
+  randomness.                                                                   
+                                                                                
+  ## Camera language                                                            
+                                                                                
+  The camera should feel like a sharp early-2000s game feed while retaining     
+  modern spatial cues:                                                          
+                                                                                
+  - Render internally at a controlled low resolution, then scale cleanly.       
+  - Use point-stable blue-noise dither at LOD boundaries, not blur.             
+  - Apply restrained bloom only to emissive fluorescent tubes.                  
+  - Use a subtle vignette and exposure response near a fixture flicker.         
+  - Keep geometry edges, shadows, and fog sharp enough to navigate by.          
+  - Avoid permanent scanlines, lens dirt, chromatic smear, and heavy film       
+  grain.                                                                        
+                                                                                
+  The “retro” quality comes from the point reconstruction, low internal         
+  resolution, palette, and sparse post-processing—not from ruining the image.   
+                                                                                
+  ## What it will feel like                                                     
+                                                                                
+  At the start, a player sees a long fluorescent office bay: nearby carpet      
+  fibers, tile seams, and wall imperfections resolve as tiny point structure; a 
+  row of lights fades smoothly into haze; a support column cuts a clear wedge   
+  of shadow across the floor. Turning into a service corridor replaces          
+  open-room scale with tight pipes, lower ceilings, colder light, and denser    
+  fog near the floor.                                                           
+                                                                                
+  Far away, the world does not look unloaded. It becomes a believable,          
+  low-detail continuation: wall planes remain intact, lights reduce to soft     
+  bright marks, and the geometry gradually turns into fog. When the player      
+  approaches, the point hierarchy refines invisibly instead of popping a new    
+  chunk into existence.                                                         
+                                                                                
+  ## The final product                                                          
+                                                                                
+  The finished product is **an infinite, procedurally architectural Backrooms   
+  engine that renders its world as streamed, hierarchically selected surface    
+  points**:                                                                     
+                                                                                
+  - Macro voxels determine what exists and enable generation, collision, and    
+  light propagation.                                                            
+  - Hierarchical surfel pages determine what is rendered.                       
+  - Room/portal visibility determines what can matter.                          
+  - Pixel-error LOD determines how much detail is drawn.                        
+  - Baked voxel light plus one dynamic shadowed light determines grounding.     
+  - A low-resolution lit fog grid determines atmosphere.                        
+  - A sharp, restrained camera treatment determines its identity.               
+                                                                                
+  That is a real “point voxel” engine, scales naturally to an infinite          
+  interior, and avoids making the finished game either an SVO research demo or  
+  a Minecraft clone with yellow wallpaper.                                      
+
+● Let me ground this in your actual codebase before responding — I want to see
+  what the renderer currently does (the splatter, surface mesh, WebGL driver,
+  and light volume paths).
+
+  Searched for 1 pattern, read 5 files, listed 1 directory, ran 1 shell command (ctrl+o to expand)
+
+❯ my cpu splatter is perfect but now the main renderer i want more voxel        
+  optimizations, and etc                                                        
+
+  Searched for 1 pattern, read 1 file (ctrl+o to expand)
+
+● Entered plan mode
+  Claude is now exploring and designing an implementation approach.
+
+  Searched for 3 patterns, read 2 files (ctrl+o to expand)
+
+● Updated plan
+  ⎿  /plan to preview
+
+❯ this is not bible but i want to see if this is relevant for getting a nice    
+  procedurally generated massive scale backrooms levels, with realistic         
+  lighting running 60fps on a raspberry pi: Yes. If the CPU splatter image is   
+  now correct, **do not replace its algorithm**—port its selected splats to the 
+  GPU. The GPU should rasterize and shade the same front-to-back,               
+  footprint-selected splats; the CPU should retain only scene streaming,        
+  SVO/page selection, and bounded LOD selection. Your CPU implementation        
+  already has the exact reference behavior to preserve: SVO traversal, MIP      
+  splats for sub-pixel internal nodes, virtual splitting of large solid leaves, 
+  front-to-back ordering, depth testing, face shading, AO, torch light, and     
+  exponential fog. [ppl-ai-file-upload.s3.amazonaws](https://ppl-ai-file-upload 
+  .s3.amazonaws.com/web/direct-files/attachments/6575456/28dc8b38-1da3-4e40-b04 
+  6-a66ed823fde3/repomix-output.json?AWSAccessKeyId=ASIA2F3EMEYE4T3XVFKC&Signat 
+  ure=cnGJzrjB7Y85zMnbU3zc9yzaqk4%3D&x-amz-security-token=IQoJb3JpZ2luX2VjEPH%2 
+  F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEaCXVzLWVhc3QtMSJHMEUCIQCxRyaD0yMTHwksfNaP0YIhNV 
+  Yf3KenhetXuLf%2FF%2B5u0gIgLGfalavoQSDkibl0CH0e3z78KKQD6SYB1V2RTYXegdkq%2FAQIu 
+  v%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FARABGgw2OTk3NTMzMDk3MDUiDGZlbNtPz3fuWj9FJSrQBL 
+  M6eB2JcMuRCy81Ks0Sf3rYggzihOkcIfXXvVTvc8rZqG%2BHHIwlcrVISNJRUxjAccNy2XCO0HJVR 
+  QOY5%2FaBIx1fZB5Mzt62iIoT99oKYGPoXu0Xn4tr5X32l9277hf4y0Nftu8%2BEux9RD4eE2awWU 
+  Ce23VPxemjj5KGKtaz3HehWBvMaRAyzsYlj3ytNcN254aBQvjWkMFXWdy1hfGYNVurxzeyJzavqeZ 
+  yRxgftC0btHKaRutboBib9pRsuvijcLIl6g1gvVW%2F6Q9voDe4V6O7PVOR4lZ11rTVbPoUnxp3bF 
+  eAi3sxg0JXvH%2FP5xHn6dTWLEhshXadmx9AxY%2BIxa%2BV64buiKIvNtxpFMC37CDgD5J2b%2B9 
+  rvGfu6%2BZIWU2DV%2FdV9tsEfak%2FZ4BYRC4wdVzR7bA45KJ9isW5g44%2FpxIuu%2BISA3xgsp 
+  T4QeexqYsgRjeQkAZADrUuWJY5tQwgv4Ej4emd3w0Opt4ILWLC0SCIBxb09Jja4WWl67AgqQdJXFM 
+  9B07hUvsJF4yHWr%2B%2Bke%2F%2FvPxFik0BwaqY%2F2EErWkYVyeISa2WuplGP4LZHrovogIpVl 
+  lu431KQ%2FlK%2FEyz7N77LxvhmwQpc8C8lXcW1x6%2F257rDnt5eaZpMNBA2iOxV9gxPj1S3vzyp 
+  %2B35wfdp2ORL3F8y9oPDTpF%2FBmyffE%2BqF3AioZboTzwuO8M0m07H4LVcMUcHyAsTUvMih60L 
+  Pa5wDRvfxLT7aIE0txaKvX3o2xqKkDxB3LX3HMVXVz0VkRmhsE%2B2BSexfAD1Z7%2FUJpswhMPE0 
+  gY6mAGeZj%2FCr9v85G0PTWWxNJGKnVpL3wiDfQ6d8Ky%2B0FluzVrV%2B4Nm3%2BSIe7fTlIxUY7 
+  jNUwSyb2RM8dha7aRYkD4CtjSiZfhDHES5tfVxBblL56H2AU%2FYYxF4fd8k0BBYejYPSIflqy8AZ 
+  24F3%2B2SC%2FZu9%2FELrUvrT3FODplTO4pklBgGvlsSuuncVa9uT%2FgukzOPw4TRh4YPsg%3D% 
+  3D&Expires=1783705431)                                                        
+                                                                                
+  ## The right GPU split                                                        
+                                                                                
+  | Work | Keep on CPU | Move to GPU |                                          
+  |---|---|---|                                                                 
+  | Generate/stream chunks | Yes | No |                                         
+  | Build SVO/MIP                                                               
+  ──── (177 lines hidden) ───────────────────────────────────────────────────── 
+  utral splat-selection module that emits compact `SplatInstance` records       
+  instead of writing pixels. Make `SoftwareRasterizer` consume those records so 
+  CPU and GPU paths share selection/LOD logic.                                  
+  2. Add `GpuSplatRenderer` in the WebGL driver layer. It owns one WebGL2       
+  context, static unit-quad VBO, dynamic instanced-splat VBO, VAO, main shader  
+  program, and shadow program/FBO.                                              
+  3. Render one instanced camera-facing quad per splat with                     
+  `drawArraysInstanced(TRIANGLES, 0, 6, instance_count)`. Do not rely on        
+  `gl.POINTS`.                                                                  
+  4. Upload all splat instances in one packed contiguous buffer update per      
+  frame. Use double buffering or buffer orphaning to avoid stalls.              
+  5. Enable depth testing and depth writes. Use opaque alpha-test/coverage      
+  clipping only—never alpha blending for ordinary surface splats.               
+  6. Move CPU `shade_and_splat` lighting to the fragment shader. Reuse existing 
+  per-chunk light-volume, nearby-light, flashlight, hero shadow map, PCF, and   
+  fog infrastructure from `SurfaceRenderer`.                                    
+  7. Implement a shadow pass that draws the same selected splat instances into  
+  the existing 128x128 shadow depth map. Begin with only the nearest/hero       
+  light.                                                                        
+  8. Clear the GPU framebuffer to exactly the shader fog color so unfilled      
+  pixels blend seamlessly with far fog.                                         
+  9. Add GPU timer-query telemetry plus CPU telemetry: selected splat count,    
+  culled pages/chunks, SVO nodes visited, virtual subdivisions, VBO upload      
+  bytes, GPU main-pass milliseconds, GPU shadow-pass milliseconds, and dropped  
+  instances due to budget.                                                      
+  10. Keep the CPU Canvas2D renderer accessible through `?renderer=cpu`; expose 
+  the new backend as `?renderer=gpusplat`; make it the preferred GPU fallback   
+  after it passes visual parity checks.                                         
+  11. Add deterministic tests for the shared splat selector: a tiny SVO scene   
+  must produce stable splat count, color/material metadata, MIP selection, and  
+  bounded behavior when the camera is inside a large collapsed leaf.            
+                                                                                
+  Acceptance:                                                                   
+  - The GPU output must preserve the CPU splatter’s basic silhouette and LOD    
+  behavior.                                                                     
+  - No per-pixel CPU rendering or ImageData copy occurs in `gpusplat` mode.     
+  - Browser must remain responsive under large uniform floor/wall leaves.       
+  - Use hard budgets and parent/MIP fallback rather than runaway detail         
+  expansion.                                                                    
+  - `cargo test --workspace` passes.                                            
+  ```                                                                           
+                                                                                
+  The key principle is simple: **your CPU code chooses the visible voxels; the  
+  GPU turns those choices into pixels.** That is the most direct route to       
+  preserving what now looks “perfect” while getting GPU-scale speed.            
+  ⎿  Interrupted · What should Claude do instead?
+
+❯ /plan                                                                         
+  ⎿  Current Plan
+     /home/dbslim/.claude/plans/warm-rolling-leaf.md
+
+     GPU Microvoxel Splat Renderer (new main renderer)
+
+     Context
+
+     The CPU splatter (wasm_frontend/src/adapters/cpu_splatter.rs) already
+     renders the world the way you want: per-voxel splats, coarse-to-fine LOD,
+     front-to-back with budgets. The main GPU renderer (drivers/surface_webgl.rs)
+     is still a greedy-quad mesh with a heavy per-pixel fragment shader — smooth
+     lighting gradients across big merged quads make it look less voxel than the
+     CPU path, and per-pixel lighting (light volume + 4 lights + PCF shadow +
+     fog + glow per fragment) is exactly what kills Pi-class GPUs.
+
+     Goal: make the main renderer a GPU instanced voxel-face splat renderer —
+     "microvoxel" look (visible voxel grain near, merged voxel planes far),
+     per-face
+     flat lighting, the existing hero shadow map still visible, and a fragment
+     shader cheap enough that a Raspberry Pi (tile-based GPU, WebGL2) outruns
+     Minecraft. The greedy mesh is kept, but demoted to shadow-caster +
+     collision.
+
+     Key insight that makes this robust: our "splats" are axis-aligned voxel face
+     rectangles, not screen-facing discs. An instance is an exposed voxel face;
+     the vertex shader emits the exact face quad. That is watertight,
+     depth-correct
+     geometry (no splat holes/halos), and LOD merging just emits bigger faces.
+
+     Architecture (follows existing port pattern)
+
+     VoxelGrid ─► adapters/surfel_mesh.rs (NEW, portable, natively tested)
+                     │  per-chunk SurfelSet: 3 LOD tiers of packed 12-byte faces,
+                     │  tier-0 sorted by 2.5 u sub-cell for range draws
+                     ▼
+     SurfaceMeshPayload (ports.rs, extended) ─► Engine::upload_surfaces
+     (unchanged)
+                     ▼
+     drivers/splat_webgl.rs (NEW SplatRenderer : RendererPort)
+        shared base-quad VBO + per-instance attribs, ANGLE-safe instancing
+        VS: face quad from normal_axis + per-instance lighting (flat)
+        FS: fog + ordered dither only (~10 ops)
+        shadow pass: reuses existing greedy-mesh shadow FBO/program
+
+     1. Surfel extraction — wasm_frontend/src/adapters/surfel_mesh.rs (new)
+
+     - PackedSurfel in application/ports.rs (next to PackedVertex), 12 bytes:
+     position: [u16;3] (face center, POSITION_FIXED_SCALE), normal_axis: u8,
+     size: u8 (multiplier over base voxel scale: 1/2/4), material: u8,
+     light: u8, ao: u8, +1 pad. Reuse the exposure/AO/light logic pattern from
+     VoxelMapper::map_voxel_grid_with_padding (src/adapters/voxel_mapper.rs)
+     — same halo handling as surface_mesh.rs, but no greedy merge: one
+     surfel per exposed voxel face.
+     - LOD tiers built by downsampling the fine grid (occupancy-majority +
+     light-max, same filtering idea as build_mips in cpu_splatter.rs:544):
+       - tier 0: fine faces (0.2 u low-spec / 0.1 u high-spec)
+       - tier 1: 2× faces, tier 2: 4× faces
+     - Tier-0 instances sorted by 2.5 u sub-cell; SurfelSet stores per-cell
+     (offset, count) ranges so the driver can range-draw near cells with the
+     micro-grain base mesh and far cells with the plain quad.
+     - Extend SurfaceMeshPayload with surfels: SurfelSet (built in
+     build_surface_mesh alongside the mesh; empty() gets an empty set).
+
+     2. Splat driver — wasm_frontend/src/drivers/splat_webgl.rs (new)
+
+     - SplatRenderer implements RendererPort with uses_surface_meshes() = true
+     so the engine feeds it the same SurfaceChunk uploads (engine untouched).
+     - Per chunk upload: instance buffers (one per tier), plus the greedy mesh
+     VBO/IBO kept for the shadow pass, plus the 3D light-volume texture — copy
+     the upload code from surface_webgl.rs::upload_surface; factor
+     link_program/camera_matrices into shared pub(crate) helpers rather
+     than duplicating.
+     - Draw: shared unit-quad vertex buffer (divisor 0) + instance attribs
+     (divisor 1), draw_arrays_instanced per (chunk, tier / cell-range).
+     - Vertex shader (SPLAT_VERTEX_SHADER in drivers/shaders.rs):
+       - Rebuild the axis-aligned face rect from center/normal_axis/size.
+       - Backface skip: if face normal points away from camera, collapse the quad
+     (output w=0) — halves fill for free.
+       - All lighting per-instance, flat: sample uLightVolume (vertex texture
+     fetch — WebGL2 guarantees ≥16 vertex texture units), evaluate the same
+     ≤4 importance-sorted lights, do the hero-light shadow test (PCF4 from
+     shadowVisibility) once at the face center, quantize with the
+     existing quantize5 bands. Output one flat color varying.
+       - Per-face flat light + face-quantized shadow edges is the voxel look.
+     - Fragment shader: fog mix (existing fog/height-fog formulas), ordered
+     dither, done. This moves ~200 lines of per-pixel work to per-face work —
+     the core Pi win (fill rate becomes trivial for a tiler).
+     - Micro-grain near field: a second base mesh — the unit quad subdivided
+     N×N (2×2 low spec, 4×4 high). VS hashes each subquad (world pos + subquad
+     id) to offset it ±1–2 cm along the face normal and jitter albedo slightly →
+     real geometric grain (silhouette + parallax), still opaque quads. Drawn only
+     for tier-0 cells within micro_radius (~5–6 u), selected via the per-cell
+     ranges. Beyond that, plain quads.
+     - Shadow pass: identical to today — render the retained greedy meshes with
+     the existing SHADOW_VERTEX/FRAGMENT_SHADER into the existing 128² depth
+     FBO. Splats never cast individually; the closed mesh shell does. Bump the
+     map to 256² behind the high spec profile.
+     - Tier selection per frame: distance-based, aligned with the existing
+     streaming LOD (fine_distance 15/25 u): tier 0 inside fine ring, tier 1 to
+     ~2× fine ring, tier 2 beyond. Reuse mesh_visible-style culling per chunk.
+
+     3. Wiring & knobs
+
+     - drivers/browser.rs renderer selection: SplatRenderer becomes the
+     default; the old mesh path stays as ?renderer=mesh;
+     ?renderer=raymarch and ?renderer=cpu unchanged. If splat init fails,
+     fall back to mesh (same pattern as current fallback chain).
+     - Spec profiles (browser.rs / adapters/query_config.rs): add
+     micro_subdiv (0/2/4), micro_radius, splat_instance_budget. The
+     existing set_render_scale (wasm_frontend/src/lib.rs:76) already covers
+     internal resolution on weak GPUs.
+     - HUD/telemetry: report instance counts per tier via the existing
+     cpu_telemetry_string hook and gpu_frame_ms timer (already generic).
+
+     Order of work
+
+     1. Extraction adapter + PackedSurfel/SurfelSet ports + native tests.
+     2. SplatRenderer drawing tier-0 plain faces with baked light only — visual
+     parity check against ?renderer=mesh.
+     3. Move lighting to VS: light volume, 4 lights, hero shadow receive, bands.
+     4. LOD tiers + per-cell ranges + micro-grain base mesh.
+     5. Knobs, default flip, telemetry, tuning.
+
+     Verification
+
+     - cargo test --workspace — new native tests: exposed-face counts on known
+     grids (e.g. isolated voxel → 6 surfels), tier downsampling conserves solid
+     coverage, per-cell ranges partition tier 0 exactly.
+     - Rebuild wasm (wasm-pack build wasm_frontend --target web --out-dir 
+     ../static/pkg), run the dev server (cargo run), then compare
+     ?renderer=splat (later default) against ?renderer=mesh: same
+     architecture visible, shadows from the hero fluorescent present, voxel
+     grain near / stable merged planes far, no seams at chunk borders.
+     - Perf: HUD gpu_frame_ms + instance-count telemetry; sanity budget ≈
+     10–20 k faces/chunk fine, ~150 k instances/frame low-spec — verify the
+     low profile holds 60 fps at 0.5–0.75 render scale on weak GPUs (Pi target).
+
+     Instance memory check: ~15 k faces × 12 B ≈ 180 KB/chunk + tiers ≈ ¼ of that
+     — ~2 MB for the 3×3 low-spec footprint. Fine.
+
+     "/plan open" to edit this plan in VS Code
+
+
+
+
+
+
+
+❯ okay                                                                          
+
+● Updated plan
+  ⎿  /plan to preview
+
+● Updated plan
+  ⎿  /plan to preview  ⎿  User rejected Claude's plan:
+     ╭─────────────────────────────────────────────────────────────────────────╮
+     │ GPU Microvoxel Splat Renderer (new main renderer)                       │
+     │                                                                         │
+     │ Context                                                                 │
+     │                                                                         │
+     │ The CPU splatter (wasm_frontend/src/adapters/cpu_splatter.rs) already   │
+     │ renders the world the way you want: per-voxel splats, coarse-to-fine    │
+     │ LOD, front-to-back with budgets. The main GPU renderer                  │
+     │ (drivers/surface_webgl.rs) is still a greedy-quad mesh with a heavy     │
+     │ per-pixel fragment shader — smooth lighting gradients across big merged │
+     │ quads make it look less voxel than the CPU path, and per-pixel          │
+     │ lighting (light volume + 4 lights + PCF shadow + fog + glow per         │
+     │ fragment) is exactly what kills Pi-class GPUs.                          │
+     │                                                                         │
+     │ Goal: make the main renderer a GPU instanced voxel-face splat renderer  │
+     │ —                                                                       │
+     │ "microvoxel" look (visible voxel grain near, merged voxel planes far),  │
+     │ per-face                                                                │
+     │ flat lighting, the existing hero shadow map still visible, and a        │
+     │ fragment                                                                │
+     │ shader cheap enough that a Raspberry Pi (tile-based GPU, WebGL2)        │
+     │ outruns                                                                 │
+     │ Minecraft. The greedy mesh is kept, but demoted to shadow-caster +      │
+     │ collision.                                                              │
+     │                                                                         │
+     │ Key insight that makes this robust: our "splats" are axis-aligned voxel │
+     │ face                                                                    │
+     │ rectangles, not screen-facing discs. An instance is an exposed voxel    │
+     │ face;                                                                   │
+     │ the vertex shader emits the exact face quad. That is watertight,        │
+     │ depth-correct                                                           │
+     │ geometry (no splat holes/halos), and LOD merging just emits bigger      │
+     │ faces.                                                                  │
+     │                                                                         │
+     │ Why selection happens at chunk-load time, not per frame                 │
+     │                                                                         │
+     │ The "CPU traverses the SVO every frame and re-uploads a dynamic         │
+     │ instance VBO"                                                           │
+     │ variant (CPU-selected GPU splats) was considered and rejected for the   │
+     │ Pi                                                                      │
+     │ target: re-running the splatter's traversal (~150 k node budget) every  │
+     │ frame                                                                   │
+     │ on a single wasm thread plus a 2–4 MB bufferSubData per frame puts the  │
+     │ slow                                                                    │
+     │ Pi CPU back on the critical path — the exact cost the GPU port exists   │
+     │ to                                                                      │
+     │ remove. Instead, selection is amortized: instance buffers are built     │
+     │ once                                                                    │
+     │ per chunk load/refine (same lifecycle as today's meshes), and the       │
+     │ per-frame                                                               │
+     │ CPU work is only picking which pre-built tier/cell ranges to draw.      │
+     │ Steady                                                                  │
+     │ state uploads nothing, preserving the existing                          │
+     │ steady_state_does_not_reupload_atlas philosophy. Screen-space-error LOD │
+     │ becomes discrete distance tiers — with fog ending the world at ~50 u,   │
+     │ three                                                                   │
+     │ tiers cover the whole visible range. Camera-facing quads were likewise  │
+     │ rejected: for axis-aligned voxel data, emitting the true face rect      │
+     │ avoids the                                                              │
+     │ splat-depth/hole/overlap problems entirely. The CPU splatter stays      │
+     │ untouched                                                               │
+     │ as the reference/fallback (?renderer=cpu); GPU output should preserve   │
+     │ its                                                                     │
+     │ silhouette and LOD character (MIP-merged far geometry, fine faces       │
+     │ near).                                                                  │
+     │                                                                         │
+     │ Architecture (follows existing port pattern)                            │
+     │                                                                         │
+     │ VoxelGrid ─► adapters/surfel_mesh.rs (NEW, portable, natively tested)   │
+     │                 │  per-chunk SurfelSet: 3 LOD tiers of packed 12-byte   │
+     │ faces,                                                                  │
+     │                 │  tier-0 sorted by 2.5 u sub-cell for range draws      │
+     │                 ▼                                                       │
+     │ SurfaceMeshPayload (ports.rs, extended) ─► Engine::upload_surfaces      │
+     │ (unchanged)                                                             │
+     │                 ▼                                                       │
+     │ drivers/splat_webgl.rs (NEW SplatRenderer : RendererPort)               │
+     │    shared base-quad VBO + per-instance attribs, ANGLE-safe instancing   │
+     │    VS: face quad from normal_axis + per-instance lighting (flat)        │
+     │    FS: fog + ordered dither only (~10 ops)                              │
+     │    shadow pass: reuses existing greedy-mesh shadow FBO/program          │
+     │                                                                         │
+     │ 1. Surfel extraction — wasm_frontend/src/adapters/surfel_mesh.rs (new)  │
+     │                                                                         │
+     │ - PackedSurfel in application/ports.rs (next to PackedVertex), 12       │
+     │ bytes:                                                                  │
+     │ position: [u16;3] (face center, POSITION_FIXED_SCALE), normal_axis: u8, │
+     │ size: u8 (multiplier over base voxel scale: 1/2/4), material: u8,       │
+     │ light: u8, ao: u8, +1 pad. Reuse the exposure/AO/light logic pattern    │
+     │ from                                                                    │
+     │ VoxelMapper::map_voxel_grid_with_padding (src/adapters/voxel_mapper.rs) │
+     │ — same halo handling as surface_mesh.rs, but no greedy merge: one       │
+     │ surfel per exposed voxel face.                                          │
+     │ - LOD tiers built by downsampling the fine grid (occupancy-majority +   │
+     │ light-max, same filtering idea as build_mips in cpu_splatter.rs:544):   │
+     │   - tier 0: fine faces (0.2 u low-spec / 0.1 u high-spec)               │
+     │   - tier 1: 2× faces, tier 2: 4× faces                                  │
+     │ - Tier-0 instances sorted by 2.5 u sub-cell; SurfelSet stores per-cell  │
+     │ (offset, count) ranges so the driver can range-draw near cells with the │
+     │ micro-grain base mesh and far cells with the plain quad.                │
+     │ - Extend SurfaceMeshPayload with surfels: SurfelSet (built in           │
+     │ build_surface_mesh alongside the mesh; empty() gets an empty set).      │
+     │                                                                         │
+     │ 2. Splat driver — wasm_frontend/src/drivers/splat_webgl.rs (new)        │
+     │                                                                         │
+     │ - SplatRenderer implements RendererPort with uses_surface_meshes() =    │
+     │ true                                                                    │
+     │ so the engine feeds it the same SurfaceChunk uploads (engine            │
+     │ untouched).                                                             │
+     │ - Per chunk upload: instance buffers (one per tier), plus the greedy    │
+     │ mesh                                                                    │
+     │ VBO/IBO kept for the shadow pass, plus the 3D light-volume texture —    │
+     │ copy                                                                    │
+     │ the upload code from surface_webgl.rs::upload_surface; factor           │
+     │ link_program/camera_matrices into shared pub(crate) helpers rather      │
+     │ than duplicating.                                                       │
+     │ - Draw: shared unit-quad vertex buffer (divisor 0) + instance attribs   │
+     │ (divisor 1), draw_arrays_instanced per (chunk, tier / cell-range).      │
+     │ - Vertex shader (SPLAT_VERTEX_SHADER in drivers/shaders.rs):            │
+     │   - Rebuild the axis-aligned face rect from center/normal_axis/size.    │
+     │   - Backface skip: if face normal points away from camera, collapse the │
+     │ quad                                                                    │
+     │ (output w=0) — halves fill for free.                                    │
+     │   - All lighting per-instance, flat: sample uLightVolume (vertex        │
+     │ texture                                                                 │
+     │ fetch — WebGL2 guarantees ≥16 vertex texture units), evaluate the same  │
+     │ ≤4 importance-sorted lights, do the hero-light shadow test (PCF4 from   │
+     │ shadowVisibility) once at the face center, quantize with the            │
+     │ existing quantize5 bands. Output one flat color varying.                │
+     │   - Per-face flat light + face-quantized shadow edges is the voxel      │
+     │ look.                                                                   │
+     │ - Fragment shader: fog mix (existing fog/height-fog formulas), ordered  │
+     │ dither, done. This moves ~200 lines of per-pixel work to per-face work  │
+     │ —                                                                       │
+     │ the core Pi win (fill rate becomes trivial for a tiler).                │
+     │ - Micro-grain near field: a second base mesh — the unit quad subdivided │
+     │ N×N (2×2 low spec, 4×4 high). VS hashes each subquad (world pos +       │
+     │ subquad                                                                 │
+     │ id) to offset it ±1–2 cm along the face normal and jitter albedo        │
+     │ slightly →                                                              │
+     │ real geometric grain (silhouette + parallax), still opaque quads. Drawn │
+     │ only                                                                    │
+     │ for tier-0 cells within micro_radius (~5–6 u), selected via the         │
+     │ per-cell                                                                │
+     │ ranges. Beyond that, plain quads.                                       │
+     │ - Shadow pass: identical to today — render the retained greedy meshes   │
+     │ with                                                                    │
+     │ the existing SHADOW_VERTEX/FRAGMENT_SHADER into the existing 128² depth │
+     │ FBO. Splats never cast individually; the closed mesh shell does. Bump   │
+     │ the                                                                     │
+     │ map to 256² behind the high spec profile.                               │
+     │ - Tier selection per frame: distance-based, aligned with the existing   │
+     │ streaming LOD (fine_distance 15/25 u): tier 0 inside fine ring, tier 1  │
+     │ to                                                                      │
+     │ ~2× fine ring, tier 2 beyond. Reuse mesh_visible-style culling per      │
+     │ chunk.                                                                  │
+     │                                                                         │
+     │ 3. Wiring & knobs                                                       │
+     │                                                                         │
+     │ - drivers/browser.rs renderer selection: SplatRenderer becomes the      │
+     │ default; the old mesh path stays as ?renderer=mesh;                     │
+     │ ?renderer=raymarch and ?renderer=cpu unchanged. If splat init fails,    │
+     │ fall back to mesh (same pattern as current fallback chain).             │
+     │ - Spec profiles (browser.rs / adapters/query_config.rs): add            │
+     │ micro_subdiv (0/2/4), micro_radius, splat_instance_budget. The          │
+     │ existing set_render_scale (wasm_frontend/src/lib.rs:76) already covers  │
+     │ internal resolution on weak GPUs.                                       │
+     │ - HUD/telemetry: report instance counts per tier, draw calls, and       │
+     │ dropped                                                                 │
+     │ instances (budget) via the existing cpu_telemetry_string hook and       │
+     │ gpu_frame_ms timer (already generic).                                   │
+     │ - Scale-up knob (the "massive" part): once tiers work, far chunks cost  │
+     │ ~1/16 the instances of near ones, so the streaming radius / fog         │
+     │ distance can                                                            │
+     │ grow well past today's 3×3–5×5 footprint at little GPU cost. Expose     │
+     │ draw                                                                    │
+     │ distance in the spec profiles; extending the actual streaming radius    │
+     │ beyond                                                                  │
+     │ 25 chunks (the MAX_CHUNKS shader-table cap only affects the raymarch    │
+     │ path)                                                                   │
+     │ becomes a cheap follow-up.                                              │
+     │                                                                         │
+     │ Order of work                                                           │
+     │                                                                         │
+     │ 1. Extraction adapter + PackedSurfel/SurfelSet ports + native tests.    │
+     │ 2. SplatRenderer drawing tier-0 plain faces with baked light only —     │
+     │ visual                                                                  │
+     │ parity check against ?renderer=mesh.                                    │
+     │ 3. Move lighting to VS: light volume, 4 lights, hero shadow receive,    │
+     │ bands.                                                                  │
+     │ 4. LOD tiers + per-cell ranges + micro-grain base mesh.                 │
+     │ 5. Knobs, default flip, telemetry, tuning.                              │
+     │                                                                         │
+     │ Verification                                                            │
+     │                                                                         │
+     │ - cargo test --workspace — new native tests: exposed-face counts on     │
+     │ known                                                                   │
+     │ grids (e.g. isolated voxel → 6 surfels), tier downsampling conserves    │
+     │ solid                                                                   │
+     │ coverage, per-cell ranges partition tier 0 exactly.                     │
+     │ - Rebuild wasm (wasm-pack build wasm_frontend --target web --out-dir    │
+     │ ../static/pkg), run the dev server (cargo run), then compare            │
+     │ ?renderer=splat (later default) against ?renderer=mesh: same            │
+     │ architecture visible, shadows from the hero fluorescent present, voxel  │
+     │ grain near / stable merged planes far, no seams at chunk borders.       │
+     │ - Perf: HUD gpu_frame_ms + instance-count telemetry; sanity budget ≈    │
+     │ 10–20 k faces/chunk fine, ~150 k instances/frame low-spec — verify the  │
+     │ low profile holds 60 fps at 0.5–0.75 render scale on weak GPUs (Pi      │
+     │ target).                                                                │
+     │                                                                         │
+     │ Instance memory check: ~15 k faces × 12 B ≈ 180 KB/chunk + tiers ≈ ¼ of │
+     │ that                                                                    │
+     │ — ~2 MB for the 3×3 low-spec footprint. Fine.                           │
+     ╰─────────────────────────────────────────────────────────────────────────╯
+
+✻ Worked for 1m 51s
+
+❯ This is a strong plan, but it has one critical mismatch: it is **not yet a    
+  GPU port of your now-perfect CPU splatterer**. It is a new                    
+  *per-exposed-voxel-face renderer*, and that can become much more expensive    
+  than the CPU’s screen-error-controlled SVO/MIP splat selection.               
+  [ppl-ai-file-upload.s3.amazonaws](https://ppl-ai-file-upload.s3.amazonaws.com 
+  /web/direct-files/attachments/6575456/28dc8b38-1da3-4e40-b046-a66ed823fde3/re 
+  pomix-output.json?AWSAccessKeyId=ASIA2F3EMEYE42SCSTYL&Signature=ejV3YT6iVa6VB 
+  Km49yuoHeOtswM%3D&x-amz-security-token=IQoJb3JpZ2luX2VjEPL%2F%2F%2F%2F%2F%2F% 
+  2F%2F%2F%2FwEaCXVzLWVhc3QtMSJHMEUCIG%2FY%2FGHKl5gcA2dKDdV2DJPA%2FwpIQHFcmqEyJ 
+  iMylOFgAiEA%2BQI3zRIJ6asCOvZUM2mdWgvBdyxr2YPueWN2MjCBJtEq%2FAQIu%2F%2F%2F%2F% 
+  2F%2F%2F%2F%2F%2F%2FARABGgw2OTk3NTMzMDk3MDUiDBwVpLfPFRdqNx4BHirQBMDreSkXIAsEE 
+  eCK%2Blg9mgA0nW8jcok%2FyJfGur%2B%2B%2Bz%2FbaUK8zC3RxQK%2BliFLrd6Aqjt2l4jFut7M 
+  hFun%2FlbPicivz31gyBqInd8jNgnSMpDd0KO8afravm8tQuK4MQ%2Bh2Kr1uM%2FaJnJ5SQyHAOf 
+  0HRJnY1x2B0DIMFsAGPyKtlg%2FLie7zVR6G6KtwwWJ9EAxbmWlsWv3AWpi4fZKdgfhTTxy8a7EVR 
+  ImCuL3iQy9Egdk%2BEax3mtrT4V88f%2BV4Qw61MRTH9lL6t7LpNTrt23M%2B1%2BNzovoXMsGB%2 
+  B2lsnoHxV99rQZ%2FBKLv8Ma0Zf%2BQsQclBinga%2BxBFNdcy1oTA1b1f4pfBW%2Fo5zmB1CB5aj 
+  iPiCtuFF%2FY74ZL8AM6MrUXIE0%2FwPOSvj5kR6DWkaEwTFakLJLtnqRQx%2F5BoKCNET0xlboBs 
+  yK5NvzcOx1iq2XvCmrtrSIlc8A%2BIohjRbSxaCcb4%2FTsd70B2q%2BSQ%2BiEor6Z6aqoQsGDZx 
+  g6HYLP%2BpxnqqI4z4gvjfnEhQcjBeljKR79hCDgxjuWespcfC66LoVMF8mQAi4mBw%2BN8y1MObe 
+  lkTsYOTD58KhiTldYqBL4SfLcYs9zcwGYIu21poKvCHzRk%2FQzgdGpclosZ2LWM91WJqsclpUhfK 
+  v58fcYW5L6zGMQfwdeF0vgAND%2B%2BgxvWSAiLVaQhG3ZaeQt0z9RPmgyLGyQacNaUWIwGNeIw1m 
+  1ulB98C1yEIRpGrDFWrGLn5dvRDhF4XLfenhowQ62Ul1ElIYT9xJOmm8avWRmEHkl40Iw0A0wydbE 
+  0gY6mAEo43ocObBLYDImQUvtHj%2FiHFkS6BgsmpfBzz6oEaKw08PcBb0%2F5P%2B9TEJda5I5REW 
+  xqBnbsJm4hZQGJvN%2FbM9SpfR3of5EhQU%2Fchz9%2BhonkGydeZQVCjSQPV8Y2RGvBry1eb9Gn2 
+  6KNtjZtrOa8XFekwvB0IilghEggQE7dcdUicvkaWEbiKVkVhP%2FfAF8MHAO%2Fp%2FNxVf2FA%3D 
+  %3D&Expires=1783707932)                                                       
+                                                                                
+  Keep the destination—GPU flat-lit voxel faces—but revise the data-selection   
+  layer before building it.                                                     
+                                                                                
+  ## What is right                                                              
+                                                                                
+  The best parts are exactly right for your visual and Pi goals:                
+                                                                                
+  - Axis-aligned opaque face rectangles are better than circular screen-facing  
+  sprites: they are watertight, write correct depth, need no transparency       
+  sorting, and naturally preserve the voxel look.                               
+  - Moving stable lighting from fragment shader to instance/vertex work is a    
+  major win when large merged faces dominate the screen. Your current surface   
+  path does perform a 3D light-volume sample, multiple                          
+  ──── (189 lines hidden) ───────────────────────────────────────────────────── 
+  dow receive at face center; retain current greedy mesh shadow caster.         
+  4. Add hierarchical coarse-face pages and a hard pixel-error/instance budget. 
+  5. Add selected near-field microfaces only where material/architecture        
+  benefits.                                                                     
+  6. Add micro albedo variation.                                                
+  7. Only after stability profiling, experiment with tiny physical micro        
+  displacement.                                                                 
+                                                                                
+  ## Bottom line                                                                
+                                                                                
+  Approve the renderer direction, but change its defining sentence from:        
+                                                                                
+  > “One instance is one exposed voxel face.”                                   
+                                                                                
+  to:                                                                           
+                                                                                
+  > **“One instance is one error-selected, axis-aligned visible surface         
+  rectangle; it may represent a voxel face, a greedy-merged face, or a filtered 
+  parent face.”**                                                               
+                                                                                
+  That preserves the CPU splatterer’s real breakthrough—bounded,                
+  coarse-to-fine, footprint-driven detail—while using the GPU for exactly what  
+  it does best: depth-tested rasterization and cheap flat voxel shading.        
+  [ppl-ai-file-upload.s3.amazonaws](https://ppl-ai-file-upload.s3.amazonaws.com 
+  /web/direct-files/attachments/6575456/28dc8b38-1da3-4e40-b046-a66ed823fde3/re 
+  pomix-output.json?AWSAccessKeyId=ASIA2F3EMEYE42SCSTYL&Signature=ejV3YT6iVa6VB 
+  Km49yuoHeOtswM%3D&x-amz-security-token=IQoJb3JpZ2luX2VjEPL%2F%2F%2F%2F%2F%2F% 
+  2F%2F%2F%2FwEaCXVzLWVhc3QtMSJHMEUCIG%2FY%2FGHKl5gcA2dKDdV2DJPA%2FwpIQHFcmqEyJ 
+  iMylOFgAiEA%2BQI3zRIJ6asCOvZUM2mdWgvBdyxr2YPueWN2MjCBJtEq%2FAQIu%2F%2F%2F%2F% 
+  2F%2F%2F%2F%2F%2F%2FARABGgw2OTk3NTMzMDk3MDUiDBwVpLfPFRdqNx4BHirQBMDreSkXIAsEE 
+  eCK%2Blg9mgA0nW8jcok%2FyJfGur%2B%2B%2Bz%2FbaUK8zC3RxQK%2BliFLrd6Aqjt2l4jFut7M 
+  hFun%2FlbPicivz31gyBqInd8jNgnSMpDd0KO8afravm8tQuK4MQ%2Bh2Kr1uM%2FaJnJ5SQyHAOf 
+  0HRJnY1x2B0DIMFsAGPyKtlg%2FLie7zVR6G6KtwwWJ9EAxbmWlsWv3AWpi4fZKdgfhTTxy8a7EVR 
+  ImCuL3iQy9Egdk%2BEax3mtrT4V88f%2BV4Qw61MRTH9lL6t7LpNTrt23M%2B1%2BNzovoXMsGB%2 
+  B2lsnoHxV99rQZ%2FBKLv8Ma0Zf%2BQsQclBinga%2BxBFNdcy1oTA1b1f4pfBW%2Fo5zmB1CB5aj 
+  iPiCtuFF%2FY74ZL8AM6MrUXIE0%2FwPOSvj5kR6DWkaEwTFakLJLtnqRQx%2F5BoKCNET0xlboBs 
+  yK5NvzcOx1iq2XvCmrtrSIlc8A%2BIohjRbSxaCcb4%2FTsd70B2q%2BSQ%2BiEor6Z6aqoQsGDZx 
+  g6HYLP%2BpxnqqI4z4gvjfnEhQcjBeljKR79hCDgxjuWespcfC66LoVMF8mQAi4mBw%2BN8y1MObe 
+  lkTsYOTD58KhiTldYqBL4SfLcYs9zcwGYIu21poKvCHzRk%2FQzgdGpclosZ2LWM91WJqsclpUhfK 
+  v58fcYW5L6zGMQfwdeF0vgAND%2B%2BgxvWSAiLVaQhG3ZaeQt0z9RPmgyLGyQacNaUWIwGNeIw1m 
+  1ulB98C1yEIRpGrDFWrGLn5dvRDhF4XLfenhowQ62Ul1ElIYT9xJOmm8avWRmEHkl40Iw0A0wydbE 
+  0gY6mAEo43ocObBLYDImQUvtHj%2FiHFkS6BgsmpfBzz6oEaKw08PcBb0%2F5P%2B9TEJda5I5REW 
+  xqBnbsJm4hZQGJvN%2FbM9SpfR3of5EhQU%2Fchz9%2BhonkGydeZQVCjSQPV8Y2RGvBry1eb9Gn2 
+  6KNtjZtrOa8XFekwvB0IilghEggQE7dcdUicvkaWEbiKVkVhP%2FfAF8MHAO%2Fp%2FNxVf2FA%3D 
+  %3D&Expires=1783707932)                                                       
+
+● Updated plan
+  ⎿  /plan to preview
+
+● User approved Claude's plan
+  ⎿  Plan saved to: ~/.claude/plans/warm-rolling-leaf.md · /plan to edit
+     GPU Microvoxel Face-Splat Renderer (new main renderer)
+
+     Context
+
+     The CPU splatter (wasm_frontend/src/adapters/cpu_splatter.rs) is the visual
+     reference: bounded, coarse-to-fine, footprint-driven voxel detail. The main
+     GPU renderer (drivers/surface_webgl.rs) is a greedy mesh with a heavy
+     per-pixel fragment shader (light-volume sample + 4 lights + PCF shadow +
+     fog
+     - glow per fragment) — smooth per-pixel gradients make it look less voxel
+     than the CPU path, and per-pixel lighting is what kills Pi-class GPUs.
+
+     Goal: a GPU instanced face renderer — flat per-face lighting (the voxel
+     look), voxel-lattice albedo grain, the hero shadow map still visible, a
+     near-trivial fragment shader, and bounded instance counts — targeting 60
+     fps
+     on a Raspberry Pi (tile-based GPU, WebGL2) with headroom to grow draw
+     distance ("massive scale").
+
+     Defining rule: one instance is one error-selected, axis-aligned visible
+     surface rectangle — a greedy-merged face at the chunk's current LOD, capped
+     in extent so flat lighting stays honest. Not one instance per voxel face
+     (instance-count explosion), and not camera-facing sprites (depth/hole
+     artifacts). LOD faces come from the existing world-space at_lod generation,
+     never from downsampling a fine grid (which would close doorways and desync
+     the shadow caster).
+
+     Selection is amortized, not per-frame: instance pages are built once per
+     chunk load/refine (same lifecycle as meshes today; steady-state uploads
+     nothing). Per-frame CPU work = frustum/distance cull + choosing prebuilt
+     ranges. This preserves the CPU splatter's bounded coarse-to-fine behavior
+     while keeping the slow single-threaded wasm CPU off the frame's critical
+     path. The CPU splatter itself stays untouched as reference (?renderer=cpu).
+
+     Architecture
+
+     VoxelGrid (fine or coarse via existing GeneratorConfig::at_lod + streaming)
+       ─► VoxelMapper greedy quads (existing; already splits by light/AO)
+       ─► adapters/face_instances.rs (NEW, portable): MergedQuad →
+     PackedFaceInstance,
+          extent cap, sorted by 2.5 u sub-cell with (offset,count) ranges
+       ─► SurfaceMeshPayload extended (ports.rs) ─► Engine upload (unchanged)
+       ─► drivers/splat_webgl.rs (NEW SplatRenderer : RendererPort)
+            VS: face rect from center+extents+axis; ALL lighting per-face, flat
+            FS: fog + ordered dither + voxel-lattice albedo hash (~15 ops)
+            shadow pass: existing greedy-mesh caster into existing depth FBO
+
+     1. Face-instance extraction — wasm_frontend/src/adapters/face_instances.rs 
+     (new)
+
+     - Reuse VoxelMapper::map_voxel_grid_with_padding
+     (src/adapters/voxel_mapper.rs) exactly as surface_mesh.rs does (same
+     halo/seam handling). Emit one instance per MergedQuad instead of 4
+     vertices + 6 indices (~10× smaller than the mesh: 16 B vs ~184 B/quad).
+     - Extent cap: split quads larger than MAX_FACE_CELLS per axis (~2.5 u
+     worth) so one flat light/shadow sample never smears across a wall. The
+     mapper's existing light/AO splitting already keeps most faces small.
+     - 16-byte instance in application/ports.rs (next to PackedVertex):
+
+     #[repr(C)]
+     struct PackedFaceInstance {
+         position: [u16; 3], // face-center, POSITION_FIXED_SCALE, chunk-local
+         extent_u: u8,       // in voxel cells at this chunk's LOD
+         extent_v: u8,
+         normal_axis: u8,
+         material: u8,
+         baked_light: u8,
+         ao: u8,
+         flags: u8,          // emissive, etc.
+         reserved: [u8; 2],
+     }
+
+     - Instances sorted by 2.5 u sub-cell; FaceInstanceSet stores per-cell
+     (offset, count) ranges for range draws and per-cell culling.
+     - LOD comes free from streaming: a coarse-resident chunk (existing
+     coarse-first StreamingPolicy + GeneratorConfig::at_lod) yields coarse
+     faces from its own grid — same world architecture, seam-safe halo, and the
+     same grid feeds its greedy shadow mesh, so visible faces and shadow caster
+     agree by construction. No ad-hoc downsampling anywhere.
+     - Extend SurfaceMeshPayload with face_instances: FaceInstanceSet (built in
+     build_surface_mesh; empty() gets an empty set). Engine untouched — the
+     payload rides the existing upload_surfaces flow.
+
+     2. Splat driver — wasm_frontend/src/drivers/splat_webgl.rs (new)
+
+     - SplatRenderer implements RendererPort, uses_surface_meshes() = true.
+     - Per chunk upload: instance buffer + retained greedy mesh VBO/IBO (shadow
+     caster) + 3D light-volume texture — reuse the upload code pattern from
+     surface_webgl.rs::upload_surface; factor link_program /
+     camera_matrices into shared pub(crate) helpers.
+     - Draw: static unit-quad VBO (divisor 0) + instance attribs (divisor 1),
+     draw_arrays_instanced per chunk (per visible cell-range where it pays).
+     CULL_FACE enabled; the VS orders corners per normal_axis sign so
+     winding is consistent and interior-facing (all six axis cases unit-tested
+     against the mesh path's face orientation conventions in surface_mesh.rs).
+     - Vertex shader (SPLAT_VERTEX_SHADER in drivers/shaders.rs), all
+     lighting once per face, flat (face-center evaluation):
+       - Rebuild the axis-aligned rect from center + extents + axis.
+       - Sample uLightVolume at face center (vertex texture fetch; WebGL2
+     guarantees vertex texture units), evaluate the same ≤4 importance-sorted
+     lights, hero-shadow test at face center — tap count per profile (1–2 taps
+     low, PCF4 high), reuse shadowVisibility/quantize5 logic.
+       - Output flat color + world pos varyings.
+     - Fragment shader: exponential/height fog (existing formulas), ordered
+     dither, and voxel-lattice albedo grain: hash of world position quantized
+     to the voxel grid, small albedo modulation — per-voxel grain on merged
+     quads with zero extra geometry. Total ~15 ops (vs ~200 today) — the Pi win.
+     - Micro displacement is deferred: no subdivided base quad, no ±cm offsets
+     in this iteration (z-fighting/cracks/shadow-detach risk). Revisit later
+     behind a flag, inward-only, selected materials only.
+     - Shadow pass: unchanged from today — greedy meshes through the existing
+     SHADOW_VERTEX/FRAGMENT_SHADER into the existing depth FBO. 128² low,
+     256² high profile.
+     - Clear color = exact fog color (as today).
+
+     3. Selection, budgets, knobs
+
+     - Per frame: chunk frustum/distance cull (reuse mesh_visible pattern), then
+     per-cell range culling for near chunks. No per-frame buffer uploads.
+     - Budget rule: profiles carry a face-instance budget; when over budget the
+     selector drops whole distant cells to their chunk's coarser payload (or
+     skips refinement), never random fine faces — planes stay intact.
+
+     ┌─────────┬─────────────────────────────┬─────────────┬──────────┬───────┐
+     │ Profile │           Target            │ Faces/frame │ Shadow   │  PCF  │
+     │         │                             │             │   map    │       │
+     ├─────────┼─────────────────────────────┼─────────────┼──────────┼───────┤
+     │ low     │ 60 fps @ reduced            │     15–40 k │ 128²     │ 1–2   │
+     │ (Pi)    │ set_render_scale            │             │          │ tap   │
+     ├─────────┼─────────────────────────────┼─────────────┼──────────┼───────┤
+     │ high    │ desktop                     │      ≤150 k │ 256²     │ 4 tap │
+     └─────────┴─────────────────────────────┴─────────────┴──────────┴───────┘
+
+     - drivers/browser.rs: new renderer behind ?renderer=splat first; flip to
+     default (mesh falls back to ?renderer=mesh) only after visual parity +
+     frame-time telemetry confirm it. ?renderer=cpu / raymarch untouched.
+     - Telemetry via existing hooks (gpu_frame_ms, cpu_telemetry_string):
+     faces drawn per LOD, draw calls, cells culled, budget drops.
+     - Scale-up follow-up: far coarse chunks cost ~¼–1/16 the instances, so
+     streaming radius / fog distance can grow past today's 3×3–5×5 footprint
+     cheaply (the 25-entry chunk table only limits the raymarch path).
+
+     Order of work
+
+     1. face_instances.rs: MergedQuad → capped instances + cell ranges +
+     PackedFaceInstance port + native tests.
+     2. SplatRenderer drawing instances with flat baked light + fog only —
+     verify silhouette parity with ?renderer=mesh (same quads, so
+     geometry must match exactly).
+     3. Move full lighting to VS (light volume, 4 lights, hero shadow receive,
+     quantize bands); add voxel-lattice albedo grain in FS.
+     4. Cell-range culling, budgets, profile knobs, telemetry.
+     5. Parity + perf review, then flip default.
+
+     Verification
+
+     - cargo test --workspace — new native tests: quad→instance conversion
+     (counts, extents, cap splitting), cell ranges partition instances exactly,
+     winding/orientation per axis matches surface_mesh.rs conventions,
+     coarse-LOD chunk produces consistent instances from its own grid.
+     - Rebuild wasm (wasm-pack build wasm_frontend --target web --out-dir 
+     ../static/pkg), run cargo run, compare ?renderer=splat vs
+     ?renderer=mesh: identical silhouettes, hero-fluorescent shadows present
+     and attached, flat per-face light + voxel grain near, coarse chunks blend
+     at distance, no chunk-border seams.
+     - Perf: HUD gpu_frame_ms + face-count telemetry; low profile within the
+     15–40 k face budget at 0.5–0.75 render scale (Pi proxy: throttled
+     integrated GPU / Chromebook-class device if no Pi at hand).
+
+● Plan approved — starting implementation. Let me set up task tracking and read
+  the remaining source I'll build on.
+
+  Read 2 files (ctrl+o to expand)
+
+● Now I'll create the task list and start implementing.
+
+  Read 3 files (ctrl+o to expand)
+
+● Task 1 — extraction. Adding the new types to ports.rs first:
+
+● Update(wasm_frontend/src/application/ports.rs)
+  ⎿  Added 63 lines
+      34      pub enabled: bool,
+      35  }
+      36  
+      37 +/// One error-selected, axis-aligned visible surface rectangle 
+         +for the splat                                                  
+      38 +/// renderer: a greedy-merged face at the chunk's current LOD, 
+         +extent-capped                                                  
+      39 +/// so one flat light/shadow sample never smears across a whole
+         + wall. 16                                                      
+      40 +/// bytes, uploaded verbatim as per-instance vertex attributes.
+      41 +#[repr(C)]                                                     
+      42 +#[derive(Debug, Clone, Copy, PartialEq, Eq)]                   
+      43 +pub struct PackedFaceInstance {                                
+      44 +    /// Face-center, chunk-local fixed point ([`POSITION_FIXED_
+         +SCALE`]).                                                      
+      45 +    pub position: [u16; 3],                                    
+      46 +    /// Extents in voxel cells along the face's U axis (X for Y
+         +/Z faces,                                                      
+      47 +    /// Y for X faces) and V axis (Z for Y/X faces, Y for Z fac
+         +es).                                                           
+      48 +    pub extent_u: u8,                                          
+      49 +    pub extent_v: u8,                                          
+      50 +    /// Same encoding as [`PackedVertex::normal_axis`].        
+      51 +    pub normal_axis: u8,                                       
+      52 +    pub material: u8,                                          
+      53 +    /// Scalar baked voxel light, 0–15.                        
+      54 +    pub baked_light: u8,                                       
+      55 +    /// Directional face occlusion bit (0 or 1).               
+      56 +    pub ao: u8,                                                
+      57 +    /// Bit 0: emissive material.                              
+      58 +    pub flags: u8,                                             
+      59 +    pub reserved: [u8; 3],                                     
+      60 +}                                                              
+      61 +                                                               
+      62 +pub const FACE_INSTANCE_FLAG_EMISSIVE: u8 = 1;                 
+      63 +                                                               
+      64 +/// Contiguous run of face instances inside one culling cell.  
+      65 +#[derive(Debug, Clone, Copy, PartialEq, Eq)]                   
+      66 +pub struct FaceCellRange {                                     
+      67 +    /// Cell coordinate, chunk-local, in units of [`FaceInstanc
+         +eSet::cell_size`].                                             
+      68 +    pub cell: [u8; 3],                                         
+      69 +    pub offset: u32,                                           
+      70 +    pub count: u32,                                            
+      71 +}                                                              
+      72 +                                                               
+      73 +/// Per-chunk face-instance page: instances sorted by culling c
+         +ell so the                                                     
+      74 +/// renderer can draw or skip contiguous ranges without per-fra
+         +me rebuilds.                                                   
+      75 +#[derive(Debug, Clone, PartialEq)]                             
+      76 +pub struct FaceInstanceSet {                                   
+      77 +    pub instances: Vec<PackedFaceInstance>,                    
+      78 +    pub cells: Vec<FaceCellRange>,                             
+      79 +    /// World size of one culling cell in units.               
+      80 +    pub cell_size: f32,                                        
+      81 +}                                                              
+      82 +                                                               
+      83 +impl FaceInstanceSet {                                         
+      84 +    pub fn empty() -> Self {                                   
+      85 +        Self {                                                 
+      86 +            instances: Vec::new(),                             
+      87 +            cells: Vec::new(),                                 
+      88 +            cell_size: 1.0,                                    
+      89 +        }                                                      
+      90 +    }                                                          
+      91 +}                                                              
+      92 +                                                               
+      93  /// Indexed greedy-mesh payload for one chunk. The SVO payload 
+          remains
+      94  /// authoritative for collision, storage, and ray queries; this
+           exists only
+      95  /// to make visible surfaces cheap to rasterize.
+     ...
+      102      pub light_volume: Vec<u8>,
+      103      pub light_volume_size: [u32; 3],
+      104      pub lights: Vec<LightSource>,
+      105 +    /// Face-instance page for the splat renderer, derived fro
+          +m the same                                                    
+      106 +    /// greedy quads as `vertices`, so both paths describe the
+          + same boundary.                                               
+      107 +    pub faces: FaceInstanceSet,                               
+      108 +    /// World size of one voxel cell at this payload's LOD.   
+      109 +    pub voxel_scale: f32,                                     
+      110  }
+      111  
+      112  impl SurfaceMeshPayload {
+     ...
+      119              light_volume: Vec::new(),
+      120              light_volume_size: [0, 0, 0],
+      121              lights: Vec::new(),
+      122 +            faces: FaceInstanceSet::empty(),                  
+      123 +            voxel_scale: 1.0,                                 
+      124          }
+      125      }
+      126  }
+
+● Now the extraction adapter. First make material_id reusable, then create
+  face_instances.rs:
+
+● Update(wasm_frontend/src/adapters/surface_mesh.rs)
+  ⎿  Added 1 line, removed 1 line
+      157      }
+      158  }
+      159  
+      160 -fn material_id(v_type: VoxelType) -> u8 {                     
+      160 +pub(crate) fn material_id(v_type: VoxelType) -> u8 {          
+      161      match v_type {
+      162          VoxelType::Wall => VOXEL_WALL,
+      163          VoxelType::Floor => VOXEL_FLOOR,
+
+● Write(wasm_frontend/src/adapters/face_instances.rs)
+  ⎿  Wrote 324 lines to wasm_frontend/src/adapters/face_instances.rs
+       1 //! Converts greedy-merged quads into the splat renderer's compa
+       2 //! instances: one error-selected, axis-aligned surface rectangl
+       3 //!
+         the indexed
+         based shadow
+       6 //! caster can never disagree. Two transformations happen on the
+       7 //!
+         EXTENT_UNITS`]
+         h lights each
+         ould smear.
+     … +356 lines (ctrl+o to expand)
+  ⎿  Found 16 new diagnostic issues in 3 files (ctrl+o to expand)
+● Now wire the new fields into build_surface_mesh and register the module:
+
+● Update(wasm_frontend/src/adapters/surface_mesh.rs)
+  ⎿  Added 2 lines
+      52          light_volume: Vec::with_capacity(width * halo_grid.heig
+          ht() * depth * 3),
+      53          light_volume_size: [width as u32, halo_grid.height() as
+           u32, depth as u32],
+      54          lights,
+      55 +        faces: crate::adapters::face_instances::build_face_inst
+         +ances(&quads, voxel_scale),                                    
+      56 +        voxel_scale,                                           
+      57      };
+      58      for z in 0..depth {
+      59          for y in 0..halo_grid.height() {
+
+● Update(wasm_frontend/src/adapters/mod.rs)
+  ⎿  Added 1 line
+      3  //! generation core).
+      4  
+      5  pub mod cpu_splatter;
+      6 +pub mod face_instances;                                         
+      7  pub mod input;
+      8  pub mod local_chunk_source;
+      9  pub mod query_config;
+  ⎿  Found 4 new diagnostic issues in 3 files (ctrl+o to expand)
+
+● Running the native tests to validate the extraction:
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● All 52 tests pass, including the four new extraction tests. Task 1 done —
+  moving to the driver and shaders.
+
+● Update(wasm_frontend/src/drivers/shaders.rs)
+  ⎿  Added 266 lines
+       822  }
+       823  "#;
+       824  
+       825 +/// Instanced face-splat shaders. One instance is one axis-al
+           +igned surface                                                
+       826 +/// rectangle (see `PackedFaceInstance`); the vertex shader r
+           +ebuilds the quad                                             
+       827 +/// from center + extents + axis via `gl_VertexID` (4-vertex 
+           +TRIANGLE_STRIP)                                              
+       828 +/// and evaluates ALL lighting once per face, flat — the voxe
+           +l look, and the                                              
+       829 +/// reason the fragment shader shrinks to fog + grain + dithe
+           +r.                                                           
+       830 +pub const SPLAT_VERTEX_SHADER: &str = r#"#version 300 es     
+       831 +precision highp float;                                       
+       832 +precision highp sampler3D;                                   
+       833 +                                                             
+       834 +in vec3 aFacePos;      // face center, chunk-local fixed poin
+           +t (1/1024 u)                                                 
+       835 +in vec2 aFaceExtents;  // cells along the face's U/V axes    
+       836 +in vec4 aFaceMeta;     // normal_axis, material, baked_light 
+           +(0-15), ao                                                   
+       837 +in float aFaceFlags;   // bit 0: emissive                    
+       838 +                                                             
+       839 +uniform mat4 uProjection;                                    
+       840 +uniform mat4 uView;                                          
+       841 +uniform vec3 uChunkOrigin;                                   
+       842 +uniform vec3 uChunkSize;                                     
+       843 +uniform float uVoxelScale;                                   
+       844 +uniform vec3 uCameraPosition;                                
+       845 +uniform int uFlashlightEnabled;                              
+       846 +uniform sampler3D uLightVolume;                              
+       847 +                                                             
+       848 +uniform int uLightCount;                                     
+       849 +uniform vec3 uLightPositions[4];                             
+       850 +uniform vec3 uLightColors[4];                                
+       851 +uniform vec4 uLightParams[4];                                
+       852 +                                                             
+       853 +uniform sampler2D uShadowMap;                                
+       854 +uniform mat4 uLightViewProjection;                           
+       855 +uniform int uShadowedLightIndex;                             
+       856 +uniform int uShadowTaps;                                     
+       857 +                                                             
+       858 +out vec3 vWorldPos;                                          
+       859 +flat out vec3 vColor;                                        
+       860 +flat out vec3 vNormal;                                       
+       861 +flat out float vEmissive;                                    
+       862 +                                                             
+       863 +vec3 normalForAxis(float axis) {                             
+       864 +    if (axis < 0.5) return vec3(0.0, 1.0, 0.0);              
+       865 +    if (axis < 1.5) return vec3(0.0, -1.0, 0.0);             
+       866 +    if (axis < 2.5) return vec3(0.0, 0.0, -1.0);             
+       867 +    if (axis < 3.5) return vec3(0.0, 0.0, 1.0);              
+       868 +    if (axis < 4.5) return vec3(1.0, 0.0, 0.0);              
+       869 +    return vec3(-1.0, 0.0, 0.0);                             
+       870 +}                                                            
+       871 +                                                             
+       872 +// In-plane basis with U x V = outward normal, so the TRIANGL
+           +E_STRIP corner                                               
+       873 +// order (-1,-1)(1,-1)(-1,1)(1,1) is counter-clockwise from t
+           +he front.                                                    
+       874 +void faceBasis(float axis, out vec3 u, out vec3 v) {         
+       875 +    if (axis < 0.5)      { u = vec3(1.0, 0.0, 0.0); v = vec3(
+           +0.0, 0.0, -1.0); }                                           
+       876 +    else if (axis < 1.5) { u = vec3(1.0, 0.0, 0.0); v = vec3(
+           +0.0, 0.0, 1.0); }                                            
+       877 +    else if (axis < 2.5) { u = vec3(1.0, 0.0, 0.0); v = vec3(
+           +0.0, -1.0, 0.0); }                                           
+       878 +    else if (axis < 3.5) { u = vec3(1.0, 0.0, 0.0); v = vec3(
+           +0.0, 1.0, 0.0); }                                            
+       879 +    else if (axis < 4.5) { u = vec3(0.0, 1.0, 0.0); v = vec3(
+           +0.0, 0.0, 1.0); }                                            
+       880 +    else                 { u = vec3(0.0, 1.0, 0.0); v = vec3(
+           +0.0, 0.0, -1.0); }                                           
+       881 +}                                                            
+       882 +                                                             
+       883 +vec3 materialColor(float material) {                         
+       884 +    if (material < 1.5) return vec3(0.87, 0.80, 0.40); // wal
+           +l                                                            
+       885 +    if (material < 2.5) return vec3(0.60, 0.53, 0.07); // flo
+           +or                                                           
+       886 +    if (material < 3.5) return vec3(0.80, 0.78, 0.67); // cei
+           +ling                                                         
+       887 +    if (material < 4.5) return vec3(1.00, 0.97, 0.78); // flu
+           +orescent                                                     
+       888 +    if (material < 5.5) return vec3(0.53, 0.00, 0.00); // red
+           + wall                                                        
+       889 +    if (material < 6.5) return vec3(0.31, 0.60, 0.24); // gra
+           +ss                                                           
+       890 +    if (material < 7.5) return vec3(0.18, 0.42, 0.72); // wat
+           +er                                                           
+       891 +    if (material < 8.5) return vec3(0.42, 0.29, 0.18); // tre
+           +e                                                            
+       892 +    return vec3(1.0, 0.16, 0.10);                      // red
+           + light                                                       
+       893 +}                                                            
+       894 +                                                             
+       895 +float hash3D(vec3 p) {                                       
+       896 +    return fract(sin(dot(p, vec3(12.9898, 78.233, 45.164))) *
+           + 43758.5453);                                                
+       897 +}                                                            
+       898 +                                                             
+       899 +// Face-center shadow visibility. Vertex shaders have no deri
+           +vatives or                                                   
+       900 +// gl_FragCoord, so this uses a fixed symmetric tap pattern; 
+           +tap count is a                                               
+       901 +// spec-profile knob (1 on Pi-class, 4 on high).             
+       902 +float shadowVisibility(vec3 worldPos, vec3 normal, vec3 light
+           +Dir) {                                                       
+       903 +    vec4 lightClip = uLightViewProjection * vec4(worldPos + n
+           +ormal * 0.025, 1.0);                                         
+       904 +    vec3 p = lightClip.xyz / lightClip.w;                    
+       905 +    vec2 uv = p.xy * 0.5 + 0.5;                              
+       906 +    float receiverDepth = p.z * 0.5 + 0.5;                   
+       907 +    if (any(lessThan(uv, vec2(0.0))) || any(greaterThan(uv, v
+           +ec2(1.0))) || receiverDepth >= 1.0) {                        
+       908 +        return 1.0;                                          
+       909 +    }                                                        
+       910 +    float bias = max(0.003 * (1.0 - dot(normal, lightDir)), 0
+           +.0008);                                                      
+       911 +    float compare = receiverDepth - bias;                    
+       912 +    if (uShadowTaps <= 1) {                                  
+       913 +        float d = textureLod(uShadowMap, uv, 0.0).r;         
+       914 +        return (compare > d) ? 0.0 : 1.0;                    
+       915 +    }                                                        
+       916 +    vec2 texelSize = 1.0 / vec2(textureSize(uShadowMap, 0)); 
+       917 +    vec2 offsets[4] = vec2[](                                
+       918 +        vec2(-0.5, -0.5), vec2(0.5, -0.5),                   
+       919 +        vec2(-0.5,  0.5), vec2(0.5,  0.5)                    
+       920 +    );                                                       
+       921 +    float shadow = 0.0;                                      
+       922 +    for (int i = 0; i < 4; i++) {                            
+       923 +        float d = textureLod(uShadowMap, uv + offsets[i] * te
+           +xelSize, 0.0).r;                                             
+       924 +        shadow += (compare > d) ? 0.0 : 1.0;                 
+       925 +    }                                                        
+       926 +    return shadow * 0.25;                                    
+       927 +}                                                            
+       928 +                                                             
+       929 +vec3 quantize5(vec3 lightColor) {                            
+       930 +    return max(floor(lightColor * 4.0 + 0.5) / 4.0, 0.0);    
+       931 +}                                                            
+       932 +                                                             
+       933 +void main() {                                                
+       934 +    vec2 corner = vec2(                                      
+       935 +        (gl_VertexID == 1 || gl_VertexID == 3) ? 1.0 : -1.0, 
+       936 +        (gl_VertexID >= 2) ? 1.0 : -1.0                      
+       937 +    );                                                       
+       938 +    vec3 N = normalForAxis(aFaceMeta.x);                     
+       939 +    vec3 U, V;                                               
+       940 +    faceBasis(aFaceMeta.x, U, V);                            
+       941 +                                                             
+       942 +    vec3 center = uChunkOrigin + aFacePos * (1.0 / 1024.0);  
+       943 +    float halfU = aFaceExtents.x * uVoxelScale * 0.5;        
+       944 +    float halfV = aFaceExtents.y * uVoxelScale * 0.5;        
+       945 +    vec3 world = center + corner.x * halfU * U + corner.y * h
+           +alfV * V;                                                    
+       946 +    vWorldPos = world;                                       
+       947 +    vNormal = N;                                             
+       948 +    gl_Position = uProjection * uView * vec4(world, 1.0);    
+       949 +                                                             
+       950 +    vec3 albedo = materialColor(aFaceMeta.y);                
+       951 +    bool emissive = aFaceFlags > 0.5;                        
+       952 +    vEmissive = emissive ? 1.0 : 0.0;                        
+       953 +    if (emissive) {                                          
+       954 +        vColor = albedo * 1.5;                               
+       955 +        return;                                              
+       956 +    }                                                        
+       957 +                                                             
+       958 +    vec3 toCamera = uCameraPosition - center;                
+       959 +    float distanceToCamera = length(toCamera);               
+       960 +    vec3 Vdir = toCamera / max(distanceToCamera, 0.001);     
+       961 +                                                             
+       962 +    // Sample the baked light volume half a voxel into the ai
+           +r so a face                                                  
+       963 +    // never reads the dark interior of its own wall.        
+       964 +    vec3 samplePos = center + N * (0.5 * uVoxelScale);       
+       965 +    vec3 uvw = (samplePos - uChunkOrigin) / uChunkSize;      
+       966 +    vec3 irradiance = textureLod(uLightVolume, clamp(uvw, 0.0
+           +, 1.0), 0.0).rgb;                                            
+       967 +    irradiance = max(irradiance, vec3(0.16, 0.13, 0.07));    
+       968 +    irradiance = mix(vec3(0.18, 0.15, 0.08), irradiance, 0.25
+           +);                                                           
+       969 +                                                             
+       970 +    float faceResponse = 0.8;                                
+       971 +    if (N.y > 0.5) {                                         
+       972 +        faceResponse = 1.0;                                  
+       973 +    } else if (N.y < -0.5) {                                 
+       974 +        faceResponse = 0.35;                                 
+       975 +    } else {                                                 
+       976 +        faceResponse = 0.65 + 0.1 * N.x + 0.05 * N.z;        
+       977 +    }                                                        
+       978 +                                                             
+       979 +    float ao = mix(1.0, 0.22, clamp(aFaceMeta.w * 1.3, 0.0, 1
+           +.0));                                                        
+       980 +                                                             
+       981 +    vec3 ambientUp = vec3(0.35, 0.38, 0.22) * irradiance;    
+       982 +    vec3 ambientDown = vec3(0.14, 0.15, 0.08) * irradiance;  
+       983 +    vec3 ambient = mix(ambientDown, ambientUp, N.y * 0.5 + 0.
+           +5) * ao * faceResponse;                                      
+       984 +                                                             
+       985 +    vec3 directDiffuse = vec3(0.0);                          
+       986 +    for (int i = 0; i < 4; ++i) {                            
+       987 +        if (i >= uLightCount) break;                         
+       988 +        vec3 toLight = uLightPositions[i] - center;          
+       989 +        float d2 = dot(toLight, toLight);                    
+       990 +        float range = uLightParams[i].x;                     
+       991 +        float range2 = range * range;                        
+       992 +        if (d2 >= range2) continue;                          
+       993 +                                                             
+       994 +        float d = sqrt(d2);                                  
+       995 +        vec3 L = toLight / max(d, 0.001);                    
+       996 +        float ndotl = max(dot(N, L), 0.0);                   
+       997 +        float falloff = pow(max(1.0 - d2 / range2, 0.0), 2.0)
+           + / (1.0 + 0.05 * d2);                                        
+       998 +                                                             
+       999 +        float visible = 1.0;                                 
+      1000 +        if (i == uShadowedLightIndex) {                      
+      1001 +            visible = shadowVisibility(center, N, L);        
+      1002 +        }                                                    
+      1003 +                                                             
+      1004 +        float lightHash = hash3D(uLightPositions[i] * 10.0); 
+      1005 +        float directMod = 1.0 + 0.05 * (lightHash - 0.5);    
+      1006 +        vec3 lightColor = mix(uLightColors[i], vec3(1.0, 0.96
+           +, 0.85), 0.3);                                               
+      1007 +        directDiffuse += lightColor * uLightParams[i].y * fal
+           +loff * visible * ndotl * directMod;                          
+      1008 +    }                                                        
+      1009 +                                                             
+      1010 +    float flashlight = 0.0;                                  
+      1011 +    if (uFlashlightEnabled == 1) {                           
+      1012 +        float facing = max(dot(N, Vdir), 0.0);               
+      1013 +        flashlight = facing * facing * (1.0 - smoothstep(2.0,
+           + 24.0, distanceToCamera)) * 1.5;                             
+      1014 +    }                                                        
+      1015 +                                                             
+      1016 +    vec3 totalDiffuse = quantize5(ambient + directDiffuse);  
+      1017 +    vColor = totalDiffuse * albedo + albedo * flashlight;    
+      1018 +}                                                            
+      1019 +"#;                                                          
+      1020 +                                                             
+      1021 +/// The splat fragment shader is deliberately tiny (the Pi wi
+           +n): fog,                                                     
+      1022 +/// voxel-lattice albedo grain, ordered dither, tone map. All
+           + lighting                                                    
+      1023 +/// arrived flat from the vertex shader.                     
+      1024 +pub const SPLAT_FRAGMENT_SHADER: &str = r#"#version 300 es   
+      1025 +precision highp float;                                       
+      1026 +                                                             
+      1027 +in vec3 vWorldPos;                                           
+      1028 +flat in vec3 vColor;                                         
+      1029 +flat in vec3 vNormal;                                        
+      1030 +flat in float vEmissive;                                     
+      1031 +                                                             
+      1032 +uniform vec3 uCameraPosition;                                
+      1033 +uniform float uVoxelScale;                                   
+      1034 +                                                             
+      1035 +out vec4 fragColor;                                          
+      1036 +                                                             
+      1037 +float hash3D(vec3 p) {                                       
+      1038 +    return fract(sin(dot(p, vec3(12.9898, 78.233, 45.164))) *
+           + 43758.5453);                                                
+      1039 +}                                                            
+      1040 +                                                             
+      1041 +float ign(vec2 p) {                                          
+      1042 +    vec3 magic = vec3(0.06711056, 0.00583715, 52.9829189);   
+      1043 +    return fract(magic.z * fract(dot(p, magic.xy)));         
+      1044 +}                                                            
+      1045 +                                                             
+      1046 +void main() {                                                
+      1047 +    vec3 color = vColor;                                     
+      1048 +    float distanceToCamera = length(uCameraPosition - vWorldP
+           +os);                                                         
+      1049 +                                                             
+      1050 +    if (vEmissive < 0.5) {                                   
+      1051 +        // World-locked per-voxel albedo grain: sample half a
+           + voxel inside                                                
+      1052 +        // the surface so faces lying exactly on lattice plan
+           +es hash stably.                                              
+      1053 +        vec3 lattice = floor((vWorldPos - vNormal * (0.5 * uV
+           +oxelScale)) / uVoxelScale);                                  
+      1054 +        float grain = mix(0.90, 1.06, hash3D(lattice));      
+      1055 +        color *= grain;                                      
+      1056 +                                                             
+      1057 +        float desatFactor = clamp(distanceToCamera * 0.015, 0
+           +.0, 0.55);                                                   
+      1058 +        float gray = dot(color, vec3(0.299, 0.587, 0.114));  
+      1059 +        color = mix(color, vec3(gray), desatFactor);         
+      1060 +        color = mix(color, vec3(0.22, 0.18, 0.12), desatFacto
+           +r * 0.35);                                                   
+      1061 +    }                                                        
+      1062 +                                                             
+      1063 +    // Fog identical to the mesh path so the two renderers bl
+           +end the same                                                 
+      1064 +    // way against the clear color.                          
+      1065 +    float fogOnset = 15.0;                                   
+      1066 +    float fogDist = max(0.0, distanceToCamera - fogOnset);   
+      1067 +    float fogDensity = 0.028;                                
+      1068 +    float heightFactor = 1.0 + 0.35 * smoothstep(0.0, 3.4, vW
+           +orldPos.y);                                                  
+      1069 +    float fogAmount = 1.0 - exp(-fogDist * fogDensity * heigh
+           +tFactor);                                                    
+      1070 +    fogAmount = max(fogAmount, smoothstep(38.0, 50.0, distanc
+           +eToCamera));                                                 
+      1071 +                                                             
+      1072 +    vec3 baselineFogColor = vec3(0.15, 0.125, 0.055);        
+      1073 +    float hNorm = clamp(vWorldPos.y / 5.0, 0.0, 1.0);        
+      1074 +    vec3 heightFogColor = mix(                               
+      1075 +        vec3(0.12, 0.09, 0.035),                             
+      1076 +        vec3(0.14, 0.15, 0.06),                              
+      1077 +        hNorm                                                
+      1078 +    );                                                       
+      1079 +    float farFade = smoothstep(35.0, 50.0, distanceToCamera);
+      1080 +    vec3 currentFogColor = mix(heightFogColor, baselineFogCol
+           +or, farFade);                                                
+      1081 +    color = mix(color, currentFogColor, clamp(fogAmount, 0.0,
+           + 1.0));                                                      
+      1082 +                                                             
+      1083 +    color = color / (color + vec3(1.0));                     
+      1084 +    color = pow(color, vec3(1.0 / 2.2));                     
+      1085 +    color += (ign(gl_FragCoord.xy) - 0.5) * (1.0 / 128.0);   
+      1086 +                                                             
+      1087 +    fragColor = vec4(color, 1.0);                            
+      1088 +}                                                            
+      1089 +"#;                                                          
+      1090 +                                                             
+      1091  pub const SHADOW_VERTEX_SHADER: &str = r#"#version 300 es
+      1092  layout(location = 0) in vec3 aPosition;
+      1093  uniform mat4 uLightViewProjection;
+
+● Making the shared helpers reusable by the new driver:
+
+  Ran 1 shell command (ctrl+o to expand)
+  ⎿  Found 1 new diagnostic issue in 1 file (ctrl+o to expand)
+
+● Write(wasm_frontend/src/drivers/splat_webgl.rs)
+  ⎿  Wrote 764 lines to wasm_frontend/src/drivers/splat_webgl.rs
+       1 //! Instanced face-splat renderer — the GPU microvoxel path. One
+       2 //! one error-selected, axis-aligned surface rectangle (`PackedF
+       3 //! the vertex shader rebuilds the quad and evaluates all lighti
+       4 //! face, flat, leaving a near-trivial fragment shader (fog + gr
+       5 //!
+       6 //! Selection is amortized: instance pages arrive prebuilt per c
+       7 //! lifecycle as meshes; steady-state frames upload nothing). Pe
+       8 //! CPU only culls chunks and cell ranges and issues instanced d
+       9 //!
+          shadow map:
+     … +884 lines (ctrl+o to expand)
+
+● There's a borrow-checker risk in that closure — I'll verify when compiling.
+  Now register the module and wire up ?renderer=splat in the browser driver:
+
+● Update(wasm_frontend/src/drivers/mod.rs)
+  ⎿  Added 1 line
+       5  pub mod console_telemetry;
+       6  pub mod cpu_canvas;
+       7  pub mod shaders;
+       8 +pub mod splat_webgl;                                           
+       9  pub mod surface_webgl;
+      10  pub mod webgl;
+
+● Update(wasm_frontend/src/drivers/browser.rs)
+  ⎿  Added 1 line
+      27  };
+      28  use crate::drivers::console_telemetry::CONSOLE_TELEMETRY;
+      29  use crate::drivers::cpu_canvas::CpuCanvasRenderer;
+      30 +use crate::drivers::splat_webgl::{SplatProfile, SplatRenderer};
+      31  use crate::drivers::surface_webgl::SurfaceRenderer;
+      32  use crate::drivers::webgl::WebGl2Renderer;
+      33  
+
+● Update(wasm_frontend/src/drivers/browser.rs)
+  ⎿  Added 2 lines
+      47  /// debugging; `?renderer=cpu` chooses the software fallback.
+      48  enum DriverRenderer {
+      49      Surface(SurfaceRenderer),
+      50 +    Splat(SplatRenderer),                                      
+      51      Raymarch(WebGl2Renderer),
+      52      Cpu(CpuCanvasRenderer),
+      53  }
+     ...
+      56      fn resize(&mut self, width: u32, height: u32) {
+      57          match self {
+      58              DriverRenderer::Surface(r) => r.resize(width, heigh
+          t),
+      59 +            DriverRenderer::Splat(r) => r.resize(width, height)
+         +,                                                              
+      60              DriverRenderer::Raymarch(r) => r.resize(width, heig
+          ht),
+      61              DriverRenderer::Cpu(r) => r.resize(width, height),
+      62          }
+  ⎿  Found 2 new diagnostic issues in 2 files (ctrl+o to expand)
+
+● Update(wasm_frontend/src/drivers/browser.rs)
+  ⎿  Added 22 lines, removed 9 lines
+      68      /// lets CSS upscale with `image-rendering: pixelated`.
+      69      fn resolution_factor(&self) -> f64 {
+      70          match self {
+      71 -            DriverRenderer::Surface(_) | DriverRenderer::Raymar
+         -ch(_) => 1.0,                                                  
+      71 +            DriverRenderer::Surface(_)                         
+      72 +            | DriverRenderer::Splat(_)                         
+      73 +            | DriverRenderer::Raymarch(_) => 1.0,              
+      74              DriverRenderer::Cpu(_) => 0.25,
+      75          }
+      76      }
+     ...
+      78      fn label(&self) -> &'static str {
+      79          match self {
+      80              DriverRenderer::Surface(_) => "GPU surfaces",
+      81 +            DriverRenderer::Splat(_) => "GPU face splats",     
+      82              DriverRenderer::Raymarch(_) => "GPU raymarch (debug
+          )",
+      83              DriverRenderer::Cpu(_) => "CPU splat",
+      84          }
+     ...
+       87  
+       88  impl RendererPort for DriverRenderer {
+       89      fn uses_surface_meshes(&self) -> bool {
+       87 -        matches!(self, DriverRenderer::Surface(_))            
+       90 +        matches!(self, DriverRenderer::Surface(_) | DriverRend
+          +erer::Splat(_))                                               
+       91      }
+       92      fn upload_surfaces(&mut self, chunks: &[SurfaceChunk<'_>])
+            {
+       90 -        if let DriverRenderer::Surface(r) = self {            
+       91 -            r.upload_surfaces(chunks);                        
+       93 +        match self {                                          
+       94 +            DriverRenderer::Surface(r) => r.upload_surfaces(ch
+          +unks),                                                        
+       95 +            DriverRenderer::Splat(r) => r.upload_surfaces(chun
+          +ks),                                                          
+       96 +            _ => {}                                           
+       97          }
+       98      }
+       99      fn remove_surfaces(&mut self, keys: &[SurfaceChunkKey]) {
+       95 -        if let DriverRenderer::Surface(r) = self {            
+       96 -            r.remove_surfaces(keys);                          
+      100 +        match self {                                          
+      101 +            DriverRenderer::Surface(r) => r.remove_surfaces(ke
+          +ys),                                                          
+      102 +            DriverRenderer::Splat(r) => r.remove_surfaces(keys
+          +),                                                            
+      103 +            _ => {}                                           
+      104          }
+      105      }
+      106      fn clear_surfaces(&mut self) {
+      100 -        if let DriverRenderer::Surface(r) = self {            
+      101 -            r.clear_surfaces();                               
+      107 +        match self {                                          
+      108 +            DriverRenderer::Surface(r) => r.clear_surfaces(), 
+      109 +            DriverRenderer::Splat(r) => r.clear_surfaces(),   
+      110 +            _ => {}                                           
+      111          }
+      112      }
+      113      fn gpu_frame_ms(&self) -> Option<f32> {
+      114          match self {
+      115              DriverRenderer::Surface(r) => r.gpu_frame_ms(),
+      116 +            DriverRenderer::Splat(r) => r.gpu_frame_ms(),     
+      117              DriverRenderer::Raymarch(_) | DriverRenderer::Cpu(
+           _) => None,
+      118          }
+      119      }
+     ...
+      121          match self {
+      122              DriverRenderer::Cpu(r) => r.cpu_telemetry_string()
+           ,
+      123              DriverRenderer::Surface(r) => r.cpu_telemetry_stri
+           ng(),
+      124 +            DriverRenderer::Splat(r) => r.cpu_telemetry_string
+          +(),                                                           
+      125              DriverRenderer::Raymarch(r) => r.cpu_telemetry_str
+           ing(),
+      126          }
+      127      }
+      128      fn upload_atlas(&mut self, texels: &[u32]) {
+      129          match self {
+      130              DriverRenderer::Surface(r) => r.upload_atlas(texel
+           s),
+      131 +            DriverRenderer::Splat(r) => r.upload_atlas(texels)
+          +,                                                             
+      132              DriverRenderer::Raymarch(r) => r.upload_atlas(texe
+           ls),
+      133              DriverRenderer::Cpu(r) => r.upload_atlas(texels),
+      134          }
+      135      }
+      136      fn upload_atlas_rows(&mut self, first_row: u32, texels: &[
+           u32]) -> bool {
+      137          match self {
+      126 -            DriverRenderer::Surface(_) => false,              
+      138 +            DriverRenderer::Surface(_) | DriverRenderer::Splat
+          +(_) => false,                                                 
+      139              DriverRenderer::Raymarch(r) => r.upload_atlas_rows
+           (first_row, texels),
+      140              // The CPU splatter rebuilds its mip pyramid from 
+           the whole
+      141              // atlas, so it only supports full uploads.
+     ...
+      145      fn draw(&mut self, frame: &FrameParams, chunks: &[ChunkDra
+           w]) {
+      146          match self {
+      147              DriverRenderer::Surface(r) => r.draw(frame, chunks
+           ),
+      148 +            DriverRenderer::Splat(r) => r.draw(frame, chunks),
+      149              DriverRenderer::Raymarch(r) => r.draw(frame, chunk
+           s),
+      150              DriverRenderer::Cpu(r) => r.draw(frame, chunks),
+      151          }
+
+● Update(wasm_frontend/src/drivers/browser.rs)
+  ⎿  Added 22 lines, removed 2 lines
+      201      look_last: (f64, f64),
+      202  }
+      203  
+      204 -/// Renderer selection: surfaces by default, `?renderer=raymar
+          -ch` for the                                                   
+      205 -/// retained SVO debug path, `?renderer=cpu` for software fall
+          -back.                                                         
+      204 +/// Renderer selection: surfaces by default, `?renderer=splat`
+          + for the                                                      
+      205 +/// instanced face-splat path (default candidate once parity/p
+          +erf is                                                        
+      206 +/// confirmed), `?renderer=raymarch` for the retained SVO debu
+          +g path,                                                       
+      207 +/// `?renderer=cpu` for software fallback.                    
+      208  fn create_renderer(canvas: &HtmlCanvasElement, query: &str) ->
+            Result<DriverRenderer, JsValue> {
+      209      if query.contains("renderer=cpu") {
+      210          return Ok(DriverRenderer::Cpu(CpuCanvasRenderer::new(c
+           anvas)?));
+     ...
+      212      if query.contains("renderer=raymarch") {
+      213          return WebGl2Renderer::new(canvas).map(DriverRenderer:
+           :Raymarch);
+      214      }
+      215 +    if query.contains("renderer=splat") {                     
+      216 +        let profile = if query.contains("spec=high") {        
+      217 +            SplatProfile::high()                              
+      218 +        } else {                                              
+      219 +            SplatProfile::low()                               
+      220 +        };                                                    
+      221 +        match SplatRenderer::new(canvas, profile) {           
+      222 +            Ok(gpu) => return Ok(DriverRenderer::Splat(gpu)), 
+      223 +            Err(err) => {                                     
+      224 +                web_sys::console::warn_2(                     
+      225 +                    &JsValue::from_str(                       
+      226 +                        "splat renderer unavailable, falling b
+          +ack to surface meshes:",                                      
+      227 +                    ),                                        
+      228 +                    &err,                                     
+      229 +                );                                            
+      230 +            }                                                 
+      231 +        }                                                     
+      232 +    }                                                         
+      233      match SurfaceRenderer::new(canvas) {
+      234          Ok(gpu) => Ok(DriverRenderer::Surface(gpu)),
+      235          Err(err) => {
+● Now compile the wasm target to catch driver-layer errors (the drivers are
+  cfg(wasm32)-only):
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● Clean compile for wasm32. Fixing the one new warning:
+
+● Update(wasm_frontend/src/drivers/splat_webgl.rs)
+  ⎿  Added 1 line, removed 1 line
+      727                  let cell_radius = chunk.cell_size * 1.3;
+      728                  let mut run_start: Option<u32> = None;
+      729                  let mut run_count: u32 = 0;
+      730 -                let mut flush =                               
+      730 +                let flush =                                   
+      731                      |start: &mut Option<u32>, count: &mut u32,
+            stats: &mut FrameStats| {
+      732                          if let Some(first) = start.take() {
+      733                              self.point_instance_attribs(first)
+           ;
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● All 111 workspace tests pass. The culling, budget, and telemetry work (task 3)
+  was built directly into the driver, so both tasks are done. Now building the
+  wasm package and verifying:
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● Wasm package built. Now let me run the dev server and drive the splat renderer
+  in a headless browser to verify it actually renders:
+
+  Read 1 file, listed 1 directory, ran 3 shell commands (ctrl+o to expand)
+
+● Update(wasm_frontend/src/drivers/splat_webgl.rs)
+  ⎿  Added 3 lines
+      386  
+      387          let light_texture = gl.create_texture().expect("create
+            light texture");
+      388          gl.bind_texture(Gl::TEXTURE_3D, Some(&light_texture));
+      389 +        // RGB rows are width*3 bytes — rarely 4-aligned, and 
+          +the default                                                   
+      390 +        // unpack alignment of 4 makes texImage3D reject the u
+          +pload.                                                        
+      391 +        gl.pixel_storei(Gl::UNPACK_ALIGNMENT, 1);             
+      392          gl.tex_image_3d_with_opt_u8_array(
+      393              Gl::TEXTURE_3D,
+      394              0,
+
+● Update(wasm_frontend/src/drivers/surface_webgl.rs)
+  ⎿  Error editing file
+
+  Read 1 file (ctrl+o to expand)
+
+● Update(wasm_frontend/src/drivers/surface_webgl.rs)
+  ⎿  Added 3 lines
+      203  
+      204          let light_texture = gl.create_texture().expect("create
+            light texture");
+      205          gl.bind_texture(Gl::TEXTURE_3D, Some(&light_texture));
+      206 +        // RGB rows are width*3 bytes — rarely 4-aligned, and 
+          +the default                                                   
+      207 +        // unpack alignment of 4 makes texImage3D reject the u
+          +pload.                                                        
+      208 +        gl.pixel_storei(Gl::UNPACK_ALIGNMENT, 1);             
+      209          gl.tex_image_3d_with_opt_u8_array(
+      210              Gl::TEXTURE_3D,
+      211              0,
+
+● Rebuilding and re-verifying both renderers side by side:
+
+  Read 2 files, ran 2 shell commands (ctrl+o to expand)
+  ⎿  Found 1 new diagnostic issue in 1 file (ctrl+o to expand)
+
+● The server died between runs — restarting it properly in the background and
+  re-checking:
+
+  Read 2 files, ran 2 shell commands (ctrl+o to expand)
+  ⎿  Interrupted · What should Claude do instead?
+
+❯ refer to @review.txt but i want multithreading                                
+  ⎿  Read review.txt (147 lines)
+● Update(wasm_frontend/src/drivers/shaders.rs)
+  ⎿  Added 8 lines, removed 4 lines
+      1007          directDiffuse += lightColor * uLightParams[i].y * fal
+            loff * visible * ndotl * directMod;
+      1008      }
+      1009  
+      1010 -    float flashlight = 0.0;                                  
+      1010 +    // Warm-white flashlight, kept INSIDE the light sum: the 
+           +material color                                               
+      1011 +    // is the immutable base and every light multiplies it, s
+           +o the flashlight                                             
+      1012 +    // brightens yellow walls toward brighter yellow, never n
+           +eutral grey.                                                 
+      1013 +    vec3 flashlight = vec3(0.0);                             
+      1014      if (uFlashlightEnabled == 1) {
+      1015          float facing = max(dot(N, Vdir), 0.0);
+      1013 -        flashlight = facing * facing * (1.0 - smoothstep(2.0,
+           - 24.0, distanceToCamera)) * 1.5;                             
+      1016 +        float amount = facing * facing * (1.0 - smoothstep(2.
+           +0, 24.0, distanceToCamera)) * 1.5;                           
+      1017 +        flashlight = vec3(1.0, 0.96, 0.88) * amount;         
+      1018      }
+      1019  
+      1016 -    vec3 totalDiffuse = quantize5(ambient + directDiffuse);  
+      1017 -    vColor = totalDiffuse * albedo + albedo * flashlight;    
+      1020 +    vec3 lighting = quantize5(ambient + directDiffuse + flash
+           +light);                                                      
+      1021 +    vColor = albedo * lighting;                              
+      1022  }
+      1023  "#;
+      1024  
+
+  Searched for 1 pattern, read 4 files (ctrl+o to expand)
+
+● I have the full picture. Building the async pipeline now — starting with the
+  port extension and the payload codec:
+
+  Ran 1 shell command (ctrl+o to expand)
+
+❯ Yes—the code contains several deliberate noise/dither effects that become     
+  especially visible on ceilings, and the ceiling-height field itself also has  
+  fairly high-frequency variation. So this is likely a combination of **visual  
+  shader noise** and **actual noisy ceiling geometry**. [ppl-ai-file-upload.s3. 
+  amazonaws](https://ppl-ai-file-upload.s3.amazonaws.com/web/direct-files/attac 
+  hments/6575456/ab41dcc8-f278-45ea-bf6f-5471d0de6e55/repomix-output.json?AWSAc 
+  cessKeyId=ASIA2F3EMEYEW7NIHZCH&Signature=iI5wSjpsANNUyNKiiHX7Kbeocjc%3D&x-amz 
+  -security-token=IQoJb3JpZ2luX2VjEPL%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEaCXVzLWVhc 
+  3QtMSJIMEYCIQCBWF9g6GZ0ky4ZeyNBYQubeITpPtp09VmUKHGFi7rG1QIhAMs2bLCoXb4K2PE9JF 
+  HeZaXKG%2BS%2B3kkUCfcj%2B8x99GTbKvwECLv%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEQARoMN 
+  jk5NzUzMzA5NzA1IgxJsl0nyOvGpET5QnIq0AS64QBnfRp1I5rFnuPQuxDR2IaYLp3UZYaaNsZETM 
+  E71UNHl%2B%2BUD3rZmIV6hWj%2Fkt%2B5Q13A2VSmLfJa%2FmH4oVWsoujBeNVsq5yzpxU4ukRi9 
+  8%2BcOnoC0fB9s4Xu9TsS6PsBdQXJDOdrjgFnEtMICgxAF4AuilrGZhn%2Bebyxj%2FjfHyqpXCKh 
+  TmfsYJRUE%2FPjAOmxmAuZ%2F1frttt0qR0EUYv0VWOPCvMRgrR7RbzPytP0xrGx%2B1ZZRru1v3C 
+  jqPZvhfAsg7jAusZigXIO4gQZijIleeuretORuM0Ql9U5qF8Q4i8Ii3gPo%2FrpsPVYlY3Pw07Uvz 
+  eIJFXstdtIXDitwm4Bzz4PeRkn0r2jsz6l0ycl%2FZW67YSjV%2BDLdflj8iY6faKu6I89OmexcT% 
+  2BZNeFouPSdV0712u94qGR%2FR5Ah0aZeHeuba2iWqne6vF3ATEFcIi%2F%2BrIKW7UiVas12X1lO 
+  k6oxaao3onCIJJaiGcyYdBA2vWEpJmfp%2B97IDYOXYW5ZX%2FmXjCxSc%2F9ZMZEPdr%2FX8HTMo 
+  ie%2FMFc44%2FfW777xnPA5H4Gyc7zDbh%2BWtHILSqlwWHlJbZfV669lorqvI0T1yy5bQn1ElkTG 
+  MXeuLK9LfP5VY%2Fw%2BsVbEiOttfaN1wBZcJwAySoU5VgUvbw5c%2F34iMys9Ln6MDPdE925Jkf0 
+  qog6JLf0hfPiMKdYIiDgPCjDjOkZjeOT3Rp6MnvUhuTseCwURsQS%2BicCsanxIj%2BgmClqJPrwU 
+  ir3QN4T7xRbXjMC2ZCS%2BvCIi8qsWX3KTo1NJsekiMMvZxNIGOpcBHgklfskg5KZGkjMlF%2BUnH 
+  7JbVS3zwGWn2qF%2Br6dwyJ9QpdVc2rF%2B4MU7gb9sijqsdCyEt8eo7ynTJRZTCXm7cuxm3ubFCK 
+  q2ccrmQbwzaR%2FHObx9VljbruvRusGhQ8v3kwp2MEWwCiTuAjBE8lulEW%2FUrVUIH5OTO29A93t 
+  FcLPsfRRE%2F7Mc2Of07YQkUjlRPybM%2BwJ0eQ%3D%3D&Expires=1783708318)             
+                                                                                
+  ## Shader noise                                                               
+                                                                                
+  The splat fragment shader intentionally applies **per-voxel world-locked      
+  albedo grain**:                                                               
+                                                                                
+  ```glsl                                                                       
+  float grain = mix(0.90, 1.06, hash3D(lattice));                               
+  color *= grain;                                                               
+  ```                                                                           
+                                                                                
+  That is a 16% brightness spread on every voxel cell. On a large, flat,        
+  light-colored ceiling it reads as salt-and-pepper noise, much more than it    
+  does on yellow walls or dark floors.                                          
+  [ppl-ai-file-upload.s3.amazonaws](https://ppl-ai-file-upload.s3.amazonaws.com 
+  /web/direct-files/attachments/6575456/ab41dcc8-f278-45ea-bf6f-5471d0de6e55/re 
+  pomix-output.json?AWSAccessKeyId=ASIA2F3EMEYEW7NIHZCH&Signature=iI5           
+  ──── (55 lines hidden) ────────────────────────────────────────────────────── 
+  ZxNIGOpcBHgklfskg5KZGkjMlF%2BUnH7JbVS3zwGWn2qF%2Br6dwyJ9QpdVc2rF%2B4MU7gb9sij 
+  qsdCyEt8eo7ynTJRZTCXm7cuxm3ubFCKq2ccrmQbwzaR%2FHObx9VljbruvRusGhQ8v3kwp2MEWwC 
+  iTuAjBE8lulEW%2FUrVUIH5OTO29A93tFcLPsfRRE%2F7Mc2Of07YQkUjlRPybM%2BwJ0eQ%3D%3D 
+  &Expires=1783708318)                                                          
+                                                                                
+  ## Safe shader adjustment                                                     
+                                                                                
+  Keep the grimy feel on walls, but exclude ceiling faces:                      
+                                                                                
+  ```glsl                                                                       
+  bool isCeiling = aFaceMeta.y > 2.5 && aFaceMeta.y < 3.5;                      
+                                                                                
+  float grain = 1.0;                                                            
+  if (!isCeiling) {                                                             
+      grain = mix(0.98, 1.02, hash3D(lattice));                                 
+  }                                                                             
+  color *= grain;                                                               
+  ```                                                                           
+                                                                                
+  Then remove the fragment dither while debugging:                              
+                                                                                
+  ```glsl                                                                       
+  // color += ign(gl_FragCoord.xy - 0.5) / 128.0;                               
+  ```                                                                           
+                                                                                
+  This will tell you immediately whether you are seeing rendering noise or      
+  physical stepped-ceiling geometry. The correct end state is a ceiling that    
+  looks like large, solid construction with intentional beams and panels—not a  
+  dithered terrain surface. [ppl-ai-file-upload.s3.amazonaws](https://ppl-ai-fi 
+  le-upload.s3.amazonaws.com/web/direct-files/attachments/6575456/ab41dcc8-f278 
+  -45ea-bf6f-5471d0de6e55/repomix-output.json?AWSAccessKeyId=ASIA2F3EMEYEW7NIHZ 
+  CH&Signature=iI5wSjpsANNUyNKiiHX7Kbeocjc%3D&x-amz-security-token=IQoJb3JpZ2lu 
+  X2VjEPL%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEaCXVzLWVhc3QtMSJIMEYCIQCBWF9g6GZ0ky4Ze 
+  yNBYQubeITpPtp09VmUKHGFi7rG1QIhAMs2bLCoXb4K2PE9JFHeZaXKG%2BS%2B3kkUCfcj%2B8x9 
+  9GTbKvwECLv%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEQARoMNjk5NzUzMzA5NzA1IgxJsl0nyOvGp 
+  ET5QnIq0AS64QBnfRp1I5rFnuPQuxDR2IaYLp3UZYaaNsZETME71UNHl%2B%2BUD3rZmIV6hWj%2F 
+  kt%2B5Q13A2VSmLfJa%2FmH4oVWsoujBeNVsq5yzpxU4ukRi98%2BcOnoC0fB9s4Xu9TsS6PsBdQX 
+  JDOdrjgFnEtMICgxAF4AuilrGZhn%2Bebyxj%2FjfHyqpXCKhTmfsYJRUE%2FPjAOmxmAuZ%2F1fr 
+  ttt0qR0EUYv0VWOPCvMRgrR7RbzPytP0xrGx%2B1ZZRru1v3CjqPZvhfAsg7jAusZigXIO4gQZijI 
+  leeuretORuM0Ql9U5qF8Q4i8Ii3gPo%2FrpsPVYlY3Pw07UvzeIJFXstdtIXDitwm4Bzz4PeRkn0r 
+  2jsz6l0ycl%2FZW67YSjV%2BDLdflj8iY6faKu6I89OmexcT%2BZNeFouPSdV0712u94qGR%2FR5A 
+  h0aZeHeuba2iWqne6vF3ATEFcIi%2F%2BrIKW7UiVas12X1lOk6oxaao3onCIJJaiGcyYdBA2vWEp 
+  Jmfp%2B97IDYOXYW5ZX%2FmXjCxSc%2F9ZMZEPdr%2FX8HTMoie%2FMFc44%2FfW777xnPA5H4Gyc 
+  7zDbh%2BWtHILSqlwWHlJbZfV669lorqvI0T1yy5bQn1ElkTGMXeuLK9LfP5VY%2Fw%2BsVbEiOtt 
+  faN1wBZcJwAySoU5VgUvbw5c%2F34iMys9Ln6MDPdE925Jkf0qog6JLf0hfPiMKdYIiDgPCjDjOkZ 
+  jeOT3Rp6MnvUhuTseCwURsQS%2BicCsanxIj%2BgmClqJPrwUir3QN4T7xRbXjMC2ZCS%2BvCIi8q 
+  sWX3KTo1NJsekiMMvZxNIGOpcBHgklfskg5KZGkjMlF%2BUnH7JbVS3zwGWn2qF%2Br6dwyJ9QpdV 
+  c2rF%2B4MU7gb9sijqsdCyEt8eo7ynTJRZTCXm7cuxm3ubFCKq2ccrmQbwzaR%2FHObx9VljbruvR 
+  usGhQ8v3kwp2MEWwCiTuAjBE8lulEW%2FUrVUIH5OTO29A93tFcLPsfRRE%2F7Mc2Of07YQkUjlRP 
+  ybM%2BwJ0eQ%3D%3D&Expires=1783708318)                                         
+
+● Update(wasm_frontend/src/drivers/shaders.rs)
+  ⎿  Added 1 line
+      859  flat out vec3 vColor;
+      860  flat out vec3 vNormal;
+      861  flat out float vEmissive;
+      862 +flat out float vGrainAmp;                                     
+      863  
+      864  vec3 normalForAxis(float axis) {
+      865      if (axis < 0.5) return vec3(0.0, 1.0, 0.0);
+
+● Update(wasm_frontend/src/drivers/shaders.rs)
+  ⎿  Added 5 lines
+      951      vec3 albedo = materialColor(aFaceMeta.y);
+      952      bool emissive = aFaceFlags > 0.5;
+      953      vEmissive = emissive ? 1.0 : 0.0;
+      954 +    // Per-voxel grain amplitude: subtle on walls/floors, none
+          + on ceilings                                                  
+      955 +    // (a bright ceiling plane turns grain into salt-and-peppe
+          +r noise) or                                                   
+      956 +    // emissive fixtures.                                     
+      957 +    bool isCeiling = aFaceMeta.y > 2.5 && aFaceMeta.y < 3.5;  
+      958 +    vGrainAmp = (emissive || isCeiling) ? 0.0 : 0.02;         
+      959      if (emissive) {
+      960          vColor = albedo * 1.5;
+      961          return;
+
+● Update(wasm_frontend/src/drivers/shaders.rs)  ⎿  Added 1 line
+      1038  flat in vec3 vColor;
+      1039  flat in vec3 vNormal;
+      1040  flat in float vEmissive;
+      1041 +flat in float vGrainAmp;                                     
+      1042  
+      1043  uniform vec3 uCameraPosition;
+      1044  uniform float uVoxelScale;
+
+● Update(wasm_frontend/src/drivers/shaders.rs)
+  ⎿  Added 3 lines, removed 1 line
+      1061      if (vEmissive < 0.5) {
+      1062          // World-locked per-voxel albedo grain: sample half a
+             voxel inside
+      1063          // the surface so faces lying exactly on lattice plan
+            es hash stably.
+      1064 +        // Amplitude is per-face (zero on ceilings) so large 
+           +bright planes                                                
+      1065 +        // read as solid construction, not noise.            
+      1066          vec3 lattice = floor((vWorldPos - vNormal * (0.5 * uV
+            oxelScale)) / uVoxelScale);
+      1065 -        float grain = mix(0.90, 1.06, hash3D(lattice));      
+      1067 +        float grain = 1.0 + (hash3D(lattice) - 0.5) * 2.0 * v
+           +GrainAmp;                                                    
+      1068          color *= grain;
+      1069  
+      1070          float desatFactor = clamp(distanceToCamera * 0.015, 0
+            .0, 0.55);
+
+● Shader grain fixed. Now the payload codec for worker transfer:
+
+● Write(wasm_frontend/src/adapters/chunk_codec.rs)
+  ⎿  Wrote 311 lines to wasm_frontend/src/adapters/chunk_codec.rs
+      1 //! Binary transport format for [`ChunkPayload`] between the gene
+      2 //! workers and the main thread. One chunk becomes one contiguous
+         byte
+        age`
+      4 //! transfer instead of structured-cloning a deep object graph.
+      6 //! The format is little-endian, length-prefixed, and versioned b
+        y a magic
+        er yields
+      8 //! `None` and the driver simply drops that chunk (the streamer r
+      9 //! Platform-free and natively round-trip tested.
+     … +317 lines (ctrl+o to expand)
+
+● Update(wasm_frontend/src/adapters/mod.rs)
+  ⎿  Added 1 line
+      2  //! the concrete outside world (browser input events, the proced
+         ural
+      3  //! generation core).
+      4  
+      5 +pub mod chunk_codec;                                            
+      6  pub mod cpu_splatter;
+      7  pub mod face_instances;
+      8  pub mod input;
+
+● Update(wasm_frontend/src/application/ports.rs)
+  ⎿  Added 37 lines, removed 2 lines
+      220      pub collision: Vec<Aabb>,
+      221  }
+      222  
+      223 +/// One background chunk-load order, echoed back verbatim with
+          + its result so                                                
+      224 +/// the engine can reject stale work (wrong level, chunk no lo
+          +nger desired,                                                 
+      225 +/// or already refined past this LOD).                        
+      226 +#[derive(Debug, Clone, Copy, PartialEq)]                      
+      227 +pub struct ChunkRequest {                                     
+      228 +    pub origin_x: f32,                                        
+      229 +    pub origin_z: f32,                                        
+      230 +    pub level: u32,                                           
+      231 +    pub lod: u8,                                              
+      232 +}                                                             
+      233 +                                                              
+      234 +/// A finished background load.                               
+      235 +#[derive(Debug)]                                              
+      236 +pub struct CompletedChunk {                                   
+      237 +    pub request: ChunkRequest,                                
+      238 +    pub payload: ChunkPayload,                                
+      239 +}                                                             
+      240 +                                                              
+      241  /// Abstraction over where chunks come from. The browser build
+            implements
+      224 -/// this with in-wasm procedural generation (`adapters::local_
+          -chunk_source`);                                               
+      225 -/// a networked build could implement it with HTTP fetches ins
+          -tead.                                                         
+      242 +/// this with in-wasm procedural generation (`adapters::local_
+          +chunk_source`)                                                
+      243 +/// or a Web Worker pool (`drivers::worker_source`); a network
+          +ed build could                                                
+      244 +/// implement it with HTTP fetches instead.                   
+      245  pub trait ChunkSourcePort {
+      246      /// Loads the chunk at `origin` for the given Backrooms le
+           vel
+      247      /// (0 = backrooms, 34 = grassland; see the core's `level_
+           generator`).
+     ...
+      251      /// LOD of a chunk covers the same world cube (`world_size
+           ` invariant),
+      252      /// so payloads are interchangeable to the renderer.
+      253      fn load(&self, origin_x: f32, origin_z: f32, level: u32, l
+           od: u8) -> ChunkPayload;
+      254 +                                                              
+      255 +    /// True when the source generates in the background. The 
+          +engine then                                                   
+      256 +    /// drives it with [`Self::request`]/[`Self::poll_complete
+          +d`] instead of                                                
+      257 +    /// the blocking [`Self::load`], keeping the frame loop re
+          +sponsive.                                                     
+      258 +    fn is_async(&self) -> bool {                              
+      259 +        false                                                 
+      260 +    }                                                         
+      261 +                                                              
+      262 +    /// Queues a background load. Deduplication is the caller'
+          +s concern.                                                    
+      263 +    fn request(&mut self, _request: ChunkRequest) {}          
+      264 +                                                              
+      265 +    /// Takes every finished background load. Results may arri
+          +ve in any                                                     
+      266 +    /// order and may be stale; the caller validates against i
+          +ts own state.                                                 
+      267 +    fn poll_completed(&mut self) -> Vec<CompletedChunk> {     
+      268 +        Vec::new()                                            
+      269 +    }                                                         
+      270  }
+  ⎿  Found 1 new diagnostic issue in 1 file (ctrl+o to expand)
+
+● Now the engine's async streaming path:
+
+● Update(wasm_frontend/src/application/engine.rs)
+  ⎿  Added 3 lines, removed 1 line
+       6  //! No browser types appear anywhere in this file, so the whole
+           game loop is
+       7  //! natively unit-testable.
+       8  
+       9 +use std::collections::HashMap;                                 
+      10 +                                                               
+      11  use crate::application::atlas::{AtlasPool, MAX_CHUNKS, payload_
+          rows};
+      12  use crate::application::collision::CollisionWorld;
+      13  use crate::application::player::{MoveIntent, Player};
+      14  use crate::application::ports::{
+      13 -    ChunkDraw, ChunkSourcePort, FrameParams, RendererPort, Surf
+         -aceChunk,                                                      
+      15 +    ChunkDraw, ChunkRequest, ChunkSourcePort, FrameParams, Rend
+         +ererPort, SurfaceChunk,                                        
+      16  };
+      17  use crate::application::streaming::{
+      18      ChunkKey, ChunkStore, LoadedChunk, StreamingPolicy, chunk_k
+          ey,
+
+● Update(wasm_frontend/src/application/engine.rs)
+  ⎿  Added 3 lines
+      178      governor: PerfGovernor,
+      179      renderer: Box<dyn RendererPort>,
+      180      source: Box<dyn ChunkSourcePort>,
+      181 +    /// Outstanding background loads (async sources only): key
+          + → requested                                                  
+      182 +    /// LOD. Prevents duplicate requests while a chunk is in f
+          +light.                                                        
+      183 +    pending: HashMap<ChunkKey, u8>,                           
+      184      /// Active Backrooms level; chunks are requested for this 
+           level.
+      185      level: u32,
+      186      /// How long the player has been pushing into a wall witho
+           ut moving.
+
+● Update(wasm_frontend/src/application/engine.rs)
+  ⎿  Added 1 line
+      221              governor: PerfGovernor::new(),
+      222              renderer,
+      223              source,
+      224 +            pending: HashMap::new(),                          
+      225              level: LEVEL_BACKROOMS,
+      226              push_seconds: 0.0,
+      227              noclip_cooldown: 0.0,
+
+● Update(wasm_frontend/src/application/engine.rs)
+  ⎿  Added 4 lines
+      271              LEVEL_BACKROOMS
+      272          };
+      273          self.store.retain_keys(&[]);
+      274 +        // In-flight loads are for the old level; their comple
+          +tions will be                                                 
+      275 +        // rejected by the level check, and clearing pending l
+          +ets the new                                                   
+      276 +        // level re-request the same keys immediately.        
+      277 +        self.pending.clear();                                 
+      278          // The whole world is regenerated: drop the pool so th
+           e next stream
+      279          // pass relayouts and re-uploads from scratch.
+      280          self.pool = AtlasPool::new();
+
+● Update(wasm_frontend/src/application/engine.rs)
+  ⎿  Added 45 lines, removed 38 lines
+      387              }
+      388          }
+      389  
+      390 -        let mut budget = self.config.max_loads_per_tick as u32
+          - * FINE_LOAD_COST;                                            
+      390          let mut loaded: Vec<ChunkKey> = Vec::new();
+      391 +        if self.source.is_async() {                           
+      392 +            // Background pipeline: install validated completi
+          +ons, then top                                                 
+      393 +            // up the request queue. The frame never blocks on
+          + generation.                                                  
+      394 +            self.install_completed(&keep, &mut loaded, &mut ch
+          +anged);                                                       
+      395 +            self.issue_requests(&desired, &desired_visual);   
+      396 +        } else {                                              
+      397 +            let mut budget = self.config.max_loads_per_tick as
+          + u32 * FINE_LOAD_COST;                                        
+      398  
+      393 -        // Phase 1 — availability: missing chunks come in coar
+          -se, nearest                                                   
+      394 -        // first. Only a leftover budget flows into refinement
+          -, so a moving                                                 
+      395 -        // player always fills holes before sharpening anythin
+          -g.                                                            
+      396 -        for &(ox, oz) in &desired_visual {                    
+      397 -            if budget == 0 {                                  
+      398 -                break;                                        
+      399 +            // Phase 1 — availability: missing chunks come in 
+          +coarse, nearest                                               
+      400 +            // first. Only a leftover budget flows into refine
+          +ment, so a moving                                             
+      401 +            // player always fills holes before sharpening any
+          +thing.                                                        
+      402 +            for &(ox, oz) in &desired_visual {                
+      403 +                if budget == 0 {                              
+      404 +                    break;                                    
+      405 +                }                                             
+      406 +                let key = chunk_key(ox, oz);                  
+      407 +                if !self.store.contains(key) {                
+      408 +                    let payload = self.source.load(ox, oz, sel
+          +f.level, COARSE_LOD);                                         
+      409 +                    self.store.insert(                        
+      410 +                        key,                                  
+      411 +                        LoadedChunk {                         
+      412 +                            origin: (ox, oz),                 
+      413 +                            lod: COARSE_LOD,                  
+      414 +                            payload,                          
+      415 +                        },                                    
+      416 +                    );                                        
+      417 +                    loaded.push(key);                         
+      418 +                    budget -= 1;                              
+      419 +                    changed = true;                           
+      420 +                }                                             
+      421              }
+      400 -            let key = chunk_key(ox, oz);                      
+      401 -            if !self.store.contains(key) {                    
+      402 -                let payload = self.source.load(ox, oz, self.le
+          -vel, COARSE_LOD);                                             
+      422 +                                                              
+      423 +            // Phase 2 — refinement: nearest coarse chunk insi
+          +de the fine ring.                                             
+      424 +            let fine_d2 = self.config.fine_distance * self.con
+          +fig.fine_distance;                                            
+      425 +            while budget >= FINE_LOAD_COST {                  
+      426 +                let target = desired.iter().copied().find(|&(o
+          +x, oz)| {                                                     
+      427 +                    self.chunk_dist2(ox, oz) <= fine_d2       
+      428 +                        && self.store.get(chunk_key(ox, oz)).i
+          +s_some_and(|c| c.lod > 0)                                     
+      429 +                });                                           
+      430 +                let Some((ox, oz)) = target else { break };   
+      431 +                let key = chunk_key(ox, oz);                  
+      432 +                let payload = self.source.load(ox, oz, self.le
+          +vel, 0);                                                      
+      433                  self.store.insert(
+      434                      key,
+      435                      LoadedChunk {
+      436                          origin: (ox, oz),
+      407 -                        lod: COARSE_LOD,                      
+      437 +                        lod: 0,                               
+      438                          payload,
+      439                      },
+      440                  );
+      411 -                loaded.push(key);                             
+      412 -                budget -= 1;                                  
+      441 +                if !loaded.contains(&key) {                   
+      442 +                    loaded.push(key);                         
+      443 +                }                                             
+      444 +                budget -= FINE_LOAD_COST;                     
+      445                  changed = true;
+      446              }
+      447          }
+      448  
+      417 -        // Phase 2 — refinement: nearest coarse chunk inside t
+          -he fine ring.                                                 
+      418 -        let fine_d2 = self.config.fine_distance * self.config.
+          -fine_distance;                                                
+      419 -        while budget >= FINE_LOAD_COST {                      
+      420 -            let target = desired.iter().copied().find(|&(ox, o
+          -z)| {                                                         
+      421 -                self.chunk_dist2(ox, oz) <= fine_d2           
+      422 -                    && self.store.get(chunk_key(ox, oz)).is_so
+          -me_and(|c| c.lod > 0)                                         
+      423 -            });                                               
+      424 -            let Some((ox, oz)) = target else { break };       
+      425 -            let key = chunk_key(ox, oz);                      
+      426 -            let payload = self.source.load(ox, oz, self.level,
+          - 0);                                                          
+      427 -            self.store.insert(                                
+      428 -                key,                                          
+      429 -                LoadedChunk {                                 
+      430 -                    origin: (ox, oz),                         
+      431 -                    lod: 0,                                   
+      432 -                    payload,                                  
+      433 -                },                                            
+      434 -            );                                                
+      435 -            if !loaded.contains(&key) {                       
+      436 -                loaded.push(key);                             
+      437 -            }                                                 
+      438 -            budget -= FINE_LOAD_COST;                         
+      439 -            changed = true;                                   
+      440 -        }                                                     
+      441 -                                                              
+      449          if !changed {
+      450              return;
+      451          }
+
+● Update(wasm_frontend/src/application/engine.rs)
+  ⎿  Added 88 lines
+      343          dx * dx + dz * dz
+      344      }
+      345  
+      346 +    /// Installs finished background loads, discarding stale w
+          +ork: a result                                                 
+      347 +    /// for the wrong level (noclip happened), for a chunk tha
+          +t left the                                                    
+      348 +    /// streaming footprint, or for a LOD no better than what 
+          +is already                                                    
+      349 +    /// resident. Refinement stays monotonic exactly like the 
+          +sync path.                                                    
+      350 +    fn install_completed(                                     
+      351 +        &mut self,                                            
+      352 +        keep: &[ChunkKey],                                    
+      353 +        loaded: &mut Vec<ChunkKey>,                           
+      354 +        changed: &mut bool,                                   
+      355 +    ) {                                                       
+      356 +        for done in self.source.poll_completed() {            
+      357 +            let req = done.request;                           
+      358 +            let key = chunk_key(req.origin_x, req.origin_z);  
+      359 +            self.pending.remove(&key);                        
+      360 +            if req.level != self.level || !keep.contains(&key)
+          + {                                                            
+      361 +                continue;                                     
+      362 +            }                                                 
+      363 +            let improves = match self.store.get(key) {        
+      364 +                None => true,                                 
+      365 +                Some(resident) => req.lod < resident.lod,     
+      366 +            };                                                
+      367 +            if !improves {                                    
+      368 +                continue;                                     
+      369 +            }                                                 
+      370 +            self.store.insert(                                
+      371 +                key,                                          
+      372 +                LoadedChunk {                                 
+      373 +                    origin: (req.origin_x, req.origin_z),     
+      374 +                    lod: req.lod,                             
+      375 +                    payload: done.payload,                    
+      376 +                },                                            
+      377 +            );                                                
+      378 +            if !loaded.contains(&key) {                       
+      379 +                loaded.push(key);                             
+      380 +            }                                                 
+      381 +            *changed = true;                                  
+      382 +        }                                                     
+      383 +        // Drop pending entries that left the footprint so the
+          +ir slots free                                                 
+      384 +        // up; a late completion for them is discarded by the 
+          +keep check.                                                   
+      385 +        self.pending.retain(|key, _| keep.contains(key));     
+      386 +    }                                                         
+      387 +                                                              
+      388 +    /// Tops up the background request queue: coarse availabil
+          +ity for every                                                 
+      389 +    /// missing chunk (nearest first), then at most one fine r
+          +efinement in                                                  
+      390 +    /// flight at a time, mirroring the sync path's priorities
+          +.                                                             
+      391 +    fn issue_requests(&mut self, desired: &[(f32, f32)], desir
+          +ed_visual: &[(f32, f32)]) {                                   
+      392 +        // Keep roughly a worker pool's worth of requests in f
+          +light; more                                                   
+      393 +        // would just build a stale backlog behind a moving pl
+          +ayer.                                                         
+      394 +        let max_pending = (self.config.max_loads_per_tick * 2)
+          +.max(4);                                                      
+      395 +                                                              
+      396 +        for &(ox, oz) in desired_visual {                     
+      397 +            if self.pending.len() >= max_pending {            
+      398 +                break;                                        
+      399 +            }                                                 
+      400 +            let key = chunk_key(ox, oz);                      
+      401 +            if !self.store.contains(key) && !self.pending.cont
+          +ains_key(&key) {                                              
+      402 +                self.pending.insert(key, COARSE_LOD);         
+      403 +                self.source.request(ChunkRequest {            
+      404 +                    origin_x: ox,                             
+      405 +                    origin_z: oz,                             
+      406 +                    level: self.level,                        
+      407 +                    lod: COARSE_LOD,                          
+      408 +                });                                           
+      409 +            }                                                 
+      410 +        }                                                     
+      411 +                                                              
+      412 +        let fine_in_flight = self.pending.values().any(|&lod| 
+          +lod == 0);                                                    
+      413 +        if fine_in_flight || self.pending.len() >= max_pending
+          + {                                                            
+      414 +            return;                                           
+      415 +        }                                                     
+      416 +        let fine_d2 = self.config.fine_distance * self.config.
+          +fine_distance;                                                
+      417 +        let target = desired.iter().copied().find(|&(ox, oz)| 
+          +{                                                             
+      418 +            let key = chunk_key(ox, oz);                      
+      419 +            self.chunk_dist2(ox, oz) <= fine_d2               
+      420 +                && !self.pending.contains_key(&key)           
+      421 +                && self.store.get(key).is_some_and(|c| c.lod >
+          + 0)                                                           
+      422 +        });                                                   
+      423 +        if let Some((ox, oz)) = target {                      
+      424 +            self.pending.insert(chunk_key(ox, oz), 0);        
+      425 +            self.source.request(ChunkRequest {                
+      426 +                origin_x: ox,                                 
+      427 +                origin_z: oz,                                 
+      428 +                level: self.level,                            
+      429 +                lod: 0,                                       
+      430 +            });                                               
+      431 +        }                                                     
+      432 +    }                                                         
+      433 +                                                              
+      434      /// Progressive, error-driven chunk streaming.
+      435      ///
+      436      /// Availability first: every missing chunk (nearest first
+           ) loads at the
+
+● Now let me look at the engine's existing test doubles so the new async tests
+  match their style:
+
+  Read 1 file (ctrl+o to expand)
+
+● Adding the async engine tests:
+
+● Update(wasm_frontend/src/application/engine.rs)
+  ⎿  Added 138 lines
+      754          }
+      755      }
+      756  
+      757 +    /// Background source double: records requests, completes 
+          +only what the                                                 
+      758 +    /// test explicitly finishes, and panics on any blocking l
+          +oad.                                                          
+      759 +    #[derive(Default)]                                        
+      760 +    struct AsyncFakeSource {                                  
+      761 +        requests: Rc<RefCell<Vec<ChunkRequest>>>,             
+      762 +        ready: Rc<RefCell<Vec<crate::application::ports::Compl
+          +etedChunk>>>,                                                 
+      763 +    }                                                         
+      764 +                                                              
+      765 +    impl ChunkSourcePort for AsyncFakeSource {                
+      766 +        fn load(&self, _x: f32, _z: f32, _level: u32, _lod: u8
+          +) -> ChunkPayload {                                           
+      767 +            unreachable!("async sources must never be block-lo
+          +aded by the engine");                                         
+      768 +        }                                                     
+      769 +        fn is_async(&self) -> bool {                          
+      770 +            true                                              
+      771 +        }                                                     
+      772 +        fn request(&mut self, request: ChunkRequest) {        
+      773 +            self.requests.borrow_mut().push(request);         
+      774 +        }                                                     
+      775 +        fn poll_completed(&mut self) -> Vec<crate::application
+          +::ports::CompletedChunk> {                                    
+      776 +            self.ready.borrow_mut().drain(..).collect()       
+      777 +        }                                                     
+      778 +    }                                                         
+      779 +                                                              
+      780 +    fn completed(request: ChunkRequest) -> crate::application:
+          +:ports::CompletedChunk {                                      
+      781 +        crate::application::ports::CompletedChunk {           
+      782 +            request,                                          
+      783 +            payload: FlatChunkSource.load(request.origin_x, re
+          +quest.origin_z, request.level, request.lod),                  
+      784 +        }                                                     
+      785 +    }                                                         
+      786 +                                                              
+      787 +    #[test]                                                   
+      788 +    fn async_source_streams_without_blocking_and_refines_monot
+          +onically() {                                                  
+      789 +        let source = AsyncFakeSource::default();              
+      790 +        let requests = source.requests.clone();               
+      791 +        let ready = source.ready.clone();                     
+      792 +        let mut engine = Engine::new(                         
+      793 +            EngineConfig::default(),                          
+      794 +            Box::new(RecordingRenderer::default()),           
+      795 +            Box::new(source),                                 
+      796 +        );                                                    
+      797 +        let input = InputFrame::default();                    
+      798 +                                                              
+      799 +        // First tick issues requests but installs nothing — t
+          +he frame                                                      
+      800 +        // never waits for generation.                        
+      801 +        engine.tick(1.0 / 60.0, &input);                      
+      802 +        assert_eq!(engine.stats().resident_chunks, 0);        
+      803 +        assert!(!engine.stats().ready);                       
+      804 +        assert!(!requests.borrow().is_empty());               
+      805 +                                                              
+      806 +        // Fulfil whatever is asked until the footprint is fin
+          +e everywhere.                                                 
+      807 +        for _ in 0..40 {                                      
+      808 +            let fulfil: Vec<_> = requests.borrow_mut().drain(.
+          +.).collect();                                                 
+      809 +            for req in fulfil {                               
+      810 +                ready.borrow_mut().push(completed(req));      
+      811 +            }                                                 
+      812 +            engine.tick(1.0 / 60.0, &input);                  
+      813 +        }                                                     
+      814 +        assert_eq!(engine.stats().resident_chunks, 9);        
+      815 +        assert_eq!(engine.stats().fine_chunks, 9);            
+      816 +        assert!(engine.stats().ready);                        
+      817 +                                                              
+      818 +        // Steady state: no further requests.                 
+      819 +        let before = requests.borrow().len();                 
+      820 +        engine.tick(1.0 / 60.0, &input);                      
+      821 +        assert_eq!(requests.borrow().len(), before);          
+      822 +    }                                                         
+      823 +                                                              
+      824 +    #[test]                                                   
+      825 +    fn stale_completions_are_discarded() {                    
+      826 +        let source = AsyncFakeSource::default();              
+      827 +        let requests = source.requests.clone();               
+      828 +        let ready = source.ready.clone();                     
+      829 +        let mut engine = Engine::new(                         
+      830 +            EngineConfig::default(),                          
+      831 +            Box::new(RecordingRenderer::default()),           
+      832 +            Box::new(source),                                 
+      833 +        );                                                    
+      834 +        let input = InputFrame::default();                    
+      835 +        engine.tick(1.0 / 60.0, &input);                      
+      836 +        requests.borrow_mut().clear();                        
+      837 +                                                              
+      838 +        // Wrong level: the engine is on level 0.             
+      839 +        ready.borrow_mut().push(completed(ChunkRequest {      
+      840 +            origin_x: 0.0,                                    
+      841 +            origin_z: 0.0,                                    
+      842 +            level: 34,                                        
+      843 +            lod: 1,                                           
+      844 +        }));                                                  
+      845 +        // Outside the streaming footprint entirely.          
+      846 +        ready.borrow_mut().push(completed(ChunkRequest {      
+      847 +            origin_x: 500.0,                                  
+      848 +            origin_z: 500.0,                                  
+      849 +            level: 0,                                         
+      850 +            lod: 1,                                           
+      851 +        }));                                                  
+      852 +        engine.tick(1.0 / 60.0, &input);                      
+      853 +        assert_eq!(                                           
+      854 +            engine.stats().resident_chunks,                   
+      855 +            0,                                                
+      856 +            "stale completions must not be installed"         
+      857 +        );                                                    
+      858 +    }                                                         
+      859 +                                                              
+      860 +    #[test]                                                   
+      861 +    fn late_coarse_result_never_downgrades_a_fine_chunk() {   
+      862 +        let source = AsyncFakeSource::default();              
+      863 +        let requests = source.requests.clone();               
+      864 +        let ready = source.ready.clone();                     
+      865 +        let mut engine = Engine::new(                         
+      866 +            EngineConfig::default(),                          
+      867 +            Box::new(RecordingRenderer::default()),           
+      868 +            Box::new(source),                                 
+      869 +        );                                                    
+      870 +        let input = InputFrame::default();                    
+      871 +        for _ in 0..40 {                                      
+      872 +            let fulfil: Vec<_> = requests.borrow_mut().drain(.
+          +.).collect();                                                 
+      873 +            for req in fulfil {                               
+      874 +                ready.borrow_mut().push(completed(req));      
+      875 +            }                                                 
+      876 +            engine.tick(1.0 / 60.0, &input);                  
+      877 +        }                                                     
+      878 +        assert_eq!(engine.stats().fine_chunks, 9);            
+      879 +                                                              
+      880 +        // A leftover coarse result for the spawn chunk arrive
+          +s late.                                                       
+      881 +        ready.borrow_mut().push(completed(ChunkRequest {      
+      882 +            origin_x: 0.0,                                    
+      883 +            origin_z: 0.0,                                    
+      884 +            level: 0,                                         
+      885 +            lod: 1,                                           
+      886 +        }));                                                  
+      887 +        engine.tick(1.0 / 60.0, &input);                      
+      888 +        assert_eq!(                                           
+      889 +            engine.stats().fine_chunks,                       
+      890 +            9,                                                
+      891 +            "refinement must stay monotonic under out-of-order
+          + results"                                                     
+      892 +        );                                                    
+      893 +    }                                                         
+      894 +                                                              
+      895      fn engine_with_recorder() -> (Engine, Rc<RefCell<Vec<usize
+           >>>, Rc<RefCell<Vec<usize>>>) {
+      896          let renderer = RecordingRenderer::default();
+      897          let uploads = renderer.uploads.clone();
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● All green — codec and async streaming done. Now the worker pool itself:
+● Update(wasm_frontend/src/adapters/query_config.rs)
+  ⎿  Added 1 line, removed 1 line
+      12  //! web-sys so it is natively unit-tested; the browser driver o
+          nly hands in
+      13  //! `window.location.search`.
+      14  
+      15 -use vackrooms::use_cases::generate_chunk::LevelTuning;         
+      15 +use vackrooms::use_cases::generate_chunk::{GeneratorConfig, Lev
+         +elTuning};                                                     
+      16  
+      17  #[derive(Debug, Clone, Copy, PartialEq)]
+      18  pub struct GenerationParams {
+
+● Update(wasm_frontend/src/adapters/query_config.rs)
+  ⎿  Added 13 lines
+      53      params
+      54  }
+      55  
+      56 +/// Seed + generator configuration derived from the URL query. 
+         +The main                                                       
+      57 +/// thread and every generation worker call this with the same 
+         +query string,                                                  
+      58 +/// so all of them voxelize the identical world by construction
+         +.                                                              
+      59 +pub fn generator_setup_from_query(query: &str, default_seed: u3
+         +2) -> (u32, GeneratorConfig) {                                 
+      60 +    let params = parse_generation_params(query, default_seed); 
+      61 +    let base = if query.contains("spec=high") {                
+      62 +        GeneratorConfig::high_spec()                           
+      63 +    } else {                                                   
+      64 +        GeneratorConfig::low_spec()                            
+      65 +    };                                                         
+      66 +    (params.seed, base.with_tuning(params.tuning))             
+      67 +}                                                              
+      68 +                                                               
+      69  /// Non-numeric seeds ("?seed=kitten") hash to a stable u32 (FN
+          V-1a).
+      70  fn hash_seed(text: &str) -> u32 {
+      71      let mut h: u32 = 0x811C_9DC5;
+
+● Now the worker-side wasm exports in lib.rs:
+
+● Update(wasm_frontend/src/lib.rs)
+  ⎿  Added 60 lines
+       88  
+       89      /// Composition root. Runs automatically when the wasm mod
+           ule is
+       90      /// instantiated by `static/index.html`.
+       91 +    ///                                                       
+       92 +    /// `static/worker.js` instantiates this same module insid
+          +e a Web Worker                                                
+       93 +    /// with `#[wasm_bindgen(start)]` skipped (`init` is passe
+          +d                                                             
+       94 +    /// `{ skip_start: true }` is not available for start fns,
+          + so instead the                                               
+       95 +    /// worker checks for a missing DOM and bails out here).  
+       96      #[wasm_bindgen(start)]
+       97      pub fn start() -> Result<(), JsValue> {
+       98          console_error_panic_hook::set_once();
+       99 +        // Inside a Web Worker there is no `window`/DOM: this 
+          +module was                                                    
+      100 +        // loaded as the generation worker, which drives itsel
+          +f through                                                     
+      101 +        // `worker_init`/`worker_generate` instead of `boot`. 
+      102 +        if web_sys::window().is_none() {                      
+      103 +            return Ok(());                                    
+      104 +        }                                                     
+      105          crate::drivers::browser::boot()
+      106      }
+      107  }
+      108 +                                                              
+      109 +/// Generation-worker entry points. A worker is a second insta
+          +nce of this                                                   
+      110 +/// same wasm module: `worker_init` builds a chunk source from
+          + the *same*                                                   
+      111 +/// URL query the main thread used (identical world by constru
+          +ction), and                                                   
+      112 +/// `worker_generate` runs the full chunk pipeline — architect
+          +ural                                                          
+      113 +/// generation, BFS lighting, greedy mesh + face instances, SV
+          +O build and                                                   
+      114 +/// serialization, collision extraction — returning one transf
+          +erable byte                                                   
+      115 +/// buffer (see `adapters::chunk_codec`).                     
+      116 +#[cfg(target_arch = "wasm32")]                                
+      117 +mod worker_entry {                                            
+      118 +    use std::cell::RefCell;                                   
+      119 +                                                              
+      120 +    use wasm_bindgen::prelude::*;                             
+      121 +                                                              
+      122 +    use crate::adapters::chunk_codec::encode_chunk_payload;   
+      123 +    use crate::adapters::local_chunk_source::LocalChunkSource;
+      124 +    use crate::adapters::query_config::generator_setup_from_qu
+          +ery;                                                          
+      125 +    use crate::application::ports::ChunkSourcePort;           
+      126 +    use vackrooms::frameworks_drivers::simple_noise::SimpleNoi
+          +seProvider;                                                   
+      127 +                                                              
+      128 +    thread_local! {                                           
+      129 +        static SOURCE: RefCell<Option<LocalChunkSource<SimpleN
+          +oiseProvider>>> =                                             
+      130 +            const { RefCell::new(None) };                     
+      131 +    }                                                         
+      132 +                                                              
+      133 +    /// `default_seed` must match the main thread's `WORLD_SEE
+          +D`.                                                           
+      134 +    #[wasm_bindgen]                                           
+      135 +    pub fn worker_init(query: &str, default_seed: u32) {      
+      136 +        let (seed, config) = generator_setup_from_query(query,
+          + default_seed);                                               
+      137 +        SOURCE.with(|s| {                                     
+      138 +            *s.borrow_mut() = Some(LocalChunkSource::new(     
+      139 +                SimpleNoiseProvider::new(),                   
+      140 +                seed,                                         
+      141 +                config,                                       
+      142 +            ));                                               
+      143 +        });                                                   
+      144 +    }                                                         
+      145 +                                                              
+      146 +    #[wasm_bindgen]                                           
+      147 +    pub fn worker_generate(origin_x: f32, origin_z: f32, level
+          +: u32, lod: u8) -> Vec<u8> {                                  
+      148 +        SOURCE.with(|s| {                                     
+      149 +            let source = s.borrow();                          
+      150 +            let source = source                               
+      151 +                .as_ref()                                     
+      152 +                .expect("worker_generate called before worker_
+          +init");                                                       
+      153 +            encode_chunk_payload(&source.load(origin_x, origin
+          +_z, level, lod))                                              
+      154 +        })                                                    
+      155 +    }                                                         
+      156 +}                                                             
+
+● Now check web-sys features and then write the worker driver:
+
+  Searched for 1 pattern, read 1 file (ctrl+o to expand)
+  ⎿  Found 10 new diagnostic issues in 1 file (ctrl+o to expand)
+
+● Update(wasm_frontend/Cargo.toml)
+  ⎿  Added 4 lines
+      58      "WebGlVertexArrayObject",
+      59      "WebGlUniformLocation",
+      60      "WebGlFramebuffer",
+      61 +    "Worker",                                                  
+      62 +    "WorkerOptions",                                           
+      63 +    "WorkerType",                                              
+      64 +    "MessageEvent",                                            
+      65      "console",
+      66  ] }
+
+  Searched for 1 pattern, read 1 file (ctrl+o to expand)
+
+● Server MIME handling is fine. Writing the worker driver and worker script:
+
+● Write(wasm_frontend/src/drivers/worker_source.rs)
+  ⎿  Wrote 139 lines to wasm_frontend/src/drivers/worker_source.rs
+       1 //! Web Worker chunk source — the multithreaded [`ChunkSourcePor
+       2 //!
+         s same wasm
+       4 //! module running on its own OS thread. The main thread posts s
+       5 //! `{gen, ox, oz, level, lod}` messages round-robin; workers ru
+       6 //! chunk pipeline (generation, BFS lighting, greedy mesh + face
+       7 //! SVO build/serialize, collision) and transfer one encoded byt
+         e buffer
+         the main
+      10 //!
+     … +156 lines (ctrl+o to expand)
+
+● Write(static/worker.js)
+  ⎿  Wrote 41 lines to static/worker.js
+       1 // Generation worker: a second instance of the same wasm module,
+       2 // full chunk pipeline off the main thread. The onmessage handle
+         r is
+          lost while
+       4 // the wasm module is still instantiating; work is serialized th
+       5 // promise chain.
+       6 //
+       8 //   { type: "init", query, seed }        one-time generator set
+         up
+      10 // (worker -> main):
+     … +39 lines (ctrl+o to expand)
+  ⎿  Found 1 new diagnostic issue in 1 file (ctrl+o to expand)
+
+● Now wire it into the module tree and boot():
+
+● Update(wasm_frontend/src/drivers/mod.rs)
+  ⎿  Added 1 line
+       8  pub mod splat_webgl;
+       9  pub mod surface_webgl;
+      10  pub mod webgl;
+      11 +pub mod worker_source;                                         
+
+● Update(wasm_frontend/src/drivers/browser.rs)
+  ⎿  Added 35 lines, removed 7 lines
+      290      if let Ok(hud_renderer) = element::<HtmlElement>(&document
+           , "hud-renderer") {
+      291          hud_renderer.set_text_content(Some(renderer.borrow().l
+           abel()));
+      292      }
+      293 -    let source = LocalChunkSource::with_telemetry(            
+      294 -        SimpleNoiseProvider::new(),                           
+      295 -        gen_params.seed,                                      
+      296 -        generator_config,                                     
+      297 -        &CONSOLE_TELEMETRY,                                   
+      298 -    );                                                        
+      293 +    // Chunk generation runs on a Web Worker pool so crossing 
+          +a streaming                                                   
+      294 +    // boundary never stalls the frame loop. `?workers=0` forc
+          +es the old                                                    
+      295 +    // synchronous in-thread source (also the fallback if work
+          +ers fail).                                                    
+      296 +    let source: Box<dyn vackrooms_ports::ChunkSourcePort> = if
+          + query.contains("workers=0") {                                
+      297 +        Box::new(LocalChunkSource::with_telemetry(            
+      298 +            SimpleNoiseProvider::new(),                       
+      299 +            gen_params.seed,                                  
+      300 +            generator_config,                                 
+      301 +            &CONSOLE_TELEMETRY,                               
+      302 +        ))                                                    
+      303 +    } else {                                                  
+      304 +        match crate::drivers::worker_source::WorkerChunkSource
+          +::new(&query, WORLD_SEED) {                                   
+      305 +            Ok(pool) => {                                     
+      306 +                web_sys::console::log_1(                      
+      307 +                    &format!("chunk generation: {} worker thre
+          +ads", pool.pool_size()).into(),                               
+      308 +                );                                            
+      309 +                Box::new(pool)                                
+      310 +            }                                                 
+      311 +            Err(err) => {                                     
+      312 +                web_sys::console::warn_2(                     
+      313 +                    &JsValue::from_str(                       
+      314 +                        "worker pool unavailable, falling back
+          + to in-thread generation:",                                   
+      315 +                    ),                                        
+      316 +                    &err,                                     
+      317 +                );                                            
+      318 +                Box::new(LocalChunkSource::with_telemetry(    
+      319 +                    SimpleNoiseProvider::new(),               
+      320 +                    gen_params.seed,                          
+      321 +                    generator_config,                         
+      322 +                    &CONSOLE_TELEMETRY,                       
+      323 +                ))                                            
+      324 +            }                                                 
+      325 +        }                                                     
+      326 +    };                                                        
+      327      let engine = Rc::new(RefCell::new(Engine::new(
+      328          engine_config,
+      329          Box::new(SharedRenderer(renderer.clone())),
+      302 -        Box::new(source),                                     
+      330 +        source,                                               
+      331      )));
+      332      let input = Rc::new(RefCell::new(InputCollector::new()));
+      333      let touch = Rc::new(RefCell::new(TouchState::default()));
+
+● Update(wasm_frontend/src/drivers/browser.rs)
+  ⎿  Added 1 line, removed 1 line
+      293      // Chunk generation runs on a Web Worker pool so crossing 
+           a streaming
+      294      // boundary never stalls the frame loop. `?workers=0` forc
+           es the old
+      295      // synchronous in-thread source (also the fallback if work
+           ers fail).
+      296 -    let source: Box<dyn vackrooms_ports::ChunkSourcePort> = if
+          - query.contains("workers=0") {                                
+      296 +    let source: Box<dyn crate::application::ports::ChunkSource
+          +Port> = if query.contains("workers=0") {                      
+      297          Box::new(LocalChunkSource::with_telemetry(
+      298              SimpleNoiseProvider::new(),
+      299              gen_params.seed,
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● Compiles clean. Now the ceiling geometry noise (task 10) — let me find the
+  ceiling field code:
+
+  Searched for 1 pattern, read 1 file (ctrl+o to expand)
+  Read 1 file, ran 1 shell command (ctrl+o to expand)
+
+● Applying the three generation fixes:
+
+● Update(src/use_cases/backrooms_level.rs)
+  ⎿  Added 14 lines, removed 5 lines
+      127          }
+      128      }
+      129  
+      130 +    /// Ceiling heights are architectural tiers, not terrain. 
+          +The common                                                    
+      131 +    /// bands are perfectly flat; open volumes vary per ~8 u c
+          +eiling *zone*                                                 
+      132 +    /// (one suspended-grid bay run), never per column, and ev
+          +ery height                                                    
+      133 +    /// snaps to the fine voxel lattice so voxelization cannot
+          + add                                                          
+      134 +    /// sub-voxel stair-stepping on top.                      
+      135      fn fabric_ceiling_height(
+      136          noise: &dyn NoiseProvider,
+      137          seed: u32,
+     ...
+      139          wz: f32,
+      140          band: FabricCeilingBand,
+      141      ) -> f32 {
+      137 -        let detail = Self::n(noise, seed, 0xB300, wx, wz, 0.72
+          -);                                                            
+      138 -        match band {                                          
+      139 -            FabricCeilingBand::Compression => (2.65 + 0.15 * d
+          -etail).clamp(2.5, 2.8),                                       
+      140 -            FabricCeilingBand::Regular => (3.4 + 0.2 * detail)
+          -.clamp(3.2, 3.6),                                             
+      142 +        const ZONE: f32 = 8.0;                                
+      143 +        let zone_x = (wx / ZONE).floor() * ZONE + ZONE * 0.5; 
+      144 +        let zone_z = (wz / ZONE).floor() * ZONE + ZONE * 0.5; 
+      145 +        let detail = Self::n(noise, seed, 0xB300, zone_x, zone
+          +_z, 0.72);                                                    
+      146 +        let height = match band {                             
+      147 +            FabricCeilingBand::Compression => 2.6,            
+      148 +            FabricCeilingBand::Regular => 3.4,                
+      149              FabricCeilingBand::Expanse => (4.1 + 0.3 * detail)
+           .clamp(3.8, 4.4),
+      150              FabricCeilingBand::Vault => (4.95 + 0.45 * detail)
+           .clamp(4.5, 5.4),
+      143 -        }                                                     
+      151 +        };                                                    
+      152 +        (height / 0.2).round() * 0.2                          
+      153      }
+      154  
+      155      /// Is (wx, wz) inside an open expanse of the fabric?
+
+● Update(src/use_cases/backrooms_level.rs)
+  ⎿  Added 5 lines, removed 5 lines
+      181              FabricCeilingBand::Expanse | FabricCeilingBand::Va
+           ult
+      182          );
+      183  
+      184 -        // Coffered ceiling grid (expanses run an open plenum 
+          -instead).                                                     
+      185 -        let on_beam = wx.rem_euclid(COFFER_PERIOD) < 0.22 || w
+          -z.rem_euclid(COFFER_PERIOD) < 0.22;                           
+      186 -        if !expanse && on_beam {                              
+      187 -            ceiling_units -= COFFER_DROP;                     
+      188 -        }                                                     
+      184 +        // Coffer beams are shading detail in the renderer, no
+          +t geometry: a                                                 
+      185 +        // 0.2 u drop at a 0.2 u voxel scale turned every beam
+          + into a                                                       
+      186 +        // full-voxel step and read as noisy terrain overhead.
+          + The splat                                                    
+      187 +        // shader darkens the same COFFER_PERIOD grid instead.
+      188 +        let _ = &expanse;                                     
+      189  
+      190          // ---- solids ---------------------------------------
+           ---------------
+      191          let spawn_d2 = (wx - SPAWN.0) * (wx - SPAWN.0) + (wz -
+            SPAWN.1) * (wz - SPAWN.1);
+
+● Update(src/use_cases/backrooms_level.rs)
+  ⎿  Added 2 lines, removed 5 lines
+      369          let zone = a.ceiling_zones.first();
+      370          let mut ceiling_units = zone.map_or(3.4, |c| c.height_
+           units);
+      371          match zone.map(|c| c.language) {
+      372 -            Some(CeilingLanguage::Coffered) => {              
+      373 -                if wx.rem_euclid(COFFER_PERIOD) < 0.22 || wz.r
+          -em_euclid(COFFER_PERIOD) < 0.22 {                             
+      374 -                    ceiling_units -= COFFER_DROP;             
+      375 -                }                                             
+      376 -            }                                                 
+      372 +            // Coffered reads as a shading pattern now (see th
+          +e splat                                                       
+      373 +            // shader), not stepped geometry.                 
+      374              Some(CeilingLanguage::ExposedSoffit) => ceiling_un
+           its -= 0.2,
+      375              _ => {}
+      376          }
+
+● Update(src/use_cases/backrooms_level.rs)
+  ⎿  Added 10 lines, removed 3 lines
+      476          wx: f32,
+      477          wz: f32,
+      478      ) -> f32 {
+      479 -        let drift = Self::n(noise, seed, 0xCA00_u32.wrapping_a
+          -dd(spine.id), wx, wz, 0.35);                                  
+      480 -        match spine.spine_kind {                              
+      479 +        // Slow, quantized drift: one sample per 12 u corridor
+          + zone snapped                                                 
+      480 +        // to the voxel lattice, so long runs hold one height 
+          +and then step                                                 
+      481 +        // once — instead of per-column ripple overhead.      
+      482 +        const DRIFT_ZONE: f32 = 12.0;                         
+      483 +        let zone_x = (wx / DRIFT_ZONE).floor() * DRIFT_ZONE + 
+          +DRIFT_ZONE * 0.5;                                             
+      484 +        let zone_z = (wz / DRIFT_ZONE).floor() * DRIFT_ZONE + 
+          +DRIFT_ZONE * 0.5;                                             
+      485 +        let drift = Self::n(noise, seed, 0xCA00_u32.wrapping_a
+          +dd(spine.id), zone_x, zone_z, 0.35);                          
+      486 +        let height = match spine.spine_kind {                 
+      487              SpaceProgram::MainCorridor => (3.8 + 0.4 * drift).
+           clamp(3.4, 4.2),
+      488              SpaceProgram::SecondaryHall => (3.3 + 0.3 * drift)
+           .clamp(3.0, 3.6),
+      489              _ => 3.4,
+      484 -        }                                                     
+      490 +        };                                                    
+      491 +        (height / 0.2).round() * 0.2                          
+      492      }
+      493  
+      494      /// Whether a corridor-side wall dissolves into the adjace
+           nt room/fabric.
+  ⎿  Found 1 new diagnostic issue in 1 file (ctrl+o to expand)
+
+● Update(src/use_cases/backrooms_level.rs)
+  ⎿  Removed 1 line
+      185          // 0.2 u drop at a 0.2 u voxel scale turned every beam
+            into a
+      186          // full-voxel step and read as noisy terrain overhead.
+            The splat
+      187          // shader darkens the same COFFER_PERIOD grid instead.
+      188 -        let _ = &expanse;                                     
+      188  
+      189          // ---- solids ---------------------------------------
+           ---------------
+      190          let spawn_d2 = (wx - SPAWN.0) * (wx - SPAWN.0) + (wz -
+            SPAWN.1) * (wz - SPAWN.1);
+
+● Now the shader side of the coffers — beam darkening on ceiling faces in the
+  splat shaders:
+
+● Update(wasm_frontend/src/drivers/shaders.rs)
+  ⎿  Added 1 line
+      860  flat out vec3 vNormal;
+      861  flat out float vEmissive;
+      862  flat out float vGrainAmp;
+      863 +flat out float vBeamPattern;                                  
+      864  
+      865  vec3 normalForAxis(float axis) {
+      866      if (axis < 0.5) return vec3(0.0, 1.0, 0.0);
+
+● Update(wasm_frontend/src/drivers/shaders.rs)
+  ⎿  Added 3 lines
+      957      // emissive fixtures.
+      958      bool isCeiling = aFaceMeta.y > 2.5 && aFaceMeta.y < 3.5;
+      959      vGrainAmp = (emissive || isCeiling) ? 0.0 : 0.02;
+      960 +    // Coffer beams live in shading, not geometry: downward ce
+          +iling faces                                                   
+      961 +    // get a world-locked beam-grid darkening in the fragment 
+          +shader.                                                       
+      962 +    vBeamPattern = (isCeiling && aFaceMeta.x > 0.5 && aFaceMet
+          +a.x < 1.5) ? 1.0 : 0.0;                                       
+      963      if (emissive) {
+      964          vColor = albedo * 1.5;
+      965          return;
+
+● Update(wasm_frontend/src/drivers/shaders.rs)
+  ⎿  Added 1 line
+      1043  flat in vec3 vNormal;
+      1044  flat in float vEmissive;
+      1045  flat in float vGrainAmp;
+      1046 +flat in float vBeamPattern;                                  
+      1047  
+      1048  uniform vec3 uCameraPosition;
+      1049  uniform float uVoxelScale;
+
+● Update(wasm_frontend/src/drivers/shaders.rs)
+  ⎿  Added 9 lines
+      1072          float grain = 1.0 + (hash3D(lattice) - 0.5) * 2.0 * v
+            GrainAmp;
+      1073          color *= grain;
+      1074  
+      1075 +        // Coffer beam grid on ceilings (matches the generato
+           +r's                                                          
+      1076 +        // COFFER_PERIOD): intentional construction lines, ze
+           +ro geometry.                                                 
+      1077 +        if (vBeamPattern > 0.5) {                            
+      1078 +            bool onBeam = mod(vWorldPos.x, 2.8) < 0.22 || mod
+           +(vWorldPos.z, 2.8) < 0.22;                                   
+      1079 +            if (onBeam) {                                    
+      1080 +                color *= 0.86;                               
+      1081 +            }                                                
+      1082 +        }                                                    
+      1083 +                                                             
+      1084          float desatFactor = clamp(distanceToCamera * 0.015, 0
+            .0, 0.55);
+      1085          float gray = dot(color, vec3(0.299, 0.587, 0.114));
+      1086          color = mix(color, vec3(gray), desatFactor);
+  ⎿  Found 4 new diagnostic issues in 1 file (ctrl+o to expand)
+
+  Read 1 file (ctrl+o to expand)
+
+● Update(src/use_cases/backrooms_level.rs)
+  ⎿  Added 3 lines, removed 5 lines
+      42  /// Column grid spacing inside expanses.
+      43  const EXPANSE_COLUMN_PERIOD: f32 = 7.2;
+      44  
+      45 -/// Coffered-ceiling beam grid period and beam drop, world unit
+         -s.                                                             
+      46 -const COFFER_PERIOD: f32 = 2.8;                                
+      47 -const COFFER_DROP: f32 = 0.2;                                  
+      48 -                                                               
+      49 -/// Ceiling light panel spacing (aligned to coffer panel center
+         -s).                                                            
+      45 +/// Ceiling light panel spacing. The coffer beam grid shares th
+         +is period,                                                     
+      46 +/// but beams are now a renderer shading pattern (see the splat
+         + fragment                                                      
+      47 +/// shader's 2.8 u grid), never stepped ceiling geometry.      
+      48  const LIGHT_PERIOD: f32 = 2.8;
+      49  
+      50  /// Sconce band height on atrium pillars.
+
+● Update(src/use_cases/backrooms_level.rs)
+  ⎿  Added 1 line, removed 1 line
+      169      ) -> ColumnPlan {
+      170          // ---- ceiling field --------------------------------
+           -----------------
+      171          let ceiling_band = Self::fabric_ceiling_band(noise, se
+           ed, wx, wz);
+      172 -        let mut ceiling_units = Self::fabric_ceiling_height(no
+          -ise, seed, wx, wz, ceiling_band);                             
+      172 +        let ceiling_units = Self::fabric_ceiling_height(noise,
+          + seed, wx, wz, ceiling_band);                                 
+      173  
+      174          // In open and vaulted regions, partitions dissolve an
+           d only sparse
+      175          // structural columns remain. The cheap dropped-ceilin
+           g material is
+
+  Ran 2 shell commands (ctrl+o to expand)
+
+❯ and now we are missing yellow and black and the lighsts are too weak at the   
+  atrium or too high so it's not really making shadows. the black should hide   
+  the ungenerated parts and the yello should be the walls                       
+
+● Update(src/use_cases/backrooms_level.rs)
+  ⎿  Added 8 lines, removed 6 lines
+      141          let zone_x = (wx / ZONE).floor() * ZONE + ZONE * 0.5;
+      142          let zone_z = (wz / ZONE).floor() * ZONE + ZONE * 0.5;
+      143          let detail = Self::n(noise, seed, 0xB300, zone_x, zone
+           _z, 0.72);
+      144 -        let height = match band {                             
+      145 -            FabricCeilingBand::Compression => 2.6,            
+      146 -            FabricCeilingBand::Regular => 3.4,                
+      147 -            FabricCeilingBand::Expanse => (4.1 + 0.3 * detail)
+          -.clamp(3.8, 4.4),                                             
+      148 -            FabricCeilingBand::Vault => (4.95 + 0.45 * detail)
+          -.clamp(4.5, 5.4),                                             
+      144 +        let (height, lo, hi) = match band {                   
+      145 +            FabricCeilingBand::Compression => (2.6, 2.5, 2.8),
+      146 +            FabricCeilingBand::Regular => (3.4, 3.2, 3.6),    
+      147 +            FabricCeilingBand::Expanse => (4.1 + 0.3 * detail,
+          + 3.8, 4.4),                                                   
+      148 +            FabricCeilingBand::Vault => (4.95 + 0.45 * detail,
+          + 4.5, 5.4),                                                   
+      149          };
+      150 -        (height / 0.2).round() * 0.2                          
+      150 +        // Snap to the fine voxel lattice, then clamp last: 21
+          + * 0.2 is                                                     
+      151 +        // 4.2000003 in f32 and must not escape the band's ran
+          +ge.                                                           
+      152 +        ((height / 0.2).round() * 0.2).clamp(lo, hi)          
+      153      }
+      154  
+      155      /// Is (wx, wz) inside an open expanse of the fabric?
+● Update(src/use_cases/backrooms_level.rs)
+  ⎿  Added 6 lines, removed 5 lines
+      482          let zone_x = (wx / DRIFT_ZONE).floor() * DRIFT_ZONE + 
+           DRIFT_ZONE * 0.5;
+      483          let zone_z = (wz / DRIFT_ZONE).floor() * DRIFT_ZONE + 
+           DRIFT_ZONE * 0.5;
+      484          let drift = Self::n(noise, seed, 0xCA00_u32.wrapping_a
+           dd(spine.id), zone_x, zone_z, 0.35);
+      485 -        let height = match spine.spine_kind {                 
+      486 -            SpaceProgram::MainCorridor => (3.8 + 0.4 * drift).
+          -clamp(3.4, 4.2),                                              
+      487 -            SpaceProgram::SecondaryHall => (3.3 + 0.3 * drift)
+          -.clamp(3.0, 3.6),                                             
+      488 -            _ => 3.4,                                         
+      485 +        let (height, lo, hi) = match spine.spine_kind {       
+      486 +            SpaceProgram::MainCorridor => (3.8 + 0.4 * drift, 
+          +3.4, 4.2),                                                    
+      487 +            SpaceProgram::SecondaryHall => (3.3 + 0.3 * drift,
+          + 3.0, 3.6),                                                   
+      488 +            _ => (3.4, 3.4, 3.4),                             
+      489          };
+      490 -        (height / 0.2).round() * 0.2                          
+      490 +        // Snap first, clamp last (f32 lattice snap can oversh
+          +oot the band).                                                
+      491 +        ((height / 0.2).round() * 0.2).clamp(lo, hi)          
+      492      }
+      493  
+      494      /// Whether a corridor-side wall dissolves into the adjace
+           nt room/fabric.
+  ⎿  You've hit your session limit · resets 4:20pm (America/Denver)
+     /upgrade to increase your usage limit.
+
+✻ Cooked for 16m 57s

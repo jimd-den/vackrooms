@@ -34,11 +34,12 @@ pub fn build_surface_mesh(
     let mut lights = Vec::new();
     for rl in &halo_grid.runtime_lights {
         lights.push(crate::application::ports::LightSource {
-            id: rl.world_pos[0].to_bits() as u64 ^ rl.world_pos[2].to_bits() as u64,
+            id: ((rl.world_pos[0].to_bits() as u64) << 32) | rl.world_pos[2].to_bits() as u64,
             position: rl.world_pos,
             half_size: rl.half_size,
             color: rl.rgb,
             radius: rl.range,
+            intensity: rl.intensity,
             flicker_mode: 0,
             enabled: rl.enabled,
         });
@@ -52,6 +53,8 @@ pub fn build_surface_mesh(
         light_volume: Vec::with_capacity(width * halo_grid.height() * depth * 3),
         light_volume_size: [width as u32, halo_grid.height() as u32, depth as u32],
         lights,
+        faces: crate::adapters::face_instances::build_face_instances(&quads, voxel_scale),
+        voxel_scale,
     };
     for z in 0..depth {
         for y in 0..halo_grid.height() {
@@ -157,7 +160,7 @@ fn normal_axis(dir: FaceDirection) -> u8 {
     }
 }
 
-fn material_id(v_type: VoxelType) -> u8 {
+pub(crate) fn material_id(v_type: VoxelType) -> u8 {
     match v_type {
         VoxelType::Wall => VOXEL_WALL,
         VoxelType::Floor => VOXEL_FLOOR,

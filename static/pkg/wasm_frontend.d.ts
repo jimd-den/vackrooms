@@ -26,8 +26,20 @@ export function set_render_scale(scale: number): void;
 /**
  * Composition root. Runs automatically when the wasm module is
  * instantiated by `static/index.html`.
+ *
+ * `static/worker.js` instantiates this same module inside a Web Worker
+ * with `#[wasm_bindgen(start)]` skipped (`init` is passed
+ * `{ skip_start: true }` is not available for start fns, so instead the
+ * worker checks for a missing DOM and bails out here).
  */
 export function start(): void;
+
+export function worker_generate(origin_x: number, origin_z: number, level: number, lod: number): Uint8Array;
+
+/**
+ * `default_seed` must match the main thread's `WORLD_SEED`.
+ */
+export function worker_init(query: string, default_seed: number): void;
 
 export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembly.Module;
 
@@ -40,12 +52,15 @@ export interface InitOutput {
     readonly start: () => void;
     readonly set_face_weights: (a: number, b: number, c: number, d: number) => void;
     readonly set_fov: (a: number) => void;
-    readonly wasm_bindgen__convert__closures_____invoke__hcf338537f516d6ca: (a: number, b: number, c: number) => void;
-    readonly wasm_bindgen__convert__closures_____invoke__h418b76ce7ed21247: (a: number, b: number, c: any) => void;
-    readonly wasm_bindgen__convert__closures_____invoke__h418b76ce7ed21247_2: (a: number, b: number, c: any) => void;
-    readonly wasm_bindgen__convert__closures_____invoke__h418b76ce7ed21247_3: (a: number, b: number, c: any) => void;
-    readonly wasm_bindgen__convert__closures_____invoke__h418b76ce7ed21247_4: (a: number, b: number, c: any) => void;
-    readonly wasm_bindgen__convert__closures_____invoke__h813d83ada93472ad: (a: number, b: number) => void;
+    readonly worker_generate: (a: number, b: number, c: number, d: number) => [number, number];
+    readonly worker_init: (a: number, b: number, c: number) => void;
+    readonly wasm_bindgen__convert__closures_____invoke__h4a98415c8f04dfea: (a: number, b: number, c: number) => void;
+    readonly wasm_bindgen__convert__closures_____invoke__h00d81ef20398ee11: (a: number, b: number, c: any) => void;
+    readonly wasm_bindgen__convert__closures_____invoke__h00d81ef20398ee11_2: (a: number, b: number, c: any) => void;
+    readonly wasm_bindgen__convert__closures_____invoke__h00d81ef20398ee11_3: (a: number, b: number, c: any) => void;
+    readonly wasm_bindgen__convert__closures_____invoke__h00d81ef20398ee11_4: (a: number, b: number, c: any) => void;
+    readonly wasm_bindgen__convert__closures_____invoke__h00d81ef20398ee11_5: (a: number, b: number, c: any) => void;
+    readonly wasm_bindgen__convert__closures_____invoke__ha60c758f5c18d619: (a: number, b: number) => void;
     readonly __wbindgen_malloc: (a: number, b: number) => number;
     readonly __wbindgen_realloc: (a: number, b: number, c: number, d: number) => number;
     readonly __wbindgen_exn_store: (a: number) => void;

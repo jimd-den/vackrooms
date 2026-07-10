@@ -12,7 +12,7 @@
 //! web-sys so it is natively unit-tested; the browser driver only hands in
 //! `window.location.search`.
 
-use vackrooms::use_cases::generate_chunk::LevelTuning;
+use vackrooms::use_cases::generate_chunk::{GeneratorConfig, LevelTuning};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct GenerationParams {
@@ -51,6 +51,19 @@ pub fn parse_generation_params(query: &str, default_seed: u32) -> GenerationPara
         }
     }
     params
+}
+
+/// Seed + generator configuration derived from the URL query. The main
+/// thread and every generation worker call this with the same query string,
+/// so all of them voxelize the identical world by construction.
+pub fn generator_setup_from_query(query: &str, default_seed: u32) -> (u32, GeneratorConfig) {
+    let params = parse_generation_params(query, default_seed);
+    let base = if query.contains("spec=high") {
+        GeneratorConfig::high_spec()
+    } else {
+        GeneratorConfig::low_spec()
+    };
+    (params.seed, base.with_tuning(params.tuning))
 }
 
 /// Non-numeric seeds ("?seed=kitten") hash to a stable u32 (FNV-1a).

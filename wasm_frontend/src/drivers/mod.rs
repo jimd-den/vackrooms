@@ -5,5 +5,7 @@ pub mod browser;
 pub mod console_telemetry;
 pub mod cpu_canvas;
 pub mod shaders;
+pub mod splat_webgl;
 pub mod surface_webgl;
 pub mod webgl;
+pub mod worker_source;

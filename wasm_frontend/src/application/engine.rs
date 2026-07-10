@@ -6,11 +6,13 @@
 //! No browser types appear anywhere in this file, so the whole game loop is
 //! natively unit-testable.
 
+use std::collections::HashMap;
+
 use crate::application::atlas::{AtlasPool, MAX_CHUNKS, payload_rows};
 use crate::application::collision::CollisionWorld;
 use crate::application::player::{MoveIntent, Player};
 use crate::application::ports::{
-    ChunkDraw, ChunkSourcePort, FrameParams, RendererPort, SurfaceChunk,
+    ChunkDraw, ChunkRequest, ChunkSourcePort, FrameParams, RendererPort, SurfaceChunk,
 };
 use crate::application::streaming::{
     ChunkKey, ChunkStore, LoadedChunk, StreamingPolicy, chunk_key,
@@ -176,6 +178,9 @@ pub struct Engine {
     governor: PerfGovernor,
     renderer: Box<dyn RendererPort>,
     source: Box<dyn ChunkSourcePort>,
+    /// Outstanding background loads (async sources only): key → requested
+    /// LOD. Prevents duplicate requests while a chunk is in flight.
+    pending: HashMap<ChunkKey, u8>,
     /// Active Backrooms level; chunks are requested for this level.
     level: u32,
     /// How long the player has been pushing into a wall without moving.
@@ -216,6 +221,7 @@ impl Engine {
             governor: PerfGovernor::new(),
             renderer,
             source,
+            pending: HashMap::new(),
             level: LEVEL_BACKROOMS,
             push_seconds: 0.0,
             noclip_cooldown: 0.0,
@@ -265,6 +271,10 @@ impl Engine {
             LEVEL_BACKROOMS
         };
         self.store.retain_keys(&[]);
+        // In-flight loads are for the old level; their completions will be
+        // rejected by the level check, and clearing pending lets the new
+        // level re-request the same keys immediately.
+        self.pending.clear();
         // The whole world is regenerated: drop the pool so the next stream
         // pass relayouts and re-uploads from scratch.
         self.pool = AtlasPool::new();
@@ -333,6 +343,94 @@ impl Engine {
         dx * dx + dz * dz
     }
 
+    /// Installs finished background loads, discarding stale work: a result
+    /// for the wrong level (noclip happened), for a chunk that left the
+    /// streaming footprint, or for a LOD no better than what is already
+    /// resident. Refinement stays monotonic exactly like the sync path.
+    fn install_completed(
+        &mut self,
+        keep: &[ChunkKey],
+        loaded: &mut Vec<ChunkKey>,
+        changed: &mut bool,
+    ) {
+        for done in self.source.poll_completed() {
+            let req = done.request;
+            let key = chunk_key(req.origin_x, req.origin_z);
+            self.pending.remove(&key);
+            if req.level != self.level || !keep.contains(&key) {
+                continue;
+            }
+            let improves = match self.store.get(key) {
+                None => true,
+                Some(resident) => req.lod < resident.lod,
+            };
+            if !improves {
+                continue;
+            }
+            self.store.insert(
+                key,
+                LoadedChunk {
+                    origin: (req.origin_x, req.origin_z),
+                    lod: req.lod,
+                    payload: done.payload,
+                },
+            );
+            if !loaded.contains(&key) {
+                loaded.push(key);
+            }
+            *changed = true;
+        }
+        // Drop pending entries that left the footprint so their slots free
+        // up; a late completion for them is discarded by the keep check.
+        self.pending.retain(|key, _| keep.contains(key));
+    }
+
+    /// Tops up the background request queue: coarse availability for every
+    /// missing chunk (nearest first), then at most one fine refinement in
+    /// flight at a time, mirroring the sync path's priorities.
+    fn issue_requests(&mut self, desired: &[(f32, f32)], desired_visual: &[(f32, f32)]) {
+        // Keep roughly a worker pool's worth of requests in flight; more
+        // would just build a stale backlog behind a moving player.
+        let max_pending = (self.config.max_loads_per_tick * 2).max(4);
+
+        for &(ox, oz) in desired_visual {
+            if self.pending.len() >= max_pending {
+                break;
+            }
+            let key = chunk_key(ox, oz);
+            if !self.store.contains(key) && !self.pending.contains_key(&key) {
+                self.pending.insert(key, COARSE_LOD);
+                self.source.request(ChunkRequest {
+                    origin_x: ox,
+                    origin_z: oz,
+                    level: self.level,
+                    lod: COARSE_LOD,
+                });
+            }
+        }
+
+        let fine_in_flight = self.pending.values().any(|&lod| lod == 0);
+        if fine_in_flight || self.pending.len() >= max_pending {
+            return;
+        }
+        let fine_d2 = self.config.fine_distance * self.config.fine_distance;
+        let target = desired.iter().copied().find(|&(ox, oz)| {
+            let key = chunk_key(ox, oz);
+            self.chunk_dist2(ox, oz) <= fine_d2
+                && !self.pending.contains_key(&key)
+                && self.store.get(key).is_some_and(|c| c.lod > 0)
+        });
+        if let Some((ox, oz)) = target {
+            self.pending.insert(chunk_key(ox, oz), 0);
+            self.source.request(ChunkRequest {
+                origin_x: ox,
+                origin_z: oz,
+                level: self.level,
+                lod: 0,
+            });
+        }
+    }
+
     /// Progressive, error-driven chunk streaming.
     ///
     /// Availability first: every missing chunk (nearest first) loads at the
@@ -377,56 +475,63 @@ impl Engine {
             }
         }
 
-        let mut budget = self.config.max_loads_per_tick as u32 * FINE_LOAD_COST;
         let mut loaded: Vec<ChunkKey> = Vec::new();
+        if self.source.is_async() {
+            // Background pipeline: install validated completions, then top
+            // up the request queue. The frame never blocks on generation.
+            self.install_completed(&keep, &mut loaded, &mut changed);
+            self.issue_requests(&desired, &desired_visual);
+        } else {
+            let mut budget = self.config.max_loads_per_tick as u32 * FINE_LOAD_COST;
 
-        // Phase 1 — availability: missing chunks come in coarse, nearest
-        // first. Only a leftover budget flows into refinement, so a moving
-        // player always fills holes before sharpening anything.
-        for &(ox, oz) in &desired_visual {
-            if budget == 0 {
-                break;
+            // Phase 1 — availability: missing chunks come in coarse, nearest
+            // first. Only a leftover budget flows into refinement, so a moving
+            // player always fills holes before sharpening anything.
+            for &(ox, oz) in &desired_visual {
+                if budget == 0 {
+                    break;
+                }
+                let key = chunk_key(ox, oz);
+                if !self.store.contains(key) {
+                    let payload = self.source.load(ox, oz, self.level, COARSE_LOD);
+                    self.store.insert(
+                        key,
+                        LoadedChunk {
+                            origin: (ox, oz),
+                            lod: COARSE_LOD,
+                            payload,
+                        },
+                    );
+                    loaded.push(key);
+                    budget -= 1;
+                    changed = true;
+                }
             }
-            let key = chunk_key(ox, oz);
-            if !self.store.contains(key) {
-                let payload = self.source.load(ox, oz, self.level, COARSE_LOD);
+
+            // Phase 2 — refinement: nearest coarse chunk inside the fine ring.
+            let fine_d2 = self.config.fine_distance * self.config.fine_distance;
+            while budget >= FINE_LOAD_COST {
+                let target = desired.iter().copied().find(|&(ox, oz)| {
+                    self.chunk_dist2(ox, oz) <= fine_d2
+                        && self.store.get(chunk_key(ox, oz)).is_some_and(|c| c.lod > 0)
+                });
+                let Some((ox, oz)) = target else { break };
+                let key = chunk_key(ox, oz);
+                let payload = self.source.load(ox, oz, self.level, 0);
                 self.store.insert(
                     key,
                     LoadedChunk {
                         origin: (ox, oz),
-                        lod: COARSE_LOD,
+                        lod: 0,
                         payload,
                     },
                 );
-                loaded.push(key);
-                budget -= 1;
+                if !loaded.contains(&key) {
+                    loaded.push(key);
+                }
+                budget -= FINE_LOAD_COST;
                 changed = true;
             }
-        }
-
-        // Phase 2 — refinement: nearest coarse chunk inside the fine ring.
-        let fine_d2 = self.config.fine_distance * self.config.fine_distance;
-        while budget >= FINE_LOAD_COST {
-            let target = desired.iter().copied().find(|&(ox, oz)| {
-                self.chunk_dist2(ox, oz) <= fine_d2
-                    && self.store.get(chunk_key(ox, oz)).is_some_and(|c| c.lod > 0)
-            });
-            let Some((ox, oz)) = target else { break };
-            let key = chunk_key(ox, oz);
-            let payload = self.source.load(ox, oz, self.level, 0);
-            self.store.insert(
-                key,
-                LoadedChunk {
-                    origin: (ox, oz),
-                    lod: 0,
-                    payload,
-                },
-            );
-            if !loaded.contains(&key) {
-                loaded.push(key);
-            }
-            budget -= FINE_LOAD_COST;
-            changed = true;
         }
 
         if !changed {
@@ -647,6 +752,144 @@ mod tests {
                 collision: vec![Aabb::new([-100.0, 0.0, -100.0], [100.0, 3.0, 100.0])],
             }
         }
+    }
+
+    /// Background source double: records requests, completes only what the
+    /// test explicitly finishes, and panics on any blocking load.
+    #[derive(Default)]
+    struct AsyncFakeSource {
+        requests: Rc<RefCell<Vec<ChunkRequest>>>,
+        ready: Rc<RefCell<Vec<crate::application::ports::CompletedChunk>>>,
+    }
+
+    impl ChunkSourcePort for AsyncFakeSource {
+        fn load(&self, _x: f32, _z: f32, _level: u32, _lod: u8) -> ChunkPayload {
+            unreachable!("async sources must never be block-loaded by the engine");
+        }
+        fn is_async(&self) -> bool {
+            true
+        }
+        fn request(&mut self, request: ChunkRequest) {
+            self.requests.borrow_mut().push(request);
+        }
+        fn poll_completed(&mut self) -> Vec<crate::application::ports::CompletedChunk> {
+            self.ready.borrow_mut().drain(..).collect()
+        }
+    }
+
+    fn completed(request: ChunkRequest) -> crate::application::ports::CompletedChunk {
+        crate::application::ports::CompletedChunk {
+            request,
+            payload: FlatChunkSource.load(request.origin_x, request.origin_z, request.level, request.lod),
+        }
+    }
+
+    #[test]
+    fn async_source_streams_without_blocking_and_refines_monotonically() {
+        let source = AsyncFakeSource::default();
+        let requests = source.requests.clone();
+        let ready = source.ready.clone();
+        let mut engine = Engine::new(
+            EngineConfig::default(),
+            Box::new(RecordingRenderer::default()),
+            Box::new(source),
+        );
+        let input = InputFrame::default();
+
+        // First tick issues requests but installs nothing — the frame
+        // never waits for generation.
+        engine.tick(1.0 / 60.0, &input);
+        assert_eq!(engine.stats().resident_chunks, 0);
+        assert!(!engine.stats().ready);
+        assert!(!requests.borrow().is_empty());
+
+        // Fulfil whatever is asked until the footprint is fine everywhere.
+        for _ in 0..40 {
+            let fulfil: Vec<_> = requests.borrow_mut().drain(..).collect();
+            for req in fulfil {
+                ready.borrow_mut().push(completed(req));
+            }
+            engine.tick(1.0 / 60.0, &input);
+        }
+        assert_eq!(engine.stats().resident_chunks, 9);
+        assert_eq!(engine.stats().fine_chunks, 9);
+        assert!(engine.stats().ready);
+
+        // Steady state: no further requests.
+        let before = requests.borrow().len();
+        engine.tick(1.0 / 60.0, &input);
+        assert_eq!(requests.borrow().len(), before);
+    }
+
+    #[test]
+    fn stale_completions_are_discarded() {
+        let source = AsyncFakeSource::default();
+        let requests = source.requests.clone();
+        let ready = source.ready.clone();
+        let mut engine = Engine::new(
+            EngineConfig::default(),
+            Box::new(RecordingRenderer::default()),
+            Box::new(source),
+        );
+        let input = InputFrame::default();
+        engine.tick(1.0 / 60.0, &input);
+        requests.borrow_mut().clear();
+
+        // Wrong level: the engine is on level 0.
+        ready.borrow_mut().push(completed(ChunkRequest {
+            origin_x: 0.0,
+            origin_z: 0.0,
+            level: 34,
+            lod: 1,
+        }));
+        // Outside the streaming footprint entirely.
+        ready.borrow_mut().push(completed(ChunkRequest {
+            origin_x: 500.0,
+            origin_z: 500.0,
+            level: 0,
+            lod: 1,
+        }));
+        engine.tick(1.0 / 60.0, &input);
+        assert_eq!(
+            engine.stats().resident_chunks,
+            0,
+            "stale completions must not be installed"
+        );
+    }
+
+    #[test]
+    fn late_coarse_result_never_downgrades_a_fine_chunk() {
+        let source = AsyncFakeSource::default();
+        let requests = source.requests.clone();
+        let ready = source.ready.clone();
+        let mut engine = Engine::new(
+            EngineConfig::default(),
+            Box::new(RecordingRenderer::default()),
+            Box::new(source),
+        );
+        let input = InputFrame::default();
+        for _ in 0..40 {
+            let fulfil: Vec<_> = requests.borrow_mut().drain(..).collect();
+            for req in fulfil {
+                ready.borrow_mut().push(completed(req));
+            }
+            engine.tick(1.0 / 60.0, &input);
+        }
+        assert_eq!(engine.stats().fine_chunks, 9);
+
+        // A leftover coarse result for the spawn chunk arrives late.
+        ready.borrow_mut().push(completed(ChunkRequest {
+            origin_x: 0.0,
+            origin_z: 0.0,
+            level: 0,
+            lod: 1,
+        }));
+        engine.tick(1.0 / 60.0, &input);
+        assert_eq!(
+            engine.stats().fine_chunks,
+            9,
+            "refinement must stay monotonic under out-of-order results"
+        );
     }
 
     fn engine_with_recorder() -> (Engine, Rc<RefCell<Vec<usize>>>, Rc<RefCell<Vec<usize>>>) {
