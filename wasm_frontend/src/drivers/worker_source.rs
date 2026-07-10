@@ -52,7 +52,11 @@ impl WorkerChunkSource {
         for _ in 0..pool_size {
             let options = WorkerOptions::new();
             options.set_type(WorkerType::Module);
-            let worker = Worker::new_with_options("/worker.js", &options)?;
+            // Relative (not `/worker.js`): resolved against the document's
+            // URL, so this still finds the sibling file when the site is
+            // served from a subpath (e.g. a GitHub Pages project page at
+            // `<user>.github.io/<repo>/`) instead of the domain root.
+            let worker = Worker::new_with_options("worker.js", &options)?;
 
             let sink = completed.clone();
             let handler = Closure::<dyn FnMut(MessageEvent)>::new(move |event: MessageEvent| {
