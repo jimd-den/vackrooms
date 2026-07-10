@@ -2,16 +2,31 @@
 
 A voxel-only rendering engine built on **Clean Architecture**, targeting
 low-spec hardware. The whole engine — procedural generation, lighting, sparse
-voxel octree (SVO) construction, chunk streaming, player physics, and WebGL2
-raymarching — compiles to a single ~410 KB WebAssembly module. The browser
+voxel octree (SVO) construction, chunk streaming, player physics, and
+rendering — compiles to a single ~410 KB WebAssembly module. The browser
 runs it; a zero-dependency native HTTP server merely serves the files (or, on
 GitHub Pages, static files alone — the wasm engine generates chunks entirely
 client-side and needs no server).
 
 ## Rendering family
 
+`RendererPort` (`wasm_frontend/src/application/ports.rs`) has four
+implementations, selected at runtime by `create_renderer`
+(`wasm_frontend/src/drivers/browser.rs`) from the `?renderer=` query param:
+
+| `?renderer=` | Driver | Approach |
+|---|---|---|
+| *(default)* | `surface_webgl::SurfaceRenderer` | Indexed greedy meshes, WebGL2 fixed-function depth. The SVO is retained per chunk for collision/debug only — no fragment shader walks it. |
+| `splat` | `splat_webgl::SplatRenderer` | Instanced face-splat "microvoxel" path: one GPU instance per visible surface rectangle, lit once in the vertex shader; the retained mesh is drawn only into the shadow map. |
+| `raymarch` | `webgl::WebGl2Renderer` | The hybrid SVO raymarcher described below — a per-fragment octree walk. |
+| `cpu` | `cpu_canvas::CpuCanvasRenderer` | Software rasterizer (`adapters::cpu_splatter`) blitted via `ImageData`; no WebGL context at all. |
+
+`SurfaceRenderer` and `SplatRenderer` fall back (to CPU, or to surfaces)
+if WebGL2 or the requested backend fails to initialize.
+
 Of the three classical voxel pipeline families (mesh/rasterized,
-SVO ray casting, hybrid), this engine implements a **hybrid SVO raymarcher**:
+SVO ray casting, hybrid), the `raymarch` backend implements a
+**hybrid SVO raymarcher**:
 
 1. **Chunk-level coarse pass** — each resident chunk's AABB is slab-tested
    per fragment and the hits are insertion-sorted by entry distance, so rays
@@ -80,10 +95,15 @@ architecture cop.
 |---|---|---|
 | `NoiseProvider` | `src/use_cases/ports.rs` | `SimpleNoiseProvider` |
 | `TelemetryPort` | `src/use_cases/ports.rs` | `StdTelemetry` (native stdout), `ConsoleTelemetry` (browser console), `NullTelemetry` (tests) |
-| `RendererPort` | `wasm_frontend/application/ports.rs` | `WebGl2Renderer` (browser), recording fakes (tests) |
-| `ChunkSourcePort` | `wasm_frontend/application/ports.rs` | `LocalChunkSource` (in-wasm generation); an HTTP-fetching implementation would slot in without touching the engine |
+| `RendererPort` | `wasm_frontend/application/ports.rs` | `SurfaceRenderer` (default), `SplatRenderer`, `WebGl2Renderer` (raymarch), `CpuCanvasRenderer`, recording fakes (tests) |
+| `ChunkSourcePort` | `wasm_frontend/application/ports.rs` | `LocalChunkSource` (synchronous, in-wasm generation), `WorkerChunkSource` (pooled Web Worker generation, default); an HTTP-fetching implementation would slot in without touching the engine |
 
 ## Data flow: from noise to pixel
+
+The SVO atlas path below feeds the `raymarch` backend directly; the default
+`SurfaceRenderer` and `SplatRenderer` consume the same lit `VoxelGrid` but
+greedy-mesh or face-splat it instead of walking the octree per fragment (the
+SVO they receive is used for collision only).
 
 ```
 SimpleNoiseProvider (driver)
@@ -160,10 +180,15 @@ of a chunk voxelizes the same architecture. Debug hook:
 
 ## Chunk streaming
 
-Single-threaded wasm has no background meshing thread, so streaming is
-**time-sliced** and **progressive**: `StreamingPolicy` produces the desired
-resident set (nearest-first) each frame, and the `Engine` spends a per-tick
-cost budget on it in two phases:
+Chunk generation runs on a pool of Web Workers (`WorkerChunkSource`,
+`static/worker.js` — each a second instance of the same wasm module), sized
+to `hardware_concurrency - 1` (clamped 1–4), so crossing a streaming
+boundary never stalls the frame loop; `?workers=0` forces the older
+synchronous in-thread `LocalChunkSource`, which is also the automatic
+fallback if the worker pool fails to spin up. Either way, the resident set
+itself is **time-sliced** and **progressive**: `StreamingPolicy` produces the
+desired resident set (nearest-first) each frame, and the `Engine` spends a
+per-tick cost budget on it in two phases:
 
 1. **Availability** — every missing chunk first loads at a *coarse LOD*
    (voxels 2× the size, ~1/8 the generation/lighting/SVO cost, ~1 budget
@@ -228,6 +253,6 @@ consumes. The wasm client needs no data endpoints at all.
 
 - Temporal reprojection / checkerboarding to complement adaptive resolution.
 - Per-chunk AABB *rasterization* (BackSide boxes + `gl_FragDepth` writeback)
-  to replace the fullscreen quad once chunk counts grow beyond 25.
-- Web Worker chunk generation (wasm threads) to remove the 1-chunk/tick cap.
+  to replace the fullscreen quad once chunk counts grow beyond 25 (`raymarch`
+  backend only).
 - LOD: shallower SVO mip levels for distant chunks.
