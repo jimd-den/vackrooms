@@ -132,21 +132,24 @@ voxelizes them (`use_cases/region_plan.rs` + `use_cases/backrooms_level.rs`):
 1. **Region plans.** The world tiles into fixed 80 u regions. A pure function
    of `(seed, region)` derives 1–3 `ArchitectGenome`s (circulation style,
    structural system, proportions, threshold/ceiling/lighting languages,
-   renovation history), routes corridor spines between *edge portals* shared
-   with neighboring regions (so corridors chain across regions forever), and
-   attaches `AssemblyInstance`s — semantic spaces (`SpaceProgram`: open
-   office, conference, server room, …) with footprints, entrances, structural
-   grids, ceiling zones, and fixtures — along the corridors.
+   renovation history), routes one dominant 4.8–7.2 u primary spine between
+   shared edge portals (so it chains across regions forever), then adds at
+   most two 3.6–5.0 u interior branches. It attaches incomplete, 12–24 u
+   `AssemblyInstance` masses beside that circulation rather than tiling the
+   region with rooms. Thresholds are selected per assembly: narrow lintelled
+   doors are rare; most fronts use a broad or unframed portal.
 2. **Corruption.** A final pass makes the sane plan Backrooms: suites repeat
    with misaligned copies, one assembly becomes an unlit
    `AbandonedExpansion` shell, renovations overlay contradictory column
    grids.
 3. **Voxelization.** `BackroomsLevel` samples the plan per voxel column with
-   priority *corridor → assembly → fabric*: corridors carve open with soffit
-   light strips; assemblies get perimeter walls, lintel doorways, parametric
-   partitions and ceiling-module fixtures; everything between is the endless
-   unplanned office *fabric* — a 6 u room grid with doorways that
-   occasionally dissolves into open expanses of sparse columns.
+   priority *corridor → assembly → fabric*: corridors carve open under
+   3.4–4.2 u (primary) or 3.0–3.6 u (secondary) ceilings; assemblies retain
+   long perimeter runs and sparse partitions; everything between is a sparse
+   18 u wall fabric that dissolves into open space. A broad ceiling field
+   holds the visual baseline at 3.2–3.6 u, with 3.8–4.4 u expanses, 4.5–5.4 u
+   vaults, and rare 2.5–2.8 u compression zones. This keeps cheap office
+   finishes at an implausible scale instead of producing a low office maze.
 
 All plan geometry snaps to a 0.4 u lattice (one coarse voxel) so every LOD
 of a chunk voxelizes the same architecture. Debug hook:

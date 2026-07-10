@@ -157,6 +157,7 @@ mod tests {
             root,
             nodes: vec![0; node_count * 4],
             world_size: 12.8,
+            surface: crate::application::ports::SurfaceMeshPayload::empty(0),
             collision: vec![],
         }
     }

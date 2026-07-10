@@ -6,6 +6,58 @@
 
 use crate::application::collision::Aabb;
 
+/// Chunk-local fixed-point scale used by [`PackedVertex::position`]. A 20 u
+/// high-spec chunk occupies only 20,480 units, comfortably inside `u16`.
+pub const POSITION_FIXED_SCALE: f32 = 1024.0;
+
+/// Compact vertex consumed by the default surface renderer. Position stays
+/// chunk-local so it has stable precision even far from the origin; normal,
+/// material, baked light, and AO remain compact integer attributes.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PackedVertex {
+    pub position: [u16; 3],
+    pub normal_axis: u8,
+    pub material: u8,
+    pub light: u8,
+    pub ao: u8,
+}
+
+/// Indexed greedy-mesh payload for one chunk. The SVO payload remains
+/// authoritative for collision, storage, and ray queries; this exists only
+/// to make visible surfaces cheap to rasterize.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SurfaceMeshPayload {
+    pub vertices: Vec<PackedVertex>,
+    pub indices: Vec<u32>,
+    pub bounds: Aabb,
+    pub lod: u8,
+}
+
+impl SurfaceMeshPayload {
+    pub fn empty(lod: u8) -> Self {
+        Self {
+            vertices: Vec::new(),
+            indices: Vec::new(),
+            bounds: Aabb::new([0.0; 3], [0.0; 3]),
+            lod,
+        }
+    }
+}
+
+/// Stable mesh identity, quantized from a chunk origin like the streaming
+/// store's key. The renderer uses it to replace only refined/changed meshes.
+pub type SurfaceChunkKey = (i64, i64);
+
+/// Borrowed incremental surface update. Mesh bytes are uploaded immediately;
+/// no extra clone of a chunk's geometry is needed in the frame loop.
+#[derive(Debug, Clone, Copy)]
+pub struct SurfaceChunk<'a> {
+    pub key: SurfaceChunkKey,
+    pub origin: [f32; 3],
+    pub mesh: &'a SurfaceMeshPayload,
+}
+
 /// Per-chunk data the renderer needs to raymarch one chunk of the SVO atlas.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ChunkDraw {
@@ -26,10 +78,32 @@ pub struct FrameParams {
     pub flashlight: bool,
 }
 
-/// Abstraction over the actual rasterizer/raymarcher back end.
+/// Abstraction over the actual rasterizer back end.
 /// Implemented by `drivers::webgl::WebGl2Renderer` in the browser and by
 /// test doubles in native unit tests.
 pub trait RendererPort {
+    /// True for the indexed surface renderer. The engine then skips SVO-atlas
+    /// upload work while preserving the SVO in the chunk payload for collision
+    /// and debug/reference traversal.
+    fn uses_surface_meshes(&self) -> bool {
+        false
+    }
+
+    /// Incrementally uploads newly loaded or refined chunk meshes.
+    fn upload_surfaces(&mut self, _chunks: &[SurfaceChunk<'_>]) {}
+
+    /// Releases meshes for chunks that left the streaming footprint.
+    fn remove_surfaces(&mut self, _keys: &[SurfaceChunkKey]) {}
+
+    /// Drops all resident meshes (used when noclipping to another level).
+    fn clear_surfaces(&mut self) {}
+
+    /// Last asynchronous GPU timing sample, when the driver supports
+    /// `EXT_disjoint_timer_query_webgl2`.
+    fn gpu_frame_ms(&self) -> Option<f32> {
+        None
+    }
+
     /// Uploads the merged SVO node atlas (RGBA32UI texel stream, 4 u32 per
     /// node, rows of 1024 texels — see `OctreeGpuSerializer` in the core).
     fn upload_atlas(&mut self, texels: &[u32]);
@@ -55,6 +129,8 @@ pub struct ChunkPayload {
     pub nodes: Vec<u32>,
     /// Side length of the SVO cube in world units.
     pub world_size: f32,
+    /// Greedy surface mesh used by the default raster path.
+    pub surface: SurfaceMeshPayload,
     /// Solid-voxel bounding boxes in world space, for player collision.
     pub collision: Vec<Aabb>,
 }

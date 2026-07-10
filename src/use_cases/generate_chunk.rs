@@ -321,8 +321,8 @@ impl<'a> GenerateChunkArchitectureUseCase<'a> {
 
         let start_micros = self.telemetry.now_micros();
 
-        let width = (config.chunk_size / config.voxel_scale) as usize;
-        let depth = (config.chunk_size / config.voxel_scale) as usize;
+        let width = (config.chunk_size / config.voxel_scale).round() as usize;
+        let depth = (config.chunk_size / config.voxel_scale).round() as usize;
 
         // Cell voxel borders derive from world space (cells are 5.0 units) so
         // every LOD of a chunk puts its walls on the same world planes.
@@ -593,9 +593,16 @@ impl<'a> GenerateChunkArchitectureUseCase<'a> {
 
                         if cell.zone != MicrobiomeZone::Atrium {
                             // Normal ceilings with optional light
-                            if cell.zone != MicrobiomeZone::Blackout && (vx % 10 == 0 && vz % 10 == 0) {
+                            if cell.zone != MicrobiomeZone::Blackout
+                                && (vx % 10 == 0 && vz % 10 == 0)
+                            {
                                 if cell.zone == MicrobiomeZone::RedRoom {
-                                    grid.set(vx, wall_max_y, vz, crate::domain::entities::voxel_grid::VOXEL_RED_LIGHT);
+                                    grid.set(
+                                        vx,
+                                        wall_max_y,
+                                        vz,
+                                        crate::domain::entities::voxel_grid::VOXEL_RED_LIGHT,
+                                    );
                                 } else {
                                     grid.set(vx, wall_max_y, vz, VOXEL_LIGHT);
                                 }
@@ -1423,7 +1430,11 @@ mod tests {
         let noise = MockNoiseProvider { value: 0.9 }; // Forces Atrium
         let generator = GenerateChunkArchitectureUseCase::new(&noise);
         // We use chunk_pos (1.0, 1.0) to avoid the (0,0) starting hub override
-        let grid = generator.execute(Position::new(1.0, 1.0), 42, GeneratorConfig::high_spec().with_level(1));
+        let grid = generator.execute(
+            Position::new(1.0, 1.0),
+            42,
+            GeneratorConfig::high_spec().with_level(1),
+        );
 
         assert!(
             grid.height() >= 122,
@@ -1433,8 +1444,11 @@ mod tests {
         // Sample standard cell height vs atrium cell height via the ceiling placement
         let noise_std = MockNoiseProvider { value: 0.0 }; // Forces Standard
         let generator_std = GenerateChunkArchitectureUseCase::new(&noise_std);
-        let grid_std =
-            generator_std.execute(Position::new(1.0, 1.0), 42, GeneratorConfig::high_spec().with_level(1));
+        let grid_std = generator_std.execute(
+            Position::new(1.0, 1.0),
+            42,
+            GeneratorConfig::high_spec().with_level(1),
+        );
 
         assert_eq!(
             grid_std.height(),

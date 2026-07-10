@@ -34,6 +34,12 @@ pub fn set_fov(degrees: f32) {
     FOV_TAN.with(|f| *f.borrow_mut() = half.tan());
 }
 
+/// Shared camera FOV state for both the experimental SVO raymarcher and the
+/// default indexed-surface renderer.
+pub(crate) fn fov_tan() -> f32 {
+    FOV_TAN.with(|f| *f.borrow())
+}
+
 /// Row width of the node atlas texture (texels). Must match both the shader's
 /// `decodeNode` constant and the core `OctreeGpuSerializer` row padding.
 const ATLAS_WIDTH: i32 = 1024;
@@ -271,7 +277,10 @@ impl RendererPort for WebGl2Renderer {
             gl.uniform1f(self.uniforms.face_weight_z.as_ref(), z);
         });
 
-        gl.uniform1i(self.uniforms.flashlight.as_ref(), if frame.flashlight { 1 } else { 0 });
+        gl.uniform1i(
+            self.uniforms.flashlight.as_ref(),
+            if frame.flashlight { 1 } else { 0 },
+        );
 
         let count = chunks.len().min(MAX_CHUNKS);
         gl.uniform1i(self.uniforms.num_chunks.as_ref(), count as i32);

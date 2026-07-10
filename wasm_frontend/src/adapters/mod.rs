@@ -6,3 +6,4 @@ pub mod cpu_splatter;
 pub mod input;
 pub mod local_chunk_source;
 pub mod query_config;
+pub mod surface_mesh;

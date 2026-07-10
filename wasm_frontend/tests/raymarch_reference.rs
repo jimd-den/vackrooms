@@ -277,8 +277,12 @@ fn multi_chunk_raymarch_reports_no_phantom_geometry() {
 
     // 3x3 resident set around spawn, same as the engine with radius 1.
     let mut chunks = Vec::new();
-    for dz in -1..=1 {
-        for dx in -1..=1 {
+    // Level 0 now has vaulted regions up to 5.4 u, so a steep ray starting
+    // near the edge of the spawn chunk can travel farther laterally before
+    // reaching its ceiling. Keep enough loaded world around the sweep to
+    // test traversal, not an artificial streaming boundary.
+    for dz in -2..=2 {
+        for dx in -2..=2 {
             let (ox, oz) = (dx as f32 * 10.0, dz as f32 * 10.0);
             chunks.push(LoadedChunk {
                 origin: (ox, oz),

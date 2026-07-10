@@ -11,11 +11,13 @@
 
 use vackrooms::adapters::octree_gpu_serializer::OctreeGpuSerializer;
 use vackrooms::domain::entities::sparse_voxel_octree::{SparseVoxelOctree, SvoNode};
+use vackrooms::domain::entities::voxel_grid::VoxelGrid;
 use vackrooms::domain::use_cases::build_octree::BuildOctreeUseCase;
 use vackrooms::entities::models::Position;
 use vackrooms::use_cases::generate_chunk::{GenerateChunkArchitectureUseCase, GeneratorConfig};
 use vackrooms::use_cases::ports::{NULL_TELEMETRY, NoiseProvider, TelemetryPort};
 
+use crate::adapters::surface_mesh::build_surface_mesh;
 use crate::application::collision::Aabb;
 use crate::application::ports::{ChunkPayload, ChunkSourcePort};
 
@@ -65,7 +67,22 @@ impl<N: NoiseProvider> ChunkSourcePort for LocalChunkSource<N> {
         let config = self.config.with_level(level).at_lod(lod);
         let generator =
             GenerateChunkArchitectureUseCase::with_telemetry(&self.noise, self.telemetry);
-        let grid = generator.execute(Position::new(origin_x, origin_z), self.seed, config);
+
+        // Generate one extra voxel around the X/Z perimeter, then crop the
+        // authoritative interior for SVO/collision. The greedy mesher reads
+        // the halo while deciding boundary faces, so it never invents a face
+        // merely because the adjacent streamed chunk has not uploaded yet.
+        let halo_config = GeneratorConfig {
+            chunk_size: config.chunk_size + config.voxel_scale * 2.0,
+            ..config
+        };
+        let halo_grid = generator.execute(
+            Position::new(origin_x - config.voxel_scale, origin_z - config.voxel_scale),
+            self.seed,
+            halo_config,
+        );
+        let grid = crop_lateral_halo(&halo_grid, 1);
+        let surface = build_surface_mesh(&halo_grid, config.voxel_scale, lod, 1);
 
         let svo =
             BuildOctreeUseCase::new().execute(&grid, config.svo_depth(), config.svo_world_size());
@@ -77,9 +94,33 @@ impl<N: NoiseProvider> ChunkSourcePort for LocalChunkSource<N> {
             root: svo.root as u32,
             nodes: gpu.texel_data,
             world_size: config.svo_world_size(),
+            surface,
             collision,
         }
     }
+}
+
+/// Copies the actual chunk interior out of a generated X/Z halo while
+/// retaining voxel type, colored baked lighting, and directional AO.
+fn crop_lateral_halo(halo: &VoxelGrid, padding: usize) -> VoxelGrid {
+    assert!(halo.width() > padding * 2 && halo.depth() > padding * 2);
+    let mut inner = VoxelGrid::new(
+        halo.width() - padding * 2,
+        halo.height(),
+        halo.depth() - padding * 2,
+    );
+    for z in 0..inner.depth() {
+        for y in 0..inner.height() {
+            for x in 0..inner.width() {
+                let hx = x + padding;
+                let hz = z + padding;
+                inner.set(x, y, z, halo.get(hx, y, hz));
+                inner.set_light_rgb(x, y, z, halo.get_light_rgb(hx, y, hz));
+                inner.set_face_occlusion(x, y, z, halo.get_face_occlusion(hx, y, hz));
+            }
+        }
+    }
+    inner
 }
 
 /// Walks the SVO and emits one world-space AABB per solid leaf region.
@@ -215,5 +256,40 @@ mod tests {
             !coarse.collision.is_empty(),
             "coarse chunks still collide (they cover the pre-refinement window)"
         );
+    }
+
+    #[test]
+    fn halo_crop_matches_direct_chunk_generation() {
+        let noise = SimpleNoiseProvider::new();
+        let config = GeneratorConfig::low_spec();
+        let generator = GenerateChunkArchitectureUseCase::new(&noise);
+        let direct = generator.execute(Position::new(10.0, -10.0), 42, config);
+        let halo = generator.execute(
+            Position::new(10.0 - config.voxel_scale, -10.0 - config.voxel_scale),
+            42,
+            GeneratorConfig {
+                chunk_size: config.chunk_size + config.voxel_scale * 2.0,
+                ..config
+            },
+        );
+        let cropped = crop_lateral_halo(&halo, 1);
+        assert_eq!(direct.width(), cropped.width());
+        assert_eq!(direct.height(), cropped.height());
+        assert_eq!(direct.depth(), cropped.depth());
+        for z in 0..direct.depth() {
+            for y in 0..direct.height() {
+                for x in 0..direct.width() {
+                    assert_eq!(direct.get(x, y, z), cropped.get(x, y, z));
+                    assert_eq!(
+                        direct.get_light_rgb(x, y, z),
+                        cropped.get_light_rgb(x, y, z)
+                    );
+                    assert_eq!(
+                        direct.get_face_occlusion(x, y, z),
+                        cropped.get_face_occlusion(x, y, z)
+                    );
+                }
+            }
+        }
     }
 }

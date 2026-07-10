@@ -2,9 +2,10 @@
 //!
 //! The world is tiled by fixed 80 u square regions on a world-space lattice.
 //! [`generate_region_plan`] is a *pure* function of `(seed, region)`: it
-//! derives the region's designers ([`ArchitectGenome`]), routes circulation
-//! first (corridor spines between edge portals shared with the neighboring
-//! regions), attaches program spaces ([`AssemblyInstance`]) to the corridors,
+//! derives the region's designers ([`ArchitectGenome`]), routes a dominant
+//! circulation spine first (between edge portals shared with the neighboring
+//! regions), attaches incomplete program masses ([`AssemblyInstance`]) beside
+//! that circulation,
 //! gives them structure / ceilings / fixtures, and finally applies a
 //! Backrooms corruption pass (duplicated suites, abandoned expansions,
 //! renovation overlays).
@@ -84,13 +85,6 @@ fn v_edge_portal_z(seed: u32, ex: i64, rz: i64) -> f32 {
     snap((rz as f32 + f) * REGION_SIZE)
 }
 
-/// Portal position on the horizontal edge `z = ez * REGION_SIZE` of region
-/// column `rx`.
-fn h_edge_portal_x(seed: u32, rx: i64, ez: i64) -> f32 {
-    let f = 0.30 + 0.40 * hash01(seed, &[0x0E2, rx, ez]);
-    snap((rx as f32 + f) * REGION_SIZE)
-}
-
 // ---------------------------------------------------------------------------
 // Genomes.
 // ---------------------------------------------------------------------------
@@ -117,7 +111,7 @@ pub fn derive_genome(
     let circulation = match ((culture * 0.5 + 0.5).clamp(0.0, 0.999) * 4.0) as u32 {
         0 => CirculationStyle::StraightSpine,
         1 => CirculationStyle::MeanderingSpine,
-        2 => CirculationStyle::LoopingRing,
+        2 => CirculationStyle::PairedBranches,
         _ => CirculationStyle::TreeWithCulDeSacs,
     };
     let structural_system = *[
@@ -128,14 +122,14 @@ pub fn derive_genome(
     ]
     .get(pick_index(h(1), 4))
     .unwrap();
-    let threshold_language = *[
-        ThresholdLanguage::DoorWithLintel,
-        ThresholdLanguage::DoorWithLintel, // doors are the office default
-        ThresholdLanguage::OpenPortal,
-        ThresholdLanguage::WidePortal,
-    ]
-    .get(pick_index(h(2), 4))
-    .unwrap();
+    // A framed office door is now an anomaly. The chosen language is only a
+    // bias; each assembly still picks its own threshold so a whole region
+    // never turns into a row of identical openings.
+    let threshold_language = match h(2) {
+        v if v < 0.10 => ThresholdLanguage::DoorWithLintel,
+        v if v < 0.55 => ThresholdLanguage::OpenPortal,
+        _ => ThresholdLanguage::WidePortal,
+    };
     let ceiling_language = *[
         CeilingLanguage::FlatTiles,
         CeilingLanguage::Coffered,
@@ -162,8 +156,11 @@ pub fn derive_genome(
         circulation,
         structural_system,
         room_proportions: ProportionRules {
-            min_side: 4.8 + 2.4 * h(6),
-            max_side: 12.0 + 8.0 * h(7),
+            // Level 0 reads as broken retail-backroom masses, not a cubicle
+            // tiling. A suite frontage normally survives 12--24 u before a
+            // meaningful interruption.
+            min_side: 12.0 + 4.0 * h(6),
+            max_side: 20.0 + 8.0 * h(7),
             elongation: h(8),
         },
         threshold_language,
@@ -204,11 +201,11 @@ fn build_corridors(
     let (z0, z1) = (origin.z, origin.z + size);
     let west_z = v_edge_portal_z(seed, rx, rz);
     let east_z = v_edge_portal_z(seed, rx + 1, rz);
-    let north_x = h_edge_portal_x(seed, rx, rz);
-    let south_x = h_edge_portal_x(seed, rx, rz + 1);
-
-    let main_w = snap_width(2.8 + 0.8 * genome.tolerance_for_symmetry);
-    let sec_w = snap_width(2.0 + 0.4 * hash01(seed, &[0xC1, rx, rz]));
+    // The primary route is deliberately too broad for an ordinary office
+    // corridor. It carries the infinite cross-region continuity; anything
+    // else is an optional branch, never a competing street grid.
+    let main_w = snap_width(4.8 + 2.4 * h(1));
+    let sec_w = snap_width(3.6 + 1.4 * hash01(seed, &[0xC1, rx, rz]));
 
     let mut spines = Vec::new();
     let mut id = 0u32;
@@ -242,64 +239,30 @@ fn build_corridors(
     let main_z_at = main_path.clone();
     push(SpaceProgram::MainCorridor, main_path, main_w, &mut id);
 
-    // Secondary hall: north portal -> south portal, routed through a point
-    // on the main spine so the two families always connect.
-    let join_z = spine_z_at(&main_z_at, north_x);
-    push(
-        SpaceProgram::SecondaryHall,
-        vec![
-            Position::new(north_x, z0),
-            Position::new(north_x, join_z),
-            Position::new(south_x, join_z),
-            Position::new(south_x, z1),
-        ],
-        sec_w,
-        &mut id,
-    );
-
-    match genome.circulation {
-        CirculationStyle::LoopingRing => {
-            // A rectangular ring hung off the main spine.
-            let m = snap(size * 0.22);
-            let (rx0, rz0, rx1, rz1) = (x0 + m, z0 + m, x1 - m, z1 - m);
+    // Secondary routes are branches, not a second regional grid: roughly a
+    // quarter of regions have none, most have one, and a few have two. The
+    // former ring and north/south through-route are intentionally absent.
+    let branch_count = match genome.circulation {
+        CirculationStyle::StraightSpine if h(11) < 0.45 => 0,
+        CirculationStyle::MeanderingSpine if h(11) < 0.20 => 0,
+        _ if h(11) < 0.28 => 0,
+        _ if h(11) < 0.82 => 1,
+        _ => 2,
+    };
+    for k in 0..branch_count {
+        let sx = snap(x0 + size * (0.18 + 0.64 * h(12 + k)));
+        let sz = spine_z_at(&main_z_at, sx);
+        let len = snap(12.0 + 14.0 * h(22 + k));
+        let dir = if h(32 + k) < 0.5 { 1.0 } else { -1.0 };
+        let end = (sz + dir * len).clamp(z0 + EDGE_MARGIN, z1 - EDGE_MARGIN);
+        if (end - sz).abs() >= 8.0 {
             push(
                 SpaceProgram::SecondaryHall,
-                vec![
-                    Position::new(rx0, rz0),
-                    Position::new(rx1, rz0),
-                    Position::new(rx1, rz1),
-                    Position::new(rx0, rz1),
-                    Position::new(rx0, rz0),
-                ],
-                sec_w,
-                &mut id,
-            );
-            // Connector from the ring up to the main spine.
-            let cz = spine_z_at(&main_z_at, rx0);
-            push(
-                SpaceProgram::SecondaryHall,
-                vec![Position::new(rx0, rz0), Position::new(rx0, cz)],
+                vec![Position::new(sx, sz), Position::new(sx, snap(end))],
                 sec_w,
                 &mut id,
             );
         }
-        CirculationStyle::TreeWithCulDeSacs => {
-            // Dead-end stubs off the main spine: unease by design.
-            for k in 0..2 {
-                let sx = snap(x0 + size * (0.25 + 0.5 * h(10 + k)));
-                let sz = spine_z_at(&main_z_at, sx);
-                let len = snap(8.0 + 8.0 * h(20 + k));
-                let dir = if h(30 + k) < 0.5 { 1.0 } else { -1.0 };
-                let end = (sz + dir * len).clamp(z0 + EDGE_MARGIN, z1 - EDGE_MARGIN);
-                push(
-                    SpaceProgram::SecondaryHall,
-                    vec![Position::new(sx, sz), Position::new(sx, snap(end))],
-                    sec_w,
-                    &mut id,
-                );
-            }
-        }
-        _ => {}
     }
     spines
 }
@@ -324,24 +287,32 @@ fn spines_push(
 // Assemblies.
 // ---------------------------------------------------------------------------
 
-/// The suite program palette placed along main corridors, roughly weighted.
-const SUITE_PROGRAMS: [SpaceProgram; 8] = [
+/// The suite program palette placed beside main corridors, roughly weighted.
+/// Large, unfinished open-office masses dominate. Small private rooms remain
+/// present only as occasional evidence that this once had an office program.
+const SUITE_PROGRAMS: [SpaceProgram; 12] = [
     SpaceProgram::OpenOffice,
     SpaceProgram::OpenOffice,
-    SpaceProgram::PrivateOffice,
+    SpaceProgram::OpenOffice,
+    SpaceProgram::OpenOffice,
+    SpaceProgram::OpenOffice,
+    SpaceProgram::ConferenceRoom,
     SpaceProgram::ConferenceRoom,
     SpaceProgram::BreakRoom,
     SpaceProgram::Storage,
     SpaceProgram::ServerRoom,
     SpaceProgram::WaitingArea,
+    SpaceProgram::PrivateOffice,
 ];
 
-fn ceiling_height_for(program: SpaceProgram) -> f32 {
+fn ceiling_height_for(program: SpaceProgram, aseed: f32) -> f32 {
     match program {
-        SpaceProgram::Atrium => 5.2,
-        SpaceProgram::ServerRoom | SpaceProgram::Mechanical => 2.6,
-        SpaceProgram::Storage | SpaceProgram::RestroomCore => 2.5,
-        _ => 2.8,
+        SpaceProgram::Atrium => 4.8 + 0.6 * aseed,
+        // Compression is a deliberate contrast, never the default ceiling.
+        SpaceProgram::ServerRoom | SpaceProgram::Mechanical => 2.6 + 0.2 * aseed,
+        SpaceProgram::Storage | SpaceProgram::RestroomCore => 3.0 + 0.3 * aseed,
+        SpaceProgram::OpenOffice | SpaceProgram::ConferenceRoom => 3.5 + 0.7 * aseed,
+        _ => 3.2 + 0.5 * aseed,
     }
 }
 
@@ -433,9 +404,8 @@ fn fixtures_for(
     out
 }
 
-/// Interior partitioning: private-office suites get sliced into rooms along
-/// their long axis; each slice is a `Space` (the voxelizer draws partition
-/// walls with doorways between adjacent slices).
+/// Interior partitioning is deliberately sparse. A private-office suite may
+/// split once, producing one long interruption rather than a cell grid.
 fn spaces_for(
     program: SpaceProgram,
     footprint: &Polygon2,
@@ -448,9 +418,9 @@ fn spaces_for(
     let (x0, z0, x1, z1) = footprint.bounds();
     let long_x = (x1 - x0) >= (z1 - z0);
     let span = if long_x { x1 - x0 } else { z1 - z0 };
-    let want = (genome.room_proportions.min_side * 0.9).max(2.8);
-    let n = ((span / want) as usize).clamp(1, 5);
-    let n = 1 + ((n - 1) as f32 * (0.5 + 0.5 * aseed)) as usize;
+    let want = genome.room_proportions.min_side.max(12.0);
+    let n = ((span / want) as usize).clamp(1, 2);
+    let n = if aseed > 0.62 { n } else { 1 };
     if n <= 1 {
         return Vec::new();
     }
@@ -486,6 +456,7 @@ fn place_suite(
     program: SpaceProgram,
     genome: &ArchitectGenome,
     aseed: f32,
+    threshold_seed: f32,
     cursor_x: f32,
     corridor_z: f32,
     corridor_half: f32,
@@ -496,8 +467,8 @@ fn place_suite(
     spines: &[CirculationSpine],
 ) -> Option<AssemblyInstance> {
     let p = &genome.room_proportions;
-    let w = snap((p.min_side + (p.max_side - p.min_side) * aseed).clamp(4.0, 20.0));
-    let d = snap((w * (1.0 - 0.5 * p.elongation)).clamp(4.0, 16.0));
+    let w = snap((p.min_side + (p.max_side - p.min_side) * aseed).clamp(12.0, 24.0));
+    let d = snap((w * (0.72 - 0.28 * p.elongation)).clamp(8.0, 18.0));
 
     let x0 = snap(cursor_x);
     let z_front = snap(if side > 0.0 {
@@ -528,14 +499,28 @@ fn place_suite(
         }
     }
 
-    // Entrance on the corridor-facing wall.
-    let front_z = if side > 0.0 { b.1 } else { b.3 };
-    let (width, lintel) = match genome.threshold_language {
-        ThresholdLanguage::DoorWithLintel => (1.2, Some(2.2)),
-        ThresholdLanguage::OpenPortal => (2.0, None),
-        ThresholdLanguage::WidePortal => (2.4, Some(2.2)),
+    // Entrance on the corridor-facing wall. The genome biases the language,
+    // but a narrow framed door is only about 8--14% of thresholds globally.
+    // Most fronts dissolve into a room through an unframed or broad portal.
+    let threshold = match genome.threshold_language {
+        ThresholdLanguage::DoorWithLintel if threshold_seed < 0.14 => {
+            ThresholdLanguage::DoorWithLintel
+        }
+        ThresholdLanguage::OpenPortal if threshold_seed < 0.08 => ThresholdLanguage::DoorWithLintel,
+        ThresholdLanguage::WidePortal if threshold_seed < 0.10 => ThresholdLanguage::DoorWithLintel,
+        ThresholdLanguage::OpenPortal if threshold_seed < 0.62 => ThresholdLanguage::OpenPortal,
+        ThresholdLanguage::WidePortal if threshold_seed < 0.50 => ThresholdLanguage::OpenPortal,
+        ThresholdLanguage::DoorWithLintel if threshold_seed < 0.50 => ThresholdLanguage::OpenPortal,
+        _ => ThresholdLanguage::WidePortal,
     };
-    let door_x = snap((b.0 + w * (0.3 + 0.4 * aseed)).clamp(b.0 + 1.2, b.2 - 1.2));
+    let front_z = if side > 0.0 { b.1 } else { b.3 };
+    let (width, lintel) = match threshold {
+        ThresholdLanguage::DoorWithLintel => (1.2, Some(2.2)),
+        ThresholdLanguage::OpenPortal => (4.8, None),
+        ThresholdLanguage::WidePortal => (3.6, Some(3.0)),
+    };
+    let edge = width * 0.5 + 0.8;
+    let door_x = snap((b.0 + w * (0.25 + 0.5 * threshold_seed)).clamp(b.0 + edge, b.2 - edge));
     let entrances = vec![Opening {
         center: Position::new(door_x, front_z),
         width,
@@ -546,7 +531,7 @@ fn place_suite(
     let ceiling = CeilingZone {
         area: footprint.clone(),
         language: genome.ceiling_language,
-        height_units: ceiling_height_for(program),
+        height_units: ceiling_height_for(program, aseed),
     };
     Some(AssemblyInstance {
         id,
@@ -588,58 +573,61 @@ pub fn generate_region_plan(
 
     let corridors = build_corridors(seed, rx, rz, &dominant, region_origin, region_size);
 
-    // --- suites along every long horizontal corridor leg -------------------
+    // --- incomplete masses beside the dominant route -----------------------
+    // Only the primary route receives masses. The secondary stubs remain
+    // mostly exposed circulation, which prevents a region from resolving
+    // into a tiled office floorplan.
     let mut assemblies: Vec<AssemblyInstance> = Vec::new();
     let mut taken: Vec<(f32, f32, f32, f32)> = Vec::new();
     let mut id = 0u32;
     let legs: Vec<(f32, f32, f32, f32)> = corridors
         .iter()
+        .filter(|s| s.spine_kind == SpaceProgram::MainCorridor)
         .flat_map(|s| {
             let w = s.width;
             s.path
                 .windows(2)
                 .filter(|seg| seg[0].z == seg[1].z)
-                .map(move |seg| {
-                    (
-                        seg[0].x.min(seg[1].x),
-                        seg[0].x.max(seg[1].x),
-                        seg[0].z,
-                        w,
-                    )
-                })
+                .map(move |seg| (seg[0].x.min(seg[1].x), seg[0].x.max(seg[1].x), seg[0].z, w))
                 .collect::<Vec<_>>()
         })
         .filter(|(a, b, _, _)| b - a >= 14.0)
         .collect();
 
     for (li, &(lx0, lx1, lz, lw)) in legs.iter().enumerate() {
-        let mut cursor = lx0 + 2.4;
+        let mut cursor = lx0 + 4.0;
         let mut side = if h(40 + li as i64) < 0.5 { 1.0 } else { -1.0 };
-        while cursor < lx1 - 8.0 {
+        while cursor < lx1 - 12.0 {
             let aseed = hash01(seed, &[0x5EA, rx, rz, id as i64]);
-            let program = SUITE_PROGRAMS[pick_index(aseed, SUITE_PROGRAMS.len())];
-            if let Some(a) = place_suite(
-                id,
-                program,
-                &dominant,
-                aseed,
-                cursor,
-                lz,
-                lw * 0.5 + PLAN_WALL_T,
-                side,
-                region_origin,
-                region_size,
-                &taken,
-                &corridors,
-            ) {
-                let b = a.footprint.bounds();
-                // Generous spacing: the gap between suites is real space,
-                // not a slit between parallel walls.
-                cursor += (b.2 - b.0) + 3.2;
-                taken.push(b);
-                assemblies.push(a);
+            let threshold_seed = hash01(seed, &[0x7A11, rx, rz, id as i64]);
+            // Leave substantial pieces of the route exposed. When a mass is
+            // placed, the next candidate begins 8--16 u beyond its end.
+            if hash01(seed, &[0x5E8, rx, rz, id as i64]) < 0.62 {
+                let program = SUITE_PROGRAMS[pick_index(aseed, SUITE_PROGRAMS.len())];
+                if let Some(a) = place_suite(
+                    id,
+                    program,
+                    &dominant,
+                    aseed,
+                    threshold_seed,
+                    cursor,
+                    lz,
+                    lw * 0.5 + PLAN_WALL_T,
+                    side,
+                    region_origin,
+                    region_size,
+                    &taken,
+                    &corridors,
+                ) {
+                    let b = a.footprint.bounds();
+                    cursor += (b.2 - b.0) + 8.0 + 8.0 * threshold_seed;
+                    taken.push(b);
+                    assemblies.push(a);
+                } else {
+                    cursor += 8.0 + 8.0 * threshold_seed;
+                }
             } else {
-                cursor += 4.0;
+                cursor += 8.0 + 8.0 * threshold_seed;
             }
             side = -side;
             id += 1;
@@ -647,7 +635,15 @@ pub fn generate_region_plan(
     }
 
     // --- corruption pass ----------------------------------------------------
-    corrupt(seed, rx, rz, &dominant, &mut assemblies, &mut taken, &corridors);
+    corrupt(
+        seed,
+        rx,
+        rz,
+        &dominant,
+        &mut assemblies,
+        &mut taken,
+        &corridors,
+    );
 
     RegionPlan {
         origin_world: region_origin,
@@ -676,8 +672,11 @@ fn corrupt(
     // 1. A suite repeats itself further down the corridor, slightly wrong.
     if h(1) < 0.6 {
         let src = pick_index(h(2), assemblies.len());
-        let shift = snap(6.0 + 10.0 * h(3));
-        let skew = snap(0.4 + 0.4 * h(4)) * if h(5) < 0.5 { 1.0 } else { -1.0 };
+        let shift = snap(12.0 + 12.0 * h(3));
+        // Keep the copied threshold flush with its source corridor. The
+        // repetition is wrong in its longitudinal position, not sealed away
+        // behind an accidental strip of wall.
+        let skew = 0.0;
         let mut dup = assemblies[src].clone();
         let translate = |poly: &mut Polygon2| {
             for v in &mut poly.vertices {
@@ -837,6 +836,82 @@ mod tests {
     }
 
     #[test]
+    fn primary_circulation_is_wide_and_secondary_routes_are_sparse() {
+        for rx in -3..=3 {
+            for rz in -3..=3 {
+                let p = plan(rx, rz);
+                let main: Vec<_> = p
+                    .corridors
+                    .iter()
+                    .filter(|s| s.spine_kind == SpaceProgram::MainCorridor)
+                    .collect();
+                let secondary: Vec<_> = p
+                    .corridors
+                    .iter()
+                    .filter(|s| s.spine_kind == SpaceProgram::SecondaryHall)
+                    .collect();
+                assert_eq!(main.len(), 1, "region ({rx},{rz}) lacks one dominant spine");
+                assert!(
+                    ((4.8 - 0.01)..=(7.2 + 0.01)).contains(&main[0].width),
+                    "main width {} outside Level 0 target in ({rx},{rz})",
+                    main[0].width
+                );
+                assert!(
+                    secondary.len() <= 2,
+                    "region ({rx},{rz}) made {} secondary routes",
+                    secondary.len()
+                );
+                for branch in secondary {
+                    assert!(
+                        (3.5..=5.1).contains(&branch.width),
+                        "secondary width {} outside target in ({rx},{rz})",
+                        branch.width
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn assemblies_are_large_and_narrow_doors_are_anomalies() {
+        let mut entrances = 0usize;
+        let mut narrow_doors = 0usize;
+        let mut broad_or_unframed = 0usize;
+        for rx in -6..=6 {
+            for rz in -6..=6 {
+                let p = plan(rx, rz);
+                for a in &p.assemblies {
+                    let b = a.footprint.bounds();
+                    assert!(
+                        ((12.0 - 0.01)..=(24.0 + 0.01)).contains(&(b.2 - b.0)),
+                        "assembly {} has {} u frontage",
+                        a.id,
+                        b.2 - b.0
+                    );
+                    for e in &a.entrances {
+                        entrances += 1;
+                        if e.width <= 1.3 {
+                            narrow_doors += 1;
+                        } else {
+                            broad_or_unframed += 1;
+                        }
+                    }
+                }
+            }
+        }
+        let narrow_ratio = narrow_doors as f32 / entrances as f32;
+        assert!(
+            (0.06..=0.16).contains(&narrow_ratio),
+            "narrow doors are {:.1}% of {entrances} openings",
+            narrow_ratio * 100.0
+        );
+        assert!(
+            broad_or_unframed * 100 >= entrances * 84,
+            "broad or unframed openings were only {broad_or_unframed}/{entrances}"
+        );
+    }
+
+    #[test]
     fn every_assembly_entrance_opens_onto_a_corridor() {
         for (rx, rz) in [(0i64, 0i64), (1, 0), (-1, 2), (3, -4)] {
             let p = plan(rx, rz);
@@ -886,7 +961,11 @@ mod tests {
         for rx in -3..3 {
             for rz in -3..3 {
                 let p = plan(rx, rz);
-                abandoned += p.assemblies.iter().filter(|a| a.corruption.abandoned).count();
+                abandoned += p
+                    .assemblies
+                    .iter()
+                    .filter(|a| a.corruption.abandoned)
+                    .count();
                 duplicated += p
                     .assemblies
                     .iter()

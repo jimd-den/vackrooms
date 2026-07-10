@@ -9,8 +9,12 @@
 use crate::application::atlas::{AtlasPool, MAX_CHUNKS, payload_rows};
 use crate::application::collision::CollisionWorld;
 use crate::application::player::{MoveIntent, Player};
-use crate::application::ports::{ChunkDraw, ChunkSourcePort, FrameParams, RendererPort};
-use crate::application::streaming::{ChunkKey, ChunkStore, LoadedChunk, StreamingPolicy, chunk_key};
+use crate::application::ports::{
+    ChunkDraw, ChunkSourcePort, FrameParams, RendererPort, SurfaceChunk,
+};
+use crate::application::streaming::{
+    ChunkKey, ChunkStore, LoadedChunk, StreamingPolicy, chunk_key,
+};
 
 /// Static configuration chosen by the composition root.
 #[derive(Debug, Clone, Copy)]
@@ -254,6 +258,7 @@ impl Engine {
         // The whole world is regenerated: drop the pool so the next stream
         // pass relayouts and re-uploads from scratch.
         self.pool = AtlasPool::new();
+        self.renderer.clear_surfaces();
         self.world.rebuild([].iter());
         self.draws.clear();
         self.push_seconds = 0.0;
@@ -335,6 +340,7 @@ impl Engine {
     /// on pool relayouts (first load, bigger chunks, level switch) or on
     /// back ends without partial-update support.
     fn stream_chunks(&mut self) {
+        let surface_renderer = self.renderer.uses_surface_meshes();
         let desired = self
             .policy
             .desired_origins(self.player.position[0], self.player.position[2]);
@@ -348,8 +354,14 @@ impl Engine {
             .filter(|k| !keep.contains(k))
             .collect();
         let mut changed = self.store.retain_keys(&keep);
-        for key in evicted {
-            self.pool.release(key);
+        if surface_renderer {
+            if !evicted.is_empty() {
+                self.renderer.remove_surfaces(&evicted);
+            }
+        } else {
+            for key in evicted {
+                self.pool.release(key);
+            }
         }
 
         let mut budget = self.config.max_loads_per_tick as u32 * FINE_LOAD_COST;
@@ -384,10 +396,7 @@ impl Engine {
         while budget >= FINE_LOAD_COST {
             let target = desired.iter().copied().find(|&(ox, oz)| {
                 self.chunk_dist2(ox, oz) <= fine_d2
-                    && self
-                        .store
-                        .get(chunk_key(ox, oz))
-                        .is_some_and(|c| c.lod > 0)
+                    && self.store.get(chunk_key(ox, oz)).is_some_and(|c| c.lod > 0)
             });
             let Some((ox, oz)) = target else { break };
             let key = chunk_key(ox, oz);
@@ -408,6 +417,43 @@ impl Engine {
         }
 
         if !changed {
+            return;
+        }
+
+        // The default path uploads only changed/replaced meshes. It keeps
+        // the SVO payload in memory for collision and exact debug queries,
+        // but avoids atlas rebasing and per-pixel traversal entirely.
+        if surface_renderer {
+            let surface_updates: Vec<SurfaceChunk<'_>> = loaded
+                .iter()
+                .filter_map(|&key| {
+                    self.store.get(key).map(|chunk| SurfaceChunk {
+                        key,
+                        origin: [chunk.origin.0, 0.0, chunk.origin.1],
+                        mesh: &chunk.payload.surface,
+                    })
+                })
+                .collect();
+            if !surface_updates.is_empty() {
+                self.renderer.upload_surfaces(&surface_updates);
+            }
+
+            self.draws.clear();
+            for chunk in self.store.iter_ordered() {
+                self.draws.push(ChunkDraw {
+                    origin: [chunk.origin.0, 0.0, chunk.origin.1],
+                    root_index: 0,
+                    world_size: chunk.payload.world_size,
+                });
+            }
+            self.draws.truncate(MAX_CHUNKS);
+            self.atlas_nodes = self
+                .store
+                .iter_ordered()
+                .map(|c| c.payload.nodes.len() / 4)
+                .sum();
+            let boxes: Vec<_> = self.store.all_collision_boxes().copied().collect();
+            self.world.rebuild(boxes.iter());
             return;
         }
 
@@ -534,6 +580,29 @@ mod tests {
         }
     }
 
+    #[derive(Default)]
+    struct SurfaceRecordingRenderer {
+        atlas_uploads: Rc<RefCell<usize>>,
+        surface_uploads: Rc<RefCell<Vec<usize>>>,
+        removed: Rc<RefCell<Vec<usize>>>,
+    }
+
+    impl RendererPort for SurfaceRecordingRenderer {
+        fn uses_surface_meshes(&self) -> bool {
+            true
+        }
+        fn upload_surfaces(&mut self, chunks: &[SurfaceChunk<'_>]) {
+            self.surface_uploads.borrow_mut().push(chunks.len());
+        }
+        fn remove_surfaces(&mut self, keys: &[crate::application::ports::SurfaceChunkKey]) {
+            self.removed.borrow_mut().push(keys.len());
+        }
+        fn upload_atlas(&mut self, _texels: &[u32]) {
+            *self.atlas_uploads.borrow_mut() += 1;
+        }
+        fn draw(&mut self, _frame: &FrameParams, _chunks: &[ChunkDraw]) {}
+    }
+
     struct FlatChunkSource;
 
     impl ChunkSourcePort for FlatChunkSource {
@@ -542,6 +611,7 @@ mod tests {
                 root: 0,
                 nodes: [1u32, 0, 0, 0].repeat(1024), // one padded row of air leaves
                 world_size: 12.8,
+                surface: crate::application::ports::SurfaceMeshPayload::empty(0),
                 collision: vec![Aabb::new([origin_x, 0.0, 0.0], [origin_x + 0.2, 3.0, 0.2])],
             }
         }
@@ -560,6 +630,7 @@ mod tests {
                 root: 0,
                 nodes: [1u32, 0, 0, 0].repeat(1024),
                 world_size: 12.8,
+                surface: crate::application::ports::SurfaceMeshPayload::empty(0),
                 collision: vec![Aabb::new([-100.0, 0.0, -100.0], [100.0, 3.0, 100.0])],
             }
         }
@@ -575,6 +646,29 @@ mod tests {
             Box::new(FlatChunkSource),
         );
         (engine, uploads, draws)
+    }
+
+    #[test]
+    fn surface_renderer_streaming_skips_svo_atlas_uploads() {
+        let renderer = SurfaceRecordingRenderer::default();
+        let atlas_uploads = renderer.atlas_uploads.clone();
+        let surface_uploads = renderer.surface_uploads.clone();
+        let mut engine = Engine::new(
+            EngineConfig::default(),
+            Box::new(renderer),
+            Box::new(FlatChunkSource),
+        );
+        engine.tick(1.0 / 60.0, &InputFrame::default());
+
+        assert_eq!(
+            *atlas_uploads.borrow(),
+            0,
+            "surface path must not build atlas uploads"
+        );
+        assert!(
+            surface_uploads.borrow().iter().sum::<usize>() > 0,
+            "newly resident chunks need incremental mesh uploads"
+        );
     }
 
     #[test]

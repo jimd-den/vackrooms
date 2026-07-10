@@ -1,14 +1,19 @@
 use crate::domain::entities::voxel_grid::{
-    VOXEL_AIR, VOXEL_CEILING, VOXEL_FLOOR, VOXEL_LIGHT, VOXEL_RED_WALL, VOXEL_WALL, VOXEL_RED_LIGHT, VoxelGrid,
+    VOXEL_AIR, VOXEL_CEILING, VOXEL_FLOOR, VOXEL_GRASS, VOXEL_LIGHT, VOXEL_RED_LIGHT,
+    VOXEL_RED_WALL, VOXEL_TREE, VOXEL_WALL, VOXEL_WATER, VoxelGrid,
 };
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VoxelType {
     Wall,
     Floor,
     Ceiling,
     Light,
     RedWall,
+    Grass,
+    Water,
+    Tree,
+    RedLight,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -21,6 +26,19 @@ pub enum FaceDirection {
     West,
 }
 
+impl FaceDirection {
+    fn occlusion_bit(self) -> u8 {
+        match self {
+            FaceDirection::East => 1,
+            FaceDirection::West => 2,
+            FaceDirection::Up => 4,
+            FaceDirection::Down => 8,
+            FaceDirection::South => 16,
+            FaceDirection::North => 32,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct MergedQuad {
     pub x: f32,
@@ -30,7 +48,54 @@ pub struct MergedQuad {
     pub h: f32,
     pub dir: FaceDirection,
     pub v_type: VoxelType,
+    /// Base material color. Lighting stays separate so renderers can shade
+    /// consistently instead of baking a different color per presentation.
     pub color: u32,
+    /// Scalar baked voxel light, 0--15.
+    pub light: u8,
+    /// Directional face occlusion bit for this exposed face (0 or 1).
+    pub ao: u8,
+}
+
+/// Occupancy lookup used by the surface extractor. Coordinates are relative
+/// to the meshed chunk; implementations may resolve a one-voxel halo from
+/// adjacent chunks or a deterministically generated border. Missing lateral
+/// neighbors must be conservative (solid), never treated as air.
+pub trait VoxelNeighborhood {
+    fn voxel(&self, x: i32, y: i32, z: i32) -> u8;
+}
+
+struct GridNeighborhood<'a> {
+    grid: &'a VoxelGrid,
+    origin: [usize; 3],
+    conservative_lateral_border: bool,
+}
+
+impl VoxelNeighborhood for GridNeighborhood<'_> {
+    fn voxel(&self, x: i32, y: i32, z: i32) -> u8 {
+        let gx = self.origin[0] as i32 + x;
+        let gy = self.origin[1] as i32 + y;
+        let gz = self.origin[2] as i32 + z;
+        if gy < 0 || gy >= self.grid.height() as i32 {
+            return VOXEL_AIR;
+        }
+        if gx < 0 || gx >= self.grid.width() as i32 || gz < 0 || gz >= self.grid.depth() as i32 {
+            return if self.conservative_lateral_border {
+                VOXEL_WALL
+            } else {
+                VOXEL_AIR
+            };
+        }
+        self.grid.get(gx as usize, gy as usize, gz as usize)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FaceKey {
+    v_type: VoxelType,
+    color: u32,
+    light: u8,
+    ao: u8,
 }
 
 pub struct VoxelMapper {
@@ -42,206 +107,208 @@ impl VoxelMapper {
         Self { voxel_scale }
     }
 
-    /// Maps the 3D VoxelGrid into a list of merged quads using Greedy Meshing.
+    /// Maps the entire grid into merged exposed quads. This compatibility
+    /// helper treats out-of-grid X/Z as air; streamed rendering should use
+    /// [`Self::map_voxel_grid_with_padding`] instead.
     pub fn map_voxel_grid(&self, grid: &VoxelGrid) -> Vec<MergedQuad> {
+        let neighborhood = GridNeighborhood {
+            grid,
+            origin: [0, 0, 0],
+            conservative_lateral_border: false,
+        };
+        self.map_voxel_region(
+            grid,
+            [0, 0, 0],
+            [grid.width(), grid.height(), grid.depth()],
+            &neighborhood,
+        )
+    }
+
+    /// Greedily meshes the interior of a grid carrying a one-voxel X/Z halo.
+    /// Faces across a chunk edge are emitted only when the halo says the
+    /// adjacent voxel is air, eliminating duplicate boundary faces and the
+    /// pop that comes from assuming an unavailable neighbor is air.
+    pub fn map_voxel_grid_with_padding(
+        &self,
+        grid: &VoxelGrid,
+        lateral_padding: usize,
+    ) -> Vec<MergedQuad> {
+        assert!(lateral_padding > 0, "surface meshing requires a voxel halo");
+        assert!(grid.width() > lateral_padding * 2 && grid.depth() > lateral_padding * 2);
+        let neighborhood = GridNeighborhood {
+            grid,
+            origin: [lateral_padding, 0, lateral_padding],
+            conservative_lateral_border: true,
+        };
+        self.map_voxel_region(
+            grid,
+            [lateral_padding, 0, lateral_padding],
+            [
+                grid.width() - lateral_padding * 2,
+                grid.height(),
+                grid.depth() - lateral_padding * 2,
+            ],
+            &neighborhood,
+        )
+    }
+
+    /// Surface extraction against a supplied occupancy neighborhood. The
+    /// dense `grid` supplies material/light/AO attributes for the interior;
+    /// `neighborhood` decides whether each candidate face is exposed.
+    pub fn map_voxel_region(
+        &self,
+        grid: &VoxelGrid,
+        interior_origin: [usize; 3],
+        dimensions: [usize; 3],
+        neighborhood: &dyn VoxelNeighborhood,
+    ) -> Vec<MergedQuad> {
         let mut quads = Vec::new();
         let scale = self.voxel_scale;
+        let [w_dim, h_dim, d_dim] = dimensions;
 
-        let apply_light = |base_color: u32, light_level: u8| -> u32 {
-            let normalized = light_level as f32 / 15.0;
-            let mult = 0.25 + (normalized * normalized) * 0.75;
-            let r = ((base_color >> 16) & 0xFF) as f32 * mult;
-            let g = ((base_color >> 8) & 0xFF) as f32 * mult;
-            let b = (base_color & 0xFF) as f32 * mult;
-            ((r as u32) << 16) | ((g as u32) << 8) | (b as u32)
+        let attrs = |x: usize, y: usize, z: usize, v: u8, dir: FaceDirection| {
+            self.face_key(
+                grid,
+                interior_origin[0] + x,
+                interior_origin[1] + y,
+                interior_origin[2] + z,
+                v,
+                dir,
+            )
+        };
+        let mut append = |x: f32, y: f32, z: f32, w: f32, h: f32, dir, key: FaceKey| {
+            quads.push(MergedQuad {
+                x,
+                y,
+                z,
+                w,
+                h,
+                dir,
+                v_type: key.v_type,
+                color: key.color,
+                light: key.light,
+                ao: key.ao,
+            });
         };
 
-        let get_voxel_type = |v_id: u8| -> VoxelType {
-            match v_id {
-                VOXEL_WALL => VoxelType::Wall,
-                VOXEL_FLOOR => VoxelType::Floor,
-                VOXEL_CEILING => VoxelType::Ceiling,
-                VOXEL_LIGHT | VOXEL_RED_LIGHT => VoxelType::Light,
-                VOXEL_RED_WALL => VoxelType::RedWall,
-                _ => VoxelType::Wall,
-            }
-        };
-
-        let get_voxel_color = |x: usize, y: usize, z: usize| -> u32 {
-            let v_id = grid.get(x, y, z);
-            let ll = grid.get_light(x, y, z);
-            let base_color = match v_id {
-                VOXEL_WALL => 0xddcc66,
-                VOXEL_FLOOR => 0x998811,
-                VOXEL_CEILING => 0xcccccc,
-                VOXEL_LIGHT => 0xffffff,
-                VOXEL_RED_LIGHT => 0xff4444,
-                VOXEL_RED_WALL => 0x880000,
-                _ => 0x000000,
-            };
-
-            if v_id == VOXEL_LIGHT || v_id == VOXEL_RED_LIGHT {
-                base_color
-            } else {
-                apply_light(base_color, ll)
-            }
-        };
-
-        let w_dim = grid.width();
-        let h_dim = grid.height();
-        let d_dim = grid.depth();
-
-        // 1. UP FACES (+Y)
+        // +Y / -Y faces: 2D slices in X/Z.
         for y in 0..h_dim {
-            let get_face = |x: usize, z: usize| -> Option<(VoxelType, u32)> {
-                let v = grid.get(x, y, z);
-                if v != VOXEL_AIR && (y == h_dim - 1 || grid.get(x, y + 1, z) == VOXEL_AIR) {
-                    Some((get_voxel_type(v), get_voxel_color(x, y, z)))
-                } else {
-                    None
+            for (dir, dy) in [(FaceDirection::Up, 1), (FaceDirection::Down, -1)] {
+                let get_face = |x: usize, z: usize| -> Option<FaceKey> {
+                    let v = neighborhood.voxel(x as i32, y as i32, z as i32);
+                    (v != VOXEL_AIR
+                        && neighborhood.voxel(x as i32, y as i32 + dy, z as i32) == VOXEL_AIR)
+                        .then(|| attrs(x, y, z, v, dir))
+                };
+                for (u, v, qw, qh, key) in self.greedy_mesh_2d(w_dim, d_dim, &get_face) {
+                    append(
+                        u as f32 * scale,
+                        y as f32 * scale,
+                        v as f32 * scale,
+                        qw as f32 * scale,
+                        qh as f32 * scale,
+                        dir,
+                        key,
+                    );
                 }
-            };
-            let merged = self.greedy_mesh_2d(w_dim, d_dim, &get_face);
-            for (u, v, qw, qh, vt, col) in merged {
-                quads.push(MergedQuad {
-                    x: u as f32 * scale,
-                    y: y as f32 * scale,
-                    z: v as f32 * scale,
-                    w: qw as f32 * scale,
-                    h: qh as f32 * scale,
-                    dir: FaceDirection::Up,
-                    v_type: vt,
-                    color: col,
-                });
             }
         }
 
-        // 2. DOWN FACES (-Y)
-        for y in 0..h_dim {
-            let get_face = |x: usize, z: usize| -> Option<(VoxelType, u32)> {
-                let v = grid.get(x, y, z);
-                if v != VOXEL_AIR && (y == 0 || grid.get(x, y - 1, z) == VOXEL_AIR) {
-                    Some((get_voxel_type(v), get_voxel_color(x, y, z)))
-                } else {
-                    None
-                }
-            };
-            let merged = self.greedy_mesh_2d(w_dim, d_dim, &get_face);
-            for (u, v, qw, qh, vt, col) in merged {
-                quads.push(MergedQuad {
-                    x: u as f32 * scale,
-                    y: y as f32 * scale,
-                    z: v as f32 * scale,
-                    w: qw as f32 * scale,
-                    h: qh as f32 * scale,
-                    dir: FaceDirection::Down,
-                    v_type: vt,
-                    color: col,
-                });
-            }
-        }
-
-        // 3. NORTH FACES (-Z)
+        // -Z / +Z faces: 2D slices in X/Y.
         for z in 0..d_dim {
-            let get_face = |x: usize, y: usize| -> Option<(VoxelType, u32)> {
-                let v = grid.get(x, y, z);
-                if v != VOXEL_AIR && (z == 0 || grid.get(x, y, z - 1) == VOXEL_AIR) {
-                    Some((get_voxel_type(v), get_voxel_color(x, y, z)))
-                } else {
-                    None
+            for (dir, dz) in [(FaceDirection::North, -1), (FaceDirection::South, 1)] {
+                let get_face = |x: usize, y: usize| -> Option<FaceKey> {
+                    let v = neighborhood.voxel(x as i32, y as i32, z as i32);
+                    (v != VOXEL_AIR
+                        && neighborhood.voxel(x as i32, y as i32, z as i32 + dz) == VOXEL_AIR)
+                        .then(|| attrs(x, y, z, v, dir))
+                };
+                for (u, v, qw, qh, key) in self.greedy_mesh_2d(w_dim, h_dim, &get_face) {
+                    append(
+                        u as f32 * scale,
+                        v as f32 * scale,
+                        z as f32 * scale,
+                        qw as f32 * scale,
+                        qh as f32 * scale,
+                        dir,
+                        key,
+                    );
                 }
-            };
-            let merged = self.greedy_mesh_2d(w_dim, h_dim, &get_face);
-            for (u, v, qw, qh, vt, col) in merged {
-                quads.push(MergedQuad {
-                    x: u as f32 * scale,
-                    y: v as f32 * scale,
-                    z: z as f32 * scale,
-                    w: qw as f32 * scale,
-                    h: qh as f32 * scale,
-                    dir: FaceDirection::North,
-                    v_type: vt,
-                    color: col,
-                });
             }
         }
 
-        // 4. SOUTH FACES (+Z)
-        for z in 0..d_dim {
-            let get_face = |x: usize, y: usize| -> Option<(VoxelType, u32)> {
-                let v = grid.get(x, y, z);
-                if v != VOXEL_AIR && (z == d_dim - 1 || grid.get(x, y, z + 1) == VOXEL_AIR) {
-                    Some((get_voxel_type(v), get_voxel_color(x, y, z)))
-                } else {
-                    None
-                }
-            };
-            let merged = self.greedy_mesh_2d(w_dim, h_dim, &get_face);
-            for (u, v, qw, qh, vt, col) in merged {
-                quads.push(MergedQuad {
-                    x: u as f32 * scale,
-                    y: v as f32 * scale,
-                    z: z as f32 * scale,
-                    w: qw as f32 * scale,
-                    h: qh as f32 * scale,
-                    dir: FaceDirection::South,
-                    v_type: vt,
-                    color: col,
-                });
-            }
-        }
-
-        // 5. EAST FACES (+X)
+        // +X / -X faces: 2D slices in Z/Y.
         for x in 0..w_dim {
-            let get_face = |z: usize, y: usize| -> Option<(VoxelType, u32)> {
-                let v = grid.get(x, y, z);
-                if v != VOXEL_AIR && (x == w_dim - 1 || grid.get(x + 1, y, z) == VOXEL_AIR) {
-                    Some((get_voxel_type(v), get_voxel_color(x, y, z)))
-                } else {
-                    None
+            for (dir, dx) in [(FaceDirection::East, 1), (FaceDirection::West, -1)] {
+                let get_face = |z: usize, y: usize| -> Option<FaceKey> {
+                    let v = neighborhood.voxel(x as i32, y as i32, z as i32);
+                    (v != VOXEL_AIR
+                        && neighborhood.voxel(x as i32 + dx, y as i32, z as i32) == VOXEL_AIR)
+                        .then(|| attrs(x, y, z, v, dir))
+                };
+                for (u, v, qw, qh, key) in self.greedy_mesh_2d(d_dim, h_dim, &get_face) {
+                    append(
+                        x as f32 * scale,
+                        v as f32 * scale,
+                        u as f32 * scale,
+                        qw as f32 * scale,
+                        qh as f32 * scale,
+                        dir,
+                        key,
+                    );
                 }
-            };
-            let merged = self.greedy_mesh_2d(d_dim, h_dim, &get_face);
-            for (u, v, qw, qh, vt, col) in merged {
-                quads.push(MergedQuad {
-                    x: x as f32 * scale,
-                    y: v as f32 * scale,
-                    z: u as f32 * scale,
-                    w: qw as f32 * scale,
-                    h: qh as f32 * scale,
-                    dir: FaceDirection::East,
-                    v_type: vt,
-                    color: col,
-                });
-            }
-        }
-
-        // 6. WEST FACES (-X)
-        for x in 0..w_dim {
-            let get_face = |z: usize, y: usize| -> Option<(VoxelType, u32)> {
-                let v = grid.get(x, y, z);
-                if v != VOXEL_AIR && (x == 0 || grid.get(x - 1, y, z) == VOXEL_AIR) {
-                    Some((get_voxel_type(v), get_voxel_color(x, y, z)))
-                } else {
-                    None
-                }
-            };
-            let merged = self.greedy_mesh_2d(d_dim, h_dim, &get_face);
-            for (u, v, qw, qh, vt, col) in merged {
-                quads.push(MergedQuad {
-                    x: x as f32 * scale,
-                    y: v as f32 * scale,
-                    z: u as f32 * scale,
-                    w: qw as f32 * scale,
-                    h: qh as f32 * scale,
-                    dir: FaceDirection::West,
-                    v_type: vt,
-                    color: col,
-                });
             }
         }
 
         quads
+    }
+
+    fn face_key(
+        &self,
+        grid: &VoxelGrid,
+        x: usize,
+        y: usize,
+        z: usize,
+        voxel: u8,
+        dir: FaceDirection,
+    ) -> FaceKey {
+        let ao = u8::from(grid.get_face_occlusion(x, y, z) & dir.occlusion_bit() != 0);
+        FaceKey {
+            v_type: Self::voxel_type(voxel),
+            color: Self::material_color(voxel),
+            light: grid.get_light(x, y, z),
+            ao,
+        }
+    }
+
+    fn voxel_type(voxel: u8) -> VoxelType {
+        match voxel {
+            VOXEL_WALL => VoxelType::Wall,
+            VOXEL_FLOOR => VoxelType::Floor,
+            VOXEL_CEILING => VoxelType::Ceiling,
+            VOXEL_LIGHT => VoxelType::Light,
+            VOXEL_RED_LIGHT => VoxelType::RedLight,
+            VOXEL_RED_WALL => VoxelType::RedWall,
+            VOXEL_GRASS => VoxelType::Grass,
+            VOXEL_WATER => VoxelType::Water,
+            VOXEL_TREE => VoxelType::Tree,
+            _ => VoxelType::Wall,
+        }
+    }
+
+    fn material_color(voxel: u8) -> u32 {
+        match voxel {
+            VOXEL_WALL => 0xDDCC66,
+            VOXEL_FLOOR => 0x998811,
+            VOXEL_CEILING => 0xCCCCCC,
+            VOXEL_LIGHT => 0xFFF8D6,
+            VOXEL_RED_LIGHT => 0xFF4433,
+            VOXEL_RED_WALL => 0x880000,
+            VOXEL_GRASS => 0x4F9A3D,
+            VOXEL_WATER => 0x3A6FB8,
+            VOXEL_TREE => 0x6B4A2F,
+            _ => 0x000000,
+        }
     }
 
     /// Helper that performs 2D greedy meshing on a slice.
@@ -249,8 +316,8 @@ impl VoxelMapper {
         &self,
         w_slice: usize,
         h_slice: usize,
-        get_face: &dyn Fn(usize, usize) -> Option<(VoxelType, u32)>,
-    ) -> Vec<(usize, usize, usize, usize, VoxelType, u32)> {
+        get_face: &dyn Fn(usize, usize) -> Option<FaceKey>,
+    ) -> Vec<(usize, usize, usize, usize, FaceKey)> {
         let mut visited = vec![vec![false; h_slice]; w_slice];
         let mut quads = Vec::new();
 
@@ -260,15 +327,15 @@ impl VoxelMapper {
                     continue;
                 }
 
-                if let Some((v_type, color)) = get_face(u, v) {
+                if let Some(key) = get_face(u, v) {
                     // Find max width along u
                     let mut quad_w = 1;
                     while u + quad_w < w_slice {
                         if visited[u + quad_w][v] {
                             break;
                         }
-                        if let Some((next_type, next_color)) = get_face(u + quad_w, v) {
-                            if next_type == v_type && next_color == color {
+                        if let Some(next) = get_face(u + quad_w, v) {
+                            if next == key {
                                 quad_w += 1;
                                 continue;
                             }
@@ -283,8 +350,8 @@ impl VoxelMapper {
                             if visited[u + du][v + quad_h] {
                                 break 'expand_h;
                             }
-                            if let Some((next_type, next_color)) = get_face(u + du, v + quad_h) {
-                                if next_type != v_type || next_color != color {
+                            if let Some(next) = get_face(u + du, v + quad_h) {
+                                if next != key {
                                     break 'expand_h;
                                 }
                             } else {
@@ -301,7 +368,7 @@ impl VoxelMapper {
                         }
                     }
 
-                    quads.push((u, v, quad_w, quad_h, v_type, color));
+                    quads.push((u, v, quad_w, quad_h, key));
                 }
             }
         }
@@ -348,5 +415,38 @@ mod tests {
         assert_eq!(up_quads.len(), 1);
         assert_eq!(up_quads[0].w, 4.0);
         assert_eq!(up_quads[0].h, 1.0);
+    }
+
+    #[test]
+    fn padded_mesher_does_not_emit_face_against_solid_halo() {
+        // X/Z padding is one cell. The rightmost interior voxel touches a
+        // solid halo voxel, so its +X face must not be generated.
+        let mut grid = VoxelGrid::new(4, 1, 3);
+        grid.set(2, 0, 1, VOXEL_WALL); // interior x = 1
+        grid.set(3, 0, 1, VOXEL_WALL); // +X halo
+
+        let mapper = VoxelMapper::new(1.0);
+        let quads = mapper.map_voxel_grid_with_padding(&grid, 1);
+        assert!(
+            !quads.iter().any(|q| q.dir == FaceDirection::East),
+            "solid neighbor halo must suppress the boundary face"
+        );
+    }
+
+    #[test]
+    fn greedy_merge_respects_baked_light_and_ao() {
+        let mut grid = VoxelGrid::new(2, 1, 1);
+        grid.set(0, 0, 0, VOXEL_WALL);
+        grid.set(1, 0, 0, VOXEL_WALL);
+        grid.set_light(0, 0, 0, 5);
+        grid.set_light(1, 0, 0, 6);
+
+        let mapper = VoxelMapper::new(1.0);
+        let up: Vec<_> = mapper
+            .map_voxel_grid(&grid)
+            .into_iter()
+            .filter(|q| q.dir == FaceDirection::Up)
+            .collect();
+        assert_eq!(up.len(), 2, "different baked light must split a quad");
     }
 }

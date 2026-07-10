@@ -153,8 +153,7 @@ impl SparseVoxelOctree {
                 light_rgb,
                 face_occlusion,
             } => {
-                if voxel_type == v_type && color == col && light_rgb == ll && face_occlusion == fo
-                {
+                if voxel_type == v_type && color == col && light_rgb == ll && face_occlusion == fo {
                     return;
                 }
 

@@ -481,3 +481,112 @@ void main() {
     }
 }
 "#;
+
+/// Indexed-surface shaders for the default renderer. They intentionally use
+/// only ordinary WebGL2 vertex/index buffers: raster depth testing replaces
+/// the fullscreen SVO traversal while the SVO remains available for collision
+/// and debug/reference queries.
+pub const SURFACE_VERTEX_SHADER: &str = r#"#version 300 es
+precision highp float;
+
+in vec3 aPosition;
+in float aNormalAxis;
+in float aMaterial;
+in float aLight;
+in float aAo;
+
+uniform mat4 uProjection;
+uniform mat4 uView;
+uniform vec3 uChunkOrigin;
+
+out vec3 vWorldPosition;
+out vec3 vNormal;
+flat out float vMaterial;
+flat out float vLight;
+flat out float vAo;
+
+vec3 normalForAxis(float axis) {
+    if (axis < 0.5) return vec3(0.0, 1.0, 0.0);
+    if (axis < 1.5) return vec3(0.0, -1.0, 0.0);
+    if (axis < 2.5) return vec3(0.0, 0.0, -1.0);
+    if (axis < 3.5) return vec3(0.0, 0.0, 1.0);
+    if (axis < 4.5) return vec3(1.0, 0.0, 0.0);
+    return vec3(-1.0, 0.0, 0.0);
+}
+
+void main() {
+    vec3 world = uChunkOrigin + aPosition * (1.0 / 1024.0);
+    vWorldPosition = world;
+    vNormal = normalForAxis(aNormalAxis);
+    vMaterial = aMaterial;
+    vLight = aLight;
+    vAo = aAo;
+    gl_Position = uProjection * uView * vec4(world, 1.0);
+}
+"#;
+
+pub const SURFACE_FRAGMENT_SHADER: &str = r#"#version 300 es
+precision highp float;
+
+in vec3 vWorldPosition;
+in vec3 vNormal;
+flat in float vMaterial;
+flat in float vLight;
+flat in float vAo;
+
+uniform vec3 uCameraPosition;
+uniform int uFlashlightEnabled;
+
+out vec4 fragColor;
+
+vec3 materialColor(float material) {
+    if (material < 1.5) return vec3(0.87, 0.80, 0.40); // wall
+    if (material < 2.5) return vec3(0.60, 0.53, 0.07); // floor
+    if (material < 3.5) return vec3(0.80, 0.78, 0.67); // ceiling
+    if (material < 4.5) return vec3(1.00, 0.97, 0.78); // fluorescent
+    if (material < 5.5) return vec3(0.53, 0.00, 0.00); // red wall
+    if (material < 6.5) return vec3(0.31, 0.60, 0.24); // grass
+    if (material < 7.5) return vec3(0.18, 0.42, 0.72); // water
+    if (material < 8.5) return vec3(0.42, 0.29, 0.18); // tree
+    return vec3(1.0, 0.16, 0.10);                      // red light
+}
+
+bool emissive(float material) {
+    return abs(material - 4.0) < 0.1 || abs(material - 9.0) < 0.1;
+}
+
+void main() {
+    vec3 albedo = materialColor(vMaterial);
+    vec3 N = normalize(vNormal);
+    vec3 toCamera = uCameraPosition - vWorldPosition;
+    float distanceToCamera = length(toCamera);
+    vec3 V = toCamera / max(distanceToCamera, 0.001);
+
+    float baked = clamp(vLight / 15.0, 0.0, 1.0);
+    float faceResponse = N.y > 0.5 ? 1.0 : (N.y < -0.5 ? 0.74 : 0.86);
+    float ao = mix(1.0, 0.58, clamp(vAo, 0.0, 1.0));
+    vec3 indirect = vec3(0.09, 0.075, 0.035)
+        + vec3(1.0, 0.95, 0.72) * (0.08 + 0.92 * baked);
+
+    float flashlight = 0.0;
+    if (uFlashlightEnabled == 1) {
+        // The flashlight follows the view sufficiently closely for a cheap
+        // stabilizing fill light; no shadow map or extra geometry pass.
+        float facing = max(dot(N, V), 0.0);
+        flashlight = facing * facing * (1.0 - smoothstep(2.0, 24.0, distanceToCamera)) * 1.35;
+    }
+
+    vec3 color;
+    if (emissive(vMaterial)) {
+        color = albedo * (1.7 + 0.35 * baked);
+    } else {
+        color = albedo * (indirect * faceResponse * ao + vec3(flashlight));
+    }
+
+    float fog = exp(-distanceToCamera * 0.040);
+    color = mix(vec3(0.065, 0.055, 0.025), color, fog);
+    color = color / (color + vec3(1.0));
+    color = pow(color, vec3(1.0 / 2.2));
+    fragColor = vec4(color, 1.0);
+}
+"#;

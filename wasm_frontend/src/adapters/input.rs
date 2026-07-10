@@ -28,7 +28,7 @@ impl InputCollector {
     pub fn key_event(&mut self, code: &str, pressed: bool) {
         #[cfg(target_arch = "wasm32")]
         let doom = crate::DOOM_CONTROLS.load(std::sync::atomic::Ordering::Relaxed);
-        
+
         #[cfg(not(target_arch = "wasm32"))]
         let doom = false;
 

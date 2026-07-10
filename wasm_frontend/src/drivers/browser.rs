@@ -22,9 +22,12 @@ use crate::adapters::input::InputCollector;
 use crate::adapters::local_chunk_source::LocalChunkSource;
 use crate::adapters::query_config::parse_generation_params;
 use crate::application::engine::{Engine, EngineConfig};
-use crate::application::ports::{ChunkDraw, FrameParams, RendererPort};
+use crate::application::ports::{
+    ChunkDraw, FrameParams, RendererPort, SurfaceChunk, SurfaceChunkKey,
+};
 use crate::drivers::console_telemetry::CONSOLE_TELEMETRY;
 use crate::drivers::cpu_canvas::CpuCanvasRenderer;
+use crate::drivers::surface_webgl::SurfaceRenderer;
 use crate::drivers::webgl::WebGl2Renderer;
 
 /// World seed shared with the native server so both render the same world.
@@ -38,18 +41,20 @@ const HUD_INTERVAL: u32 = 30;
 /// Minimap pixels per world unit.
 const MINIMAP_SCALE: f64 = 12.0;
 
-/// The two available renderer back ends. GPU raymarching is the default;
-/// the CPU microvoxel splatter is selected by `?renderer=cpu` or used as an
-/// automatic fallback when WebGL2 is unavailable.
+/// The default renderer is indexed greedy surfaces. The old SVO raymarcher
+/// remains available only as `?renderer=raymarch` for visual/reference
+/// debugging; `?renderer=cpu` chooses the software fallback.
 enum DriverRenderer {
-    Gpu(WebGl2Renderer),
+    Surface(SurfaceRenderer),
+    Raymarch(WebGl2Renderer),
     Cpu(CpuCanvasRenderer),
 }
 
 impl DriverRenderer {
     fn resize(&mut self, width: u32, height: u32) {
         match self {
-            DriverRenderer::Gpu(r) => r.resize(width, height),
+            DriverRenderer::Surface(r) => r.resize(width, height),
+            DriverRenderer::Raymarch(r) => r.resize(width, height),
             DriverRenderer::Cpu(r) => r.resize(width, height),
         }
     }
@@ -60,29 +65,56 @@ impl DriverRenderer {
     /// lets CSS upscale with `image-rendering: pixelated`.
     fn resolution_factor(&self) -> f64 {
         match self {
-            DriverRenderer::Gpu(_) => 1.0,
+            DriverRenderer::Surface(_) | DriverRenderer::Raymarch(_) => 1.0,
             DriverRenderer::Cpu(_) => 0.25,
         }
     }
 
     fn label(&self) -> &'static str {
         match self {
-            DriverRenderer::Gpu(_) => "GPU raymarch",
+            DriverRenderer::Surface(_) => "GPU surfaces",
+            DriverRenderer::Raymarch(_) => "GPU raymarch (debug)",
             DriverRenderer::Cpu(_) => "CPU splat",
         }
     }
 }
 
 impl RendererPort for DriverRenderer {
+    fn uses_surface_meshes(&self) -> bool {
+        matches!(self, DriverRenderer::Surface(_))
+    }
+    fn upload_surfaces(&mut self, chunks: &[SurfaceChunk<'_>]) {
+        if let DriverRenderer::Surface(r) = self {
+            r.upload_surfaces(chunks);
+        }
+    }
+    fn remove_surfaces(&mut self, keys: &[SurfaceChunkKey]) {
+        if let DriverRenderer::Surface(r) = self {
+            r.remove_surfaces(keys);
+        }
+    }
+    fn clear_surfaces(&mut self) {
+        if let DriverRenderer::Surface(r) = self {
+            r.clear_surfaces();
+        }
+    }
+    fn gpu_frame_ms(&self) -> Option<f32> {
+        match self {
+            DriverRenderer::Surface(r) => r.gpu_frame_ms(),
+            DriverRenderer::Raymarch(_) | DriverRenderer::Cpu(_) => None,
+        }
+    }
     fn upload_atlas(&mut self, texels: &[u32]) {
         match self {
-            DriverRenderer::Gpu(r) => r.upload_atlas(texels),
+            DriverRenderer::Surface(r) => r.upload_atlas(texels),
+            DriverRenderer::Raymarch(r) => r.upload_atlas(texels),
             DriverRenderer::Cpu(r) => r.upload_atlas(texels),
         }
     }
     fn upload_atlas_rows(&mut self, first_row: u32, texels: &[u32]) -> bool {
         match self {
-            DriverRenderer::Gpu(r) => r.upload_atlas_rows(first_row, texels),
+            DriverRenderer::Surface(_) => false,
+            DriverRenderer::Raymarch(r) => r.upload_atlas_rows(first_row, texels),
             // The CPU splatter rebuilds its mip pyramid from the whole
             // atlas, so it only supports full uploads.
             DriverRenderer::Cpu(_) => false,
@@ -90,7 +122,8 @@ impl RendererPort for DriverRenderer {
     }
     fn draw(&mut self, frame: &FrameParams, chunks: &[ChunkDraw]) {
         match self {
-            DriverRenderer::Gpu(r) => r.draw(frame, chunks),
+            DriverRenderer::Surface(r) => r.draw(frame, chunks),
+            DriverRenderer::Raymarch(r) => r.draw(frame, chunks),
             DriverRenderer::Cpu(r) => r.draw(frame, chunks),
         }
     }
@@ -102,6 +135,21 @@ impl RendererPort for DriverRenderer {
 struct SharedRenderer(Rc<RefCell<DriverRenderer>>);
 
 impl RendererPort for SharedRenderer {
+    fn uses_surface_meshes(&self) -> bool {
+        self.0.borrow().uses_surface_meshes()
+    }
+    fn upload_surfaces(&mut self, chunks: &[SurfaceChunk<'_>]) {
+        self.0.borrow_mut().upload_surfaces(chunks);
+    }
+    fn remove_surfaces(&mut self, keys: &[SurfaceChunkKey]) {
+        self.0.borrow_mut().remove_surfaces(keys);
+    }
+    fn clear_surfaces(&mut self) {
+        self.0.borrow_mut().clear_surfaces();
+    }
+    fn gpu_frame_ms(&self) -> Option<f32> {
+        self.0.borrow().gpu_frame_ms()
+    }
     fn upload_atlas(&mut self, texels: &[u32]) {
         self.0.borrow_mut().upload_atlas(texels);
     }
@@ -127,17 +175,22 @@ struct TouchState {
     look_last: (f64, f64),
 }
 
-/// Renderer selection: explicit `?renderer=cpu`, otherwise WebGL2 with a
-/// logged fallback to the CPU splatter if context creation fails.
+/// Renderer selection: surfaces by default, `?renderer=raymarch` for the
+/// retained SVO debug path, `?renderer=cpu` for software fallback.
 fn create_renderer(canvas: &HtmlCanvasElement, query: &str) -> Result<DriverRenderer, JsValue> {
     if query.contains("renderer=cpu") {
         return Ok(DriverRenderer::Cpu(CpuCanvasRenderer::new(canvas)?));
     }
-    match WebGl2Renderer::new(canvas) {
-        Ok(gpu) => Ok(DriverRenderer::Gpu(gpu)),
+    if query.contains("renderer=raymarch") {
+        return WebGl2Renderer::new(canvas).map(DriverRenderer::Raymarch);
+    }
+    match SurfaceRenderer::new(canvas) {
+        Ok(gpu) => Ok(DriverRenderer::Surface(gpu)),
         Err(err) => {
             web_sys::console::warn_2(
-                &JsValue::from_str("WebGL2 unavailable, falling back to CPU splatting:"),
+                &JsValue::from_str(
+                    "WebGL2 surface renderer unavailable, falling back to CPU splatting:",
+                ),
                 &err,
             );
             Ok(DriverRenderer::Cpu(CpuCanvasRenderer::new(canvas)?))
@@ -473,6 +526,7 @@ fn run_frame_loop(
     let hud_chunks: HtmlElement = element(window.document().as_ref().unwrap(), "hud-chunks")?;
     let hud_nodes: HtmlElement = element(window.document().as_ref().unwrap(), "hud-nodes")?;
     let hud_scale: HtmlElement = element(window.document().as_ref().unwrap(), "hud-scale")?;
+    let hud_gpu: HtmlElement = element(window.document().as_ref().unwrap(), "hud-gpu")?;
 
     let last_time = Rc::new(Cell::new(0.0f64));
     let frame_count = Rc::new(Cell::new(0u32));
@@ -496,9 +550,8 @@ fn run_frame_loop(
         // window * governor scale * renderer base factor. A non-zero
         // user override (settings menu) replaces the governor scale.
         {
-            let forced = f32::from_bits(
-                crate::RENDER_SCALE_BITS.load(std::sync::atomic::Ordering::Relaxed),
-            );
+            let forced =
+                f32::from_bits(crate::RENDER_SCALE_BITS.load(std::sync::atomic::Ordering::Relaxed));
             let governor_scale = if forced > 0.0 {
                 forced as f64
             } else {
@@ -559,6 +612,11 @@ fn run_frame_loop(
             )));
             hud_nodes.set_text_content(Some(&stats.atlas_nodes.to_string()));
             hud_scale.set_text_content(Some(&format!("{:.0}%", stats.resolution_scale * 100.0)));
+            let gpu = renderer.borrow().gpu_frame_ms();
+            hud_gpu.set_text_content(Some(
+                &gpu.map(|ms| format!("{ms:.1} ms"))
+                    .unwrap_or_else(|| "n/a".to_string()),
+            ));
         }
 
         // Schedule next frame.

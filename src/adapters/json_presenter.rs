@@ -24,6 +24,10 @@ impl JsonPresenter {
                 VoxelType::Ceiling => "\"ceiling\"",
                 VoxelType::Light => "\"light\"",
                 VoxelType::RedWall => "\"redwall\"",
+                VoxelType::Grass => "\"grass\"",
+                VoxelType::Water => "\"water\"",
+                VoxelType::Tree => "\"tree\"",
+                VoxelType::RedLight => "\"redlight\"",
             };
 
             let obj = format!(
@@ -57,6 +61,8 @@ mod tests {
             dir: FaceDirection::Up,
             v_type: VoxelType::Wall,
             color: 1441813,
+            light: 0,
+            ao: 0,
         }];
 
         let json = JsonPresenter::render_voxels(&quads);

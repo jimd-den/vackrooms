@@ -163,6 +163,7 @@ mod tests {
             root: 0,
             nodes: vec![],
             world_size: 10.0,
+            surface: crate::application::ports::SurfaceMeshPayload::empty(0),
             collision: vec![],
         };
         store.insert(

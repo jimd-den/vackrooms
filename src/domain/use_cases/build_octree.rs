@@ -1,7 +1,7 @@
 use crate::domain::entities::sparse_voxel_octree::{SparseVoxelOctree, SvoNode};
 use crate::domain::entities::voxel_grid::{
-    VOXEL_AIR, VOXEL_CEILING, VOXEL_FLOOR, VOXEL_GRASS, VOXEL_LIGHT, VOXEL_RED_WALL, VOXEL_TREE,
-    VOXEL_WALL, VOXEL_WATER, VOXEL_RED_LIGHT, VoxelGrid,
+    VOXEL_AIR, VOXEL_CEILING, VOXEL_FLOOR, VOXEL_GRASS, VOXEL_LIGHT, VOXEL_RED_LIGHT,
+    VOXEL_RED_WALL, VOXEL_TREE, VOXEL_WALL, VOXEL_WATER, VoxelGrid,
 };
 
 /// Use Case to convert a dense VoxelGrid into a collapsed Sparse Voxel Octree.

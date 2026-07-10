@@ -24,8 +24,8 @@ pub enum CirculationStyle {
     StraightSpine,
     /// A main corridor that bends at interior waypoints.
     MeanderingSpine,
-    /// A rectangular ring with portal connectors.
-    LoopingRing,
+    /// A primary spine with two short, disconnected-looking branches.
+    PairedBranches,
     /// A spine plus stub branches that dead-end (unease by design).
     TreeWithCulDeSacs,
 }

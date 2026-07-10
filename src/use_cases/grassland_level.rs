@@ -49,8 +49,8 @@ impl LevelGenerator for GrasslandLevel {
         noise: &dyn NoiseProvider,
     ) -> VoxelGrid {
         let s = config.voxel_scale;
-        let width = (config.chunk_size / s) as usize;
-        let depth = (config.chunk_size / s) as usize;
+        let width = (config.chunk_size / s).round() as usize;
+        let depth = (config.chunk_size / s).round() as usize;
         let height = (GRID_HEIGHT_UNITS / s) as usize;
         let mut grid = VoxelGrid::new(width, height, depth);
         let sky_y = height - 1;
