@@ -95,8 +95,8 @@ architecture cop.
 |---|---|---|
 | `NoiseProvider` | `src/use_cases/ports.rs` | `SimpleNoiseProvider` |
 | `TelemetryPort` | `src/use_cases/ports.rs` | `StdTelemetry` (native stdout), `ConsoleTelemetry` (browser console), `NullTelemetry` (tests) |
-| `RendererPort` | `wasm_frontend/application/ports.rs` | `SurfaceRenderer` (default), `SplatRenderer`, `WebGl2Renderer` (raymarch), `CpuCanvasRenderer`, recording fakes (tests) |
-| `ChunkSourcePort` | `wasm_frontend/application/ports.rs` | `LocalChunkSource` (synchronous, in-wasm generation), `WorkerChunkSource` (pooled Web Worker generation, default); an HTTP-fetching implementation would slot in without touching the engine |
+| `RendererPort` | `wasm_frontend/src/application/ports.rs` | `SurfaceRenderer` (default), `SplatRenderer`, `WebGl2Renderer` (raymarch), `CpuCanvasRenderer`, recording fakes (tests) |
+| `ChunkSourcePort` | `wasm_frontend/src/application/ports.rs` | `LocalChunkSource` (synchronous, in-wasm generation), `WorkerChunkSource` (pooled Web Worker generation, default); an HTTP-fetching implementation would slot in without touching the engine |
 
 ## Data flow: from noise to pixel
 
