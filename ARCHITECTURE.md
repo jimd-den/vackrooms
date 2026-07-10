@@ -124,6 +124,35 @@ The same layout is documented at its source of truth,
 `src/adapters/octree_gpu_serializer.rs`, and decoded in
 `wasm_frontend/src/drivers/shaders.rs` (`decodeNode`).
 
+## Level 0: architecture first
+
+Level 0 no longer decorates a random maze — it *plans* buildings and then
+voxelizes them (`use_cases/region_plan.rs` + `use_cases/backrooms_level.rs`):
+
+1. **Region plans.** The world tiles into fixed 80 u regions. A pure function
+   of `(seed, region)` derives 1–3 `ArchitectGenome`s (circulation style,
+   structural system, proportions, threshold/ceiling/lighting languages,
+   renovation history), routes corridor spines between *edge portals* shared
+   with neighboring regions (so corridors chain across regions forever), and
+   attaches `AssemblyInstance`s — semantic spaces (`SpaceProgram`: open
+   office, conference, server room, …) with footprints, entrances, structural
+   grids, ceiling zones, and fixtures — along the corridors.
+2. **Corruption.** A final pass makes the sane plan Backrooms: suites repeat
+   with misaligned copies, one assembly becomes an unlit
+   `AbandonedExpansion` shell, renovations overlay contradictory column
+   grids.
+3. **Voxelization.** `BackroomsLevel` samples the plan per voxel column with
+   priority *corridor → assembly → fabric*: corridors carve open with soffit
+   light strips; assemblies get perimeter walls, lintel doorways, parametric
+   partitions and ceiling-module fixtures; everything between is the endless
+   unplanned office *fabric* — a 6 u room grid with doorways that
+   occasionally dissolves into open expanses of sparse columns.
+
+All plan geometry snaps to a 0.4 u lattice (one coarse voxel) so every LOD
+of a chunk voxelizes the same architecture. Debug hook:
+`cargo run --example dump_plan` prints region plans as ASCII;
+`debug_region_ascii` renders any plan.
+
 ## Chunk streaming
 
 Single-threaded wasm has no background meshing thread, so streaming is

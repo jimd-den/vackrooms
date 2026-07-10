@@ -22,6 +22,10 @@
 //!   world; walls always carry a doorway per 7 u cell; pillars are point
 //!   obstacles. A BFS test enforces >95% connectivity.
 
+use crate::domain::entities::architecture::{
+    AssemblyInstance, CeilingLanguage, RegionPlan, SpaceProgram, StructuralSystem,
+    StructuralSystemInstance,
+};
 use crate::domain::entities::voxel_grid::{
     VOXEL_CEILING, VOXEL_FLOOR, VOXEL_LIGHT, VOXEL_RED_WALL, VOXEL_WALL, VoxelGrid,
 };
@@ -29,25 +33,29 @@ use crate::entities::models::Position;
 use crate::use_cases::generate_chunk::{GeneratorConfig, LevelTuning};
 use crate::use_cases::level_generator::LevelGenerator;
 use crate::use_cases::ports::NoiseProvider;
+use crate::use_cases::region_plan::{
+    PLAN_WALL_T, REGION_SIZE, generate_region_plan, region_index,
+};
 
 /// Ceiling height of the tallest (atrium) vaults, world units.
 pub const MAX_CEILING_UNITS: f32 = 5.4;
 /// Total grid height: headroom above the tallest vault.
 pub const GRID_HEIGHT_UNITS: f32 = 5.8;
 
-/// Corridor spacing / wander / width, world units.
-const HALL_PERIOD: f32 = 12.0;
-const HALL_WANDER: f32 = 2.0;
-const HALL_WIDTH_BASE: f32 = 2.55;
-const HALL_WIDTH_VAR: f32 = 0.65;
-/// Hall ceilings drop to this soffit height outside atria.
-const HALL_SOFFIT_UNITS: f32 = 2.9;
-
 /// Office wall grid: cell size, doorway width and door (lintel) height.
-/// 3.0 units creates tight 2–3 m corridors matching authentic Level 0.
-const WALL_PERIOD: f32 = 3.0;
+/// 6.0 u cells make the unplanned fabric read as *rooms*, not slit
+/// corridors; the planned circulation spines are the only true hallways.
+const WALL_PERIOD: f32 = 6.0;
 const DOOR_WIDTH: f32 = 1.2;
 const DOOR_HEIGHT: f32 = 2.2;
+
+/// Low-frequency openness field: above this the fabric dissolves into open
+/// expanses (sparse columns, taller flat ceiling) so rooms and hallways keep
+/// opening into *different* kinds of space. Kept rare — the walled yellow
+/// labyrinth is still the default fabric.
+const EXPANSE_THRESHOLD: f32 = 0.55;
+/// Column grid spacing inside expanses.
+const EXPANSE_COLUMN_PERIOD: f32 = 7.2;
 
 /// Coffered-ceiling beam grid period and beam drop, world units.
 const COFFER_PERIOD: f32 = 2.8;
@@ -102,46 +110,13 @@ impl BackroomsLevel {
         (v * 0.5 + 0.5).clamp(0.0, 0.999)
     }
 
-    fn smoothstep(t: f32) -> f32 {
-        let t = t.clamp(0.0, 1.0);
-        t * t * (3.0 - 2.0 * t)
+    /// Is (wx, wz) inside an open expanse of the fabric?
+    fn in_expanse(noise: &dyn NoiseProvider, seed: u32, wx: f32, wz: f32) -> bool {
+        Self::n(noise, seed, 0xAA10, wx, wz, 0.28) > EXPANSE_THRESHOLD
     }
 
-    /// Distance from `w` to the wandering centerline of corridor family
-    /// `salt` at position `along` on the perpendicular axis.
-    /// Returns (signed offset from center, half_width).
-    fn hall_offset(
-        noise: &dyn NoiseProvider,
-        seed: u32,
-        salt: u32,
-        w: f32,
-        along: f32,
-    ) -> (f32, f32) {
-        let k = ((w - HALL_PERIOD * 0.5) / HALL_PERIOD).round();
-        let nominal = k * HALL_PERIOD + HALL_PERIOD * 0.5;
-        let center = nominal + HALL_WANDER * Self::n(noise, seed, salt, along, k * 37.7, 0.45);
-        let half_width = (HALL_WIDTH_BASE
-            + HALL_WIDTH_VAR * Self::n(noise, seed, salt ^ 0x5A5A, along, k * 19.3, 0.8))
-            * 0.5;
-        (w - center, half_width)
-    }
-
-    /// Should a pillar site survive? Applies the user pillar-density knob
-    /// plus a per-site hash so even default density feels irregular.
-    fn pillar_alive(
-        noise: &dyn NoiseProvider,
-        seed: u32,
-        tuning: &LevelTuning,
-        wx: f32,
-        wz: f32,
-        period: f32,
-    ) -> bool {
-        let cx = (wx / period).floor() as i64;
-        let cz = (wz / period).floor() as i64;
-        Self::cell_hash(noise, seed, 0xF200, cx, cz) < 0.7 * tuning.pillars
-    }
-
-    /// The full column plan at world position (wx, wz), world units.
+    /// The *fabric* column plan at world position (wx, wz): the endless,
+    /// unplanned office fill between planned corridors and assemblies.
     pub(crate) fn column_plan(
         noise: &dyn NoiseProvider,
         seed: u32,
@@ -154,9 +129,17 @@ impl BackroomsLevel {
         let fine = Self::n(noise, seed, 0xB300, wx, wz, 1.6);
         let mut ceiling_units = (2.8 + 0.15 * coarse + 0.05 * fine).clamp(2.7, 3.0);
 
-        // Coffered ceiling grid
+        // Open expanses (~70 u wavelength): walls dissolve, the ceiling
+        // lifts to its full flat height, and only sparse columns remain —
+        // so rooms and hallways keep opening into different kinds of space
+        // instead of an endless uniform wall grid.
+        let expanse = Self::in_expanse(noise, seed, wx, wz);
+
+        // Coffered ceiling grid (expanses run an open plenum instead).
         let on_beam = wx.rem_euclid(COFFER_PERIOD) < 0.22 || wz.rem_euclid(COFFER_PERIOD) < 0.22;
-        if on_beam {
+        if expanse {
+            ceiling_units = 3.0;
+        } else if on_beam {
             ceiling_units -= COFFER_DROP;
         }
 
@@ -166,9 +149,18 @@ impl BackroomsLevel {
 
         let mut solid = false;
         let mut lintel_from_units: Option<f32> = None;
-        let mut sconce = false;
+        let sconce = false;
 
-        if !in_spawn {
+        if !in_spawn && expanse {
+            // Sparse structural columns hold the expanse ceiling up.
+            let cx = (wx / EXPANSE_COLUMN_PERIOD).floor() as i64;
+            let cz = (wz / EXPANSE_COLUMN_PERIOD).floor() as i64;
+            let on_site = wx.rem_euclid(EXPANSE_COLUMN_PERIOD) < 0.45
+                && wz.rem_euclid(EXPANSE_COLUMN_PERIOD) < 0.45;
+            if on_site && Self::cell_hash(noise, seed, 0xF200, cx, cz) < 0.7 * tuning.pillars {
+                solid = true;
+            }
+        } else if !in_spawn {
             let fx = wx.rem_euclid(WALL_PERIOD);
             let fz = wz.rem_euclid(WALL_PERIOD);
             let cell_x = (wx / WALL_PERIOD).floor() as i64;
@@ -226,12 +218,12 @@ impl BackroomsLevel {
                     return (false, false);
                 }
 
-                // Doorways: 40% of kept walls get a door opening.
-                // This creates the authentic Level 0 feel: dense walls
-                // with occasional doorway passages between rooms.
+                // Doorways: most kept walls get a door opening. With 6 u
+                // rooms the walls are fewer, so doors must be likelier to
+                // keep the fabric wandering-friendly.
                 let door_salt = if is_z_wall { 0xD700 } else { 0xD800 };
                 let door_hash = Self::cell_hash(noise, seed, door_salt, cx, cz);
-                if door_hash < 0.40 {
+                if door_hash < 0.60 {
                     let door_pos = (WALL_PERIOD - DOOR_WIDTH) * 0.5;
                     if f_along >= door_pos && f_along < door_pos + DOOR_WIDTH {
                         return (false, true); // Doorway: open below, lintel above
@@ -274,6 +266,267 @@ impl BackroomsLevel {
             sconce,
         }
     }
+
+    /// Region plans for every region a chunk (plus a margin) overlaps.
+    pub(crate) fn region_plans_for(
+        chunk_pos: Position,
+        chunk_size: f32,
+        seed: u32,
+        config: &GeneratorConfig,
+        noise: &dyn NoiseProvider,
+    ) -> Vec<((i64, i64), RegionPlan)> {
+        let m = 1.0;
+        let mut out = Vec::new();
+        for rz in region_index(chunk_pos.z - m)..=region_index(chunk_pos.z + chunk_size + m) {
+            for rx in region_index(chunk_pos.x - m)..=region_index(chunk_pos.x + chunk_size + m) {
+                out.push((
+                    (rx, rz),
+                    generate_region_plan(
+                        seed,
+                        Position::new(rx as f32 * REGION_SIZE, rz as f32 * REGION_SIZE),
+                        REGION_SIZE,
+                        config,
+                        noise,
+                    ),
+                ));
+            }
+        }
+        out
+    }
+
+    /// Is (wx, wz) on a structural column of this system?
+    fn on_column(st: &StructuralSystemInstance, wx: f32, wz: f32) -> bool {
+        if st.system == StructuralSystem::CoreAndShell {
+            // Core-and-shell designers hide columns in walls; none inside.
+            return false;
+        }
+        let mut mx = (wx - st.phase.0).rem_euclid(st.bay_x);
+        let mz = (wz - st.phase.1).rem_euclid(st.bay_z);
+        if st.system == StructuralSystem::OffsetGrid {
+            let row = ((wz - st.phase.1) / st.bay_z).floor() as i64;
+            if row.rem_euclid(2) == 1 {
+                mx = (wx - st.phase.0 + st.bay_x * 0.5).rem_euclid(st.bay_x);
+            }
+        }
+        mx < st.column_side && mz < st.column_side
+    }
+
+    /// Column plan for a point inside an assembly footprint or its
+    /// surrounding wall band (`inside == false`).
+    fn assembly_column(
+        a: &AssemblyInstance,
+        inside: bool,
+        renovator: Option<&StructuralSystemInstance>,
+        tuning: &LevelTuning,
+        wx: f32,
+        wz: f32,
+    ) -> ColumnPlan {
+        let walls_on = tuning.walls > 0.0;
+        let zone = a.ceiling_zones.first();
+        let mut ceiling_units = zone.map_or(2.8, |c| c.height_units);
+        match zone.map(|c| c.language) {
+            Some(CeilingLanguage::Coffered) => {
+                if wx.rem_euclid(COFFER_PERIOD) < 0.22 || wz.rem_euclid(COFFER_PERIOD) < 0.22 {
+                    ceiling_units -= COFFER_DROP;
+                }
+            }
+            Some(CeilingLanguage::ExposedSoffit) => ceiling_units -= 0.2,
+            _ => {}
+        }
+        let mut plan = ColumnPlan {
+            solid: false,
+            red: false,
+            ceiling_units,
+            light: false,
+            lintel_from_units: None,
+            sconce: false,
+        };
+
+        // Entrances pierce the wall band (and win over everything solid).
+        for e in &a.entrances {
+            let (da, db) = if e.through_x_wall {
+                ((wx - e.center.x).abs(), (wz - e.center.z).abs())
+            } else {
+                ((wz - e.center.z).abs(), (wx - e.center.x).abs())
+            };
+            if da < e.width * 0.5 && db <= PLAN_WALL_T + 0.05 {
+                plan.lintel_from_units = walls_on.then_some(e.lintel_units.unwrap_or(0.0)).filter(|u| *u > 0.0);
+                return plan;
+            }
+        }
+
+        if !inside {
+            // Perimeter wall band.
+            plan.solid = walls_on;
+            return plan;
+        }
+
+        // Interior partitions: walls on space boundaries that are not the
+        // footprint perimeter, each with a centered doorway.
+        let fb = a.footprint.bounds();
+        if walls_on {
+            for s in &a.spaces {
+                let sb = s.footprint.bounds();
+                if wz >= sb.1 && wz <= sb.3 {
+                    for plane in [sb.0, sb.2] {
+                        if (plane - fb.0).abs() > 0.1
+                            && (plane - fb.2).abs() > 0.1
+                            && (wx - plane).abs() < PLAN_WALL_T * 0.5
+                        {
+                            let door_c = (sb.1 + sb.3) * 0.5;
+                            if (wz - door_c).abs() < 0.6 {
+                                plan.lintel_from_units = Some(DOOR_HEIGHT);
+                            } else {
+                                plan.solid = true;
+                            }
+                        }
+                    }
+                }
+                if wx >= sb.0 && wx <= sb.2 {
+                    for plane in [sb.1, sb.3] {
+                        if (plane - fb.1).abs() > 0.1
+                            && (plane - fb.3).abs() > 0.1
+                            && (wz - plane).abs() < PLAN_WALL_T * 0.5
+                        {
+                            let door_c = (sb.0 + sb.2) * 0.5;
+                            if (wx - door_c).abs() < 0.6 {
+                                plan.lintel_from_units = Some(DOOR_HEIGHT);
+                            } else {
+                                plan.solid = true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Structure: the original grid, plus the renovator's contradictory
+        // grid where a renovation overlays the assembly.
+        if tuning.pillars > 0.0 && !plan.solid {
+            if Self::on_column(&a.structure, wx, wz) {
+                plan.solid = true;
+            }
+            if let Some(r) = renovator {
+                if a.corruption.renovation_overlay && Self::on_column(r, wx, wz) {
+                    plan.solid = true;
+                    plan.red = true; // renovation columns read as intrusions
+                }
+            }
+        }
+
+        // Fixtures, tied to the assembly's ceiling modules.
+        if !plan.solid && tuning.lights > 0.0 {
+            for f in &a.fixtures {
+                if f.lit && (wx - f.at.x).abs() <= f.half_x && (wz - f.at.z).abs() <= f.half_z {
+                    plan.light = true;
+                    break;
+                }
+            }
+        }
+        plan
+    }
+
+    /// The architectural column plan: corridor beats assembly beats fabric.
+    pub(crate) fn plan_column(
+        plan: &RegionPlan,
+        noise: &dyn NoiseProvider,
+        seed: u32,
+        tuning: &LevelTuning,
+        wx: f32,
+        wz: f32,
+    ) -> ColumnPlan {
+        let spawn_d2 = (wx - SPAWN.0) * (wx - SPAWN.0) + (wz - SPAWN.1) * (wz - SPAWN.1);
+        let in_spawn = spawn_d2 < SPAWN_CLEAR_RADIUS * SPAWN_CLEAR_RADIUS;
+
+        // -- circulation ----------------------------------------------------
+        let mut in_corridor = false;
+        let mut corridor_ceiling = 0.0f32;
+        let mut corridor_light = false;
+        let mut corridor_wall = false;
+        let mut corridor_gap = false;
+        for s in &plan.corridors {
+            let (d, along, _) = s.nearest(wx, wz);
+            let half = s.width * 0.5;
+            if d <= half {
+                in_corridor = true;
+                corridor_ceiling = corridor_ceiling.max(
+                    if s.spine_kind == SpaceProgram::MainCorridor {
+                        2.6
+                    } else {
+                        2.4
+                    },
+                );
+                // Light strip modules follow the corridor in world space.
+                if d < 0.35 && along.rem_euclid(3.2) < 0.8 {
+                    corridor_light = true;
+                }
+            } else if d <= half + PLAN_WALL_T {
+                corridor_wall = true;
+                // The hallway opens up rather than running as a walled slit:
+                // fully open onto expanses, and elsewhere pierced by wide
+                // portals (rarely, so the corridor still reads as *the*
+                // hallway) that keep the surrounding fabric reachable.
+                if Self::in_expanse(noise, seed, wx, wz) || along.rem_euclid(14.4) < 2.4 {
+                    corridor_gap = true;
+                }
+            }
+        }
+        if in_corridor && !in_spawn {
+            return ColumnPlan {
+                solid: false,
+                red: false,
+                ceiling_units: corridor_ceiling,
+                light: corridor_light && tuning.lights > 0.0,
+                lintel_from_units: None,
+                sconce: false,
+            };
+        }
+
+        // -- assemblies -------------------------------------------------------
+        if !in_spawn {
+            let renovator_structure = plan
+                .architects
+                .get(1)
+                .map(|g| StructuralSystemInstance {
+                    system: g.structural_system,
+                    bay_x: 3.6,
+                    bay_z: 4.4,
+                    phase: (1.6, 2.4),
+                    column_side: 0.4,
+                });
+            for a in &plan.assemblies {
+                let b = a.footprint.bounds();
+                let t = PLAN_WALL_T;
+                if wx < b.0 - t || wx > b.2 + t || wz < b.1 - t || wz > b.3 + t {
+                    continue;
+                }
+                let inside = a.footprint.contains(wx, wz);
+                return Self::assembly_column(
+                    a,
+                    inside,
+                    renovator_structure.as_ref(),
+                    tuning,
+                    wx,
+                    wz,
+                );
+            }
+        }
+
+        // -- corridor edge walls through fabric -------------------------------
+        if corridor_wall && !in_spawn && tuning.walls > 0.0 && !corridor_gap {
+            return ColumnPlan {
+                solid: true,
+                red: false,
+                ceiling_units: 2.8,
+                light: false,
+                lintel_from_units: None,
+                sconce: false,
+            };
+        }
+
+        // -- the endless unplanned office fabric -------------------------------
+        Self::column_plan(noise, seed, tuning, wx, wz)
+    }
 }
 
 impl LevelGenerator for BackroomsLevel {
@@ -290,13 +543,27 @@ impl LevelGenerator for BackroomsLevel {
         let height = (GRID_HEIGHT_UNITS / s) as usize;
         let mut grid = VoxelGrid::new(width, height, depth);
 
+        // Architecture first: plan every region this chunk overlaps. The
+        // plans are pure functions of (seed, region), so any chunk in the
+        // region sees the identical plan.
+        let plans =
+            BackroomsLevel::region_plans_for(chunk_pos, config.chunk_size, seed, &config, noise);
+        let plan_of = |wx: f32, wz: f32| -> &RegionPlan {
+            let key = (region_index(wx), region_index(wz));
+            plans
+                .iter()
+                .find(|(k, _)| *k == key)
+                .map(|(_, p)| p)
+                .unwrap_or(&plans[0].1)
+        };
+
         // Plan every column plus a 1-voxel margin: ceiling skirts must seal
         // height steps across chunk borders too.
         let tuning = config.tuning;
         let plan_at = |lx: i64, lz: i64| -> ColumnPlan {
             let wx = chunk_pos.x + (lx as f32 + 0.5) * s;
             let wz = chunk_pos.z + (lz as f32 + 0.5) * s;
-            BackroomsLevel::column_plan(noise, seed, &tuning, wx, wz)
+            BackroomsLevel::plan_column(plan_of(wx, wz), noise, seed, &tuning, wx, wz)
         };
 
         let mut plans = Vec::with_capacity((width + 2) * (depth + 2));
@@ -443,23 +710,181 @@ mod tests {
         let b = generate(10.0, 0.0);
         let w = a.width();
 
+        let plans = BackroomsLevel::region_plans_for(
+            Position::new(0.0, 0.0),
+            20.0,
+            42,
+            &config,
+            &noise,
+        );
         for z in 0..a.depth() {
             for (grid, lx, gx) in [(&a, w - 1, w - 1), (&b, 0usize, w)] {
-                let plan = BackroomsLevel::column_plan(
-                    &noise,
-                    42,
-                    &LevelTuning::default(),
-                    (gx as f32 + 0.5) * config.voxel_scale,
-                    (z as f32 + 0.5) * config.voxel_scale,
+                let wx = (gx as f32 + 0.5) * config.voxel_scale;
+                let wz = (z as f32 + 0.5) * config.voxel_scale;
+                let key = (
+                    crate::use_cases::region_plan::region_index(wx),
+                    crate::use_cases::region_plan::region_index(wz),
                 );
+                let plan = plans.iter().find(|(k, _)| *k == key).map(|(_, p)| p).unwrap();
+                let expect =
+                    BackroomsLevel::plan_column(plan, &noise, 42, &LevelTuning::default(), wx, wz);
                 let got_solid =
                     grid.get(lx, 1, z) == VOXEL_WALL || grid.get(lx, 1, z) == VOXEL_RED_WALL;
                 assert_eq!(
-                    got_solid, plan.solid,
+                    got_solid, expect.solid,
                     "column mismatch at world x={gx} z={z}"
                 );
             }
         }
+    }
+
+    /// The plan is authoritative: corridor centerlines must be carved open
+    /// in the voxelized chunks they cross.
+    #[test]
+    fn corridors_from_the_plan_are_carved_open() {
+        let noise = SimpleNoiseProvider::new();
+        let config = GeneratorConfig::low_spec();
+        let plans =
+            BackroomsLevel::region_plans_for(Position::new(0.0, 0.0), 80.0, 42, &config, &noise);
+        let plan = &plans.iter().find(|(k, _)| *k == (0, 0)).unwrap().1;
+        let spine = &plan.corridors[0];
+
+        let mut checked = 0;
+        for seg in spine.path.windows(2) {
+            let (p0, p1) = (seg[0], seg[1]);
+            let steps = 8;
+            for k in 1..steps {
+                let t = k as f32 / steps as f32;
+                let (wx, wz) = (p0.x + (p1.x - p0.x) * t, p0.z + (p1.z - p0.z) * t);
+                // Stay inside region (0,0) and off chunk edges.
+                if !(1.0..79.0).contains(&wx) || !(1.0..79.0).contains(&wz) {
+                    continue;
+                }
+                let (cx, cz) = ((wx / 10.0).floor() * 10.0, (wz / 10.0).floor() * 10.0);
+                let grid = generate(cx, cz);
+                let (lx, lz) = (
+                    ((wx - cx) / config.voxel_scale) as usize,
+                    ((wz - cz) / config.voxel_scale) as usize,
+                );
+                assert!(
+                    is_open(&grid, lx.min(grid.width() - 1), lz.min(grid.depth() - 1)),
+                    "main corridor blocked at world ({wx:.1}, {wz:.1})"
+                );
+                checked += 1;
+            }
+        }
+        assert!(checked > 5, "spine barely sampled ({checked} points)");
+    }
+
+    /// Assemblies voxelize as walled rooms whose planned entrance is open
+    /// (with a lintel when the designer's threshold language wants one).
+    #[test]
+    fn assemblies_have_walls_and_open_entrances() {
+        let noise = SimpleNoiseProvider::new();
+        let config = GeneratorConfig::low_spec();
+        let tuning = LevelTuning::default();
+        let plans =
+            BackroomsLevel::region_plans_for(Position::new(0.0, 0.0), 80.0, 42, &config, &noise);
+        let plan = &plans.iter().find(|(k, _)| *k == (0, 0)).unwrap().1;
+        assert!(!plan.assemblies.is_empty());
+
+        for a in &plan.assemblies {
+            let e = &a.entrances[0];
+            // The entrance column itself: open (possibly under a lintel).
+            let door = BackroomsLevel::plan_column(plan, &noise, 42, &tuning, e.center.x, e.center.z);
+            assert!(!door.solid, "assembly {} door is walled shut", a.id);
+            // Somewhere along the same front wall, clear of the door span,
+            // there must be solid wall. Probe the middle of the wall band
+            // (the entrance center sits exactly on the footprint boundary,
+            // where containment is ambiguous).
+            let b = a.footprint.bounds();
+            let band = |c: f32, lo: f32, hi: f32| {
+                if (c - lo).abs() < (c - hi).abs() {
+                    lo - PLAN_WALL_T * 0.5
+                } else {
+                    hi + PLAN_WALL_T * 0.5
+                }
+            };
+            let (lo, hi, door_along) = if e.through_x_wall {
+                (b.0, b.2, e.center.x)
+            } else {
+                (b.1, b.3, e.center.z)
+            };
+            let mut solid_found = false;
+            let mut along = lo + 0.3;
+            while along < hi - 0.2 {
+                if (along - door_along).abs() > e.width * 0.5 + 0.4 {
+                    let (wx, wz) = if e.through_x_wall {
+                        (along, band(e.center.z, b.1, b.3))
+                    } else {
+                        (band(e.center.x, b.0, b.2), along)
+                    };
+                    if BackroomsLevel::plan_column(plan, &noise, 42, &tuning, wx, wz).solid {
+                        solid_found = true;
+                        break;
+                    }
+                }
+                along += 0.2;
+            }
+            assert!(
+                solid_found,
+                "assembly {} has no solid front wall anywhere",
+                a.id
+            );
+        }
+    }
+
+    /// An abandoned expansion is a dark shell: it keeps its walls but none of
+    /// its fixtures are lit.
+    #[test]
+    fn abandoned_expansions_are_unlit() {
+        let noise = SimpleNoiseProvider::new();
+        let config = GeneratorConfig::low_spec();
+        let tuning = LevelTuning::default();
+        let mut found = false;
+        for rx in -3i64..3 {
+            for rz in -3i64..3 {
+                let plans = BackroomsLevel::region_plans_for(
+                    Position::new(rx as f32 * 80.0, rz as f32 * 80.0),
+                    1.0,
+                    42,
+                    &config,
+                    &noise,
+                );
+                let plan = &plans[0].1;
+                for a in &plan.assemblies {
+                    if !a.corruption.abandoned {
+                        continue;
+                    }
+                    found = true;
+                    let (x0, z0, x1, z1) = a.footprint.bounds();
+                    // No interior column may carry a lit fixture.
+                    let mut probe_z = z0 + 0.6;
+                    while probe_z < z1 - 0.4 {
+                        let mut probe_x = x0 + 0.6;
+                        while probe_x < x1 - 0.4 {
+                            // A corridor clipping the footprint may still run
+                            // its own lit strip through the shell — that is
+                            // canon ("unreachable but still lit"). Only the
+                            // room's fixtures must be dark.
+                            let in_corridor = plan
+                                .corridors
+                                .iter()
+                                .any(|s| s.distance(probe_x, probe_z) <= s.width * 0.5);
+                            if !in_corridor {
+                                let c = BackroomsLevel::plan_column(
+                                    plan, &noise, 42, &tuning, probe_x, probe_z,
+                                );
+                                assert!(!c.light, "abandoned assembly {} is lit", a.id);
+                            }
+                            probe_x += 0.8;
+                        }
+                        probe_z += 0.8;
+                    }
+                }
+            }
+        }
+        assert!(found, "no abandoned expansion within 36 regions");
     }
 
     /// Higher ceilings than the old 3.0 u slab: vaults swell past 4.2 u and
@@ -504,24 +929,6 @@ mod tests {
         );
     }
 
-    /// Halls must wander: their centerline offset changes along their length.
-    #[test]
-    fn halls_wander_instead_of_running_straight() {
-        let noise = SimpleNoiseProvider::new();
-        let mut moved = false;
-        for k in 0..4 {
-            let w = k as f32 * HALL_PERIOD + HALL_PERIOD * 0.5;
-            let (d0, _) = BackroomsLevel::hall_offset(&noise, 42, 0xC300, w, 0.0);
-            for along in [8.0f32, 16.0, 24.0, 32.0] {
-                let (d1, _) = BackroomsLevel::hall_offset(&noise, 42, 0xC300, w, along);
-                if (d0 - d1).abs() > 0.4 {
-                    moved = true;
-                }
-            }
-        }
-        assert!(moved, "hall centerlines never moved over 32 u of length");
-    }
-
     /// Doorways are real architecture: somewhere there must be an open
     /// passage at head height with a solid lintel above it.
     #[test]
@@ -553,18 +960,22 @@ mod tests {
     #[test]
     fn tuning_knobs_control_density() {
         let noise = SimpleNoiseProvider::new();
+        // Aggregate over chunks in different fabric regimes (walled rooms
+        // and open expanses) so both knobs have something to steer.
         let count_solids = |tuning: LevelTuning| -> usize {
-            let grid = BackroomsLevel.generate(
-                Position::new(10.0, 10.0),
-                42,
-                GeneratorConfig::low_spec().with_tuning(tuning),
-                &noise,
-            );
             let mut n = 0;
-            for z in 0..grid.depth() {
-                for x in 0..grid.width() {
-                    if grid.get(x, 1, z) != VOXEL_AIR {
-                        n += 1;
+            for (ox, oz) in [(10.0, 10.0), (30.0, 10.0), (50.0, 30.0), (10.0, 50.0)] {
+                let grid = BackroomsLevel.generate(
+                    Position::new(ox, oz),
+                    42,
+                    GeneratorConfig::low_spec().with_tuning(tuning),
+                    &noise,
+                );
+                for z in 0..grid.depth() {
+                    for x in 0..grid.width() {
+                        if grid.get(x, 1, z) != VOXEL_AIR {
+                            n += 1;
+                        }
                     }
                 }
             }
@@ -599,6 +1010,60 @@ mod tests {
         );
     }
 
+    /// Every LOD of a chunk must voxelize the same plan: coarse walls stay
+    /// within one fine voxel of fine walls (the streaming engine swaps LODs
+    /// of a chunk in place, so they must be faithful proxies).
+    #[test]
+    fn lods_of_the_same_chunk_correspond() {
+        let noise = SimpleNoiseProvider::new();
+        let fine = BackroomsLevel.generate(
+            Position::new(10.0, 10.0),
+            42,
+            GeneratorConfig::low_spec(),
+            &noise,
+        );
+        let coarse = BackroomsLevel.generate(
+            Position::new(10.0, 10.0),
+            42,
+            GeneratorConfig::low_spec().at_lod(1),
+            &noise,
+        );
+        let solid = |g: &VoxelGrid, x: usize, z: usize| {
+            g.get(x, 1, z) == VOXEL_WALL || g.get(x, 1, z) == VOXEL_RED_WALL
+        };
+        let (mut matches, mut total) = (0usize, 0usize);
+        for z in 0..coarse.depth() {
+            for x in 0..coarse.width() {
+                if !solid(&coarse, x, z) {
+                    continue;
+                }
+                total += 1;
+                let mut near = false;
+                for dz in -1i32..=2 {
+                    for dx in -1i32..=2 {
+                        let (fx, fz) = (x as i32 * 2 + dx, z as i32 * 2 + dz);
+                        if fx >= 0
+                            && fz >= 0
+                            && (fx as usize) < fine.width()
+                            && (fz as usize) < fine.depth()
+                            && solid(&fine, fx as usize, fz as usize)
+                        {
+                            near = true;
+                        }
+                    }
+                }
+                if near {
+                    matches += 1;
+                }
+            }
+        }
+        assert!(total > 0, "coarse chunk has no walls at all");
+        assert!(
+            matches * 10 >= total * 9,
+            "coarse walls stray from fine walls: {matches}/{total}"
+        );
+    }
+
     /// The spawn point has a clear floor and a light overhead.
     #[test]
     fn spawn_clearing_is_open_and_lit() {
@@ -629,18 +1094,22 @@ mod tests {
     fn test_print_ascii_map() {
         let noise = SimpleNoiseProvider::new();
         let tuning = LevelTuning::default();
+        let config = GeneratorConfig::low_spec();
+        // The whole of region (0,0) at 0.5 u per character.
+        let plans =
+            BackroomsLevel::region_plans_for(Position::new(0.0, 0.0), 80.0, 42, &config, &noise);
+        let plan = &plans.iter().find(|(k, _)| *k == (0, 0)).unwrap().1;
         let mut map = String::new();
-        // Sample a 60x60 world area with 0.5 step (120x120 ASCII cells)
-        for sz in -60..60 {
-            for sx in -60..60 {
-                let wx = sx as f32 * 0.5;
-                let wz = sz as f32 * 0.5;
-                let plan = BackroomsLevel::column_plan(&noise, 42, &tuning, wx, wz);
-                if plan.solid {
+        for sz in 0..160 {
+            for sx in 0..160 {
+                let wx = sx as f32 * 0.5 + 0.25;
+                let wz = sz as f32 * 0.5 + 0.25;
+                let col = BackroomsLevel::plan_column(plan, &noise, 42, &tuning, wx, wz);
+                if col.solid {
                     map.push('#');
-                } else if plan.light {
+                } else if col.light {
                     map.push('*');
-                } else if plan.lintel_from_units.is_some() {
+                } else if col.lintel_from_units.is_some() {
                     map.push('d');
                 } else {
                     map.push(' ');
