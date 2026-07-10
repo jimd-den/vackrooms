@@ -33,13 +33,13 @@ export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembl
 
 export interface InitOutput {
     readonly memory: WebAssembly.Memory;
-    readonly set_face_weights: (a: number, b: number, c: number, d: number) => void;
-    readonly set_fov: (a: number) => void;
     readonly set_doom_controls: (a: number) => void;
     readonly set_invert_y: (a: number) => void;
     readonly set_mouse_sensitivity: (a: number) => void;
     readonly set_render_scale: (a: number) => void;
     readonly start: () => void;
+    readonly set_face_weights: (a: number, b: number, c: number, d: number) => void;
+    readonly set_fov: (a: number) => void;
     readonly wasm_bindgen__convert__closures_____invoke__h42bad8c94dc1d8fe: (a: number, b: number, c: number) => void;
     readonly wasm_bindgen__convert__closures_____invoke__h1bbff226e3ed8404: (a: number, b: number, c: any) => void;
     readonly wasm_bindgen__convert__closures_____invoke__h1bbff226e3ed8404_2: (a: number, b: number, c: any) => void;

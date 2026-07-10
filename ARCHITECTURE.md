@@ -127,18 +127,35 @@ The same layout is documented at its source of truth,
 ## Chunk streaming
 
 Single-threaded wasm has no background meshing thread, so streaming is
-**time-sliced**: `StreamingPolicy` produces the desired resident set
-(nearest-first) each frame; the `Engine` loads at most **one chunk per tick**
-and evicts out-of-range chunks. The atlas texture and collision world are
-rebuilt only on a resident-set change — steady-state frames upload nothing
-(asserted by `steady_state_does_not_reupload_atlas`).
+**time-sliced** and **progressive**: `StreamingPolicy` produces the desired
+resident set (nearest-first) each frame, and the `Engine` spends a per-tick
+cost budget on it in two phases:
+
+1. **Availability** — every missing chunk first loads at a *coarse LOD*
+   (voxels 2× the size, ~1/8 the generation/lighting/SVO cost, ~1 budget
+   unit), so the whole footprint renders after roughly one tick instead of
+   trickling in chunk by chunk.
+2. **Refinement** — leftover budget reloads the nearest coarse chunk *within
+   `fine_distance`* at full resolution, replacing it in place (same atlas
+   slot, partial row upload). Chunks beyond `fine_distance` stay coarse: at
+   that range a coarse voxel projects to about the same pixels as a fine one
+   — a screen-space-error LOD. Refinement is monotonic while resident, so
+   the LOD choice never flaps.
+
+Every LOD of a chunk covers the same world cube (`GeneratorConfig::at_lod`
+halves the SVO depth as it doubles `voxel_scale`), and cell borders/door
+positions derive from world space, so a coarse chunk is a faithful low-res
+proxy of its fine version and payloads are interchangeable to the renderer.
+The atlas texture and collision world are rebuilt only on a resident-set
+change — steady-state frames upload nothing (asserted by
+`steady_state_does_not_reupload_atlas`).
 
 Profiles (selected by URL, `?spec=high`):
 
-| | chunk size | radius | voxels | SVO depth |
-|---|---|---|---|---|
-| low (default) | 10 u | 1 (3×3) | 0.2 u | 6 |
-| high | 20 u | 2 (5×5) | 0.1 u | 8 |
+| | chunk size | radius | voxels (fine/coarse) | SVO depth | fine ring |
+|---|---|---|---|---|---|
+| low (default) | 10 u | 1 (3×3) | 0.2 / 0.4 u | 6 / 5 | 15 u (all 9) |
+| high | 20 u | 2 (5×5) | 0.1 / 0.2 u | 8 / 7 | 25 u (~9 of 25) |
 
 The shader's chunk table is fixed at 25 entries — exactly the 5×5 high-spec
 worst case (`application::atlas::MAX_CHUNKS`).

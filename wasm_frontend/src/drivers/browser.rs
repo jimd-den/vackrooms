@@ -171,6 +171,9 @@ pub fn boot() -> Result<(), JsValue> {
                 chunk_size: 20.0,
                 chunk_radius: 2,
                 seed: gen_params.seed,
+                // 5x5 footprint: the outer ring (>= 20 units away) stays at
+                // the coarse LOD, so high spec pays for ~9 fine chunks, not 25.
+                fine_distance: 25.0,
                 ..EngineConfig::default()
             },
         )
@@ -550,7 +553,10 @@ fn run_frame_loop(
                 hud_fps.set_text_content(Some(&fps.to_string()));
             }
             hud_window_start.set(time_ms);
-            hud_chunks.set_text_content(Some(&stats.resident_chunks.to_string()));
+            hud_chunks.set_text_content(Some(&format!(
+                "{}/{}",
+                stats.fine_chunks, stats.resident_chunks
+            )));
             hud_nodes.set_text_content(Some(&stats.atlas_nodes.to_string()));
             hud_scale.set_text_content(Some(&format!("{:.0}%", stats.resolution_scale * 100.0)));
         }

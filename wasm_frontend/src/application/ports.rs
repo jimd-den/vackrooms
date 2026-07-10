@@ -65,5 +65,10 @@ pub struct ChunkPayload {
 pub trait ChunkSourcePort {
     /// Loads the chunk at `origin` for the given Backrooms level
     /// (0 = backrooms, 34 = grassland; see the core's `level_generator`).
-    fn load(&self, origin_x: f32, origin_z: f32, level: u32) -> ChunkPayload;
+    ///
+    /// `lod` selects the level of detail: 0 is full resolution and each
+    /// step doubles the voxel size, costing ~1/8 as much to produce. Any
+    /// LOD of a chunk covers the same world cube (`world_size` invariant),
+    /// so payloads are interchangeable to the renderer.
+    fn load(&self, origin_x: f32, origin_z: f32, level: u32, lod: u8) -> ChunkPayload;
 }

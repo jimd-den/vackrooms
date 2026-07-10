@@ -61,28 +61,22 @@ impl<N: NoiseProvider> LocalChunkSource<N> {
 }
 
 impl<N: NoiseProvider> ChunkSourcePort for LocalChunkSource<N> {
-    fn load(&self, origin_x: f32, origin_z: f32, level: u32) -> ChunkPayload {
+    fn load(&self, origin_x: f32, origin_z: f32, level: u32, lod: u8) -> ChunkPayload {
+        let config = self.config.with_level(level).at_lod(lod);
         let generator =
             GenerateChunkArchitectureUseCase::with_telemetry(&self.noise, self.telemetry);
-        let grid = generator.execute(
-            Position::new(origin_x, origin_z),
-            self.seed,
-            self.config.with_level(level),
-        );
+        let grid = generator.execute(Position::new(origin_x, origin_z), self.seed, config);
 
-        let svo = BuildOctreeUseCase::new().execute(
-            &grid,
-            self.config.svo_depth(),
-            self.config.svo_world_size(),
-        );
+        let svo =
+            BuildOctreeUseCase::new().execute(&grid, config.svo_depth(), config.svo_world_size());
 
         let gpu = OctreeGpuSerializer::serialize_to_gpu_data(&svo);
-        let collision = extract_collision_boxes(&svo, origin_x, origin_z, self.config.voxel_scale);
+        let collision = extract_collision_boxes(&svo, origin_x, origin_z, config.voxel_scale);
 
         ChunkPayload {
             root: svo.root as u32,
             nodes: gpu.texel_data,
-            world_size: self.config.svo_world_size(),
+            world_size: config.svo_world_size(),
             collision,
         }
     }
@@ -191,13 +185,35 @@ mod tests {
     fn generated_chunk_produces_row_padded_nodes_and_some_collision() {
         let source =
             LocalChunkSource::new(SimpleNoiseProvider::new(), 42, GeneratorConfig::low_spec());
-        let payload = source.load(10.0, 10.0, 0);
+        let payload = source.load(10.0, 10.0, 0, 0);
         // Row padding: node stream is a whole number of 1024-texel rows.
         assert_eq!(payload.nodes.len() % (1024 * 4), 0);
         assert!(payload.world_size > 0.0);
         assert!(
             !payload.collision.is_empty(),
             "a maze chunk must have walls"
+        );
+    }
+
+    #[test]
+    fn coarse_lod_is_smaller_but_covers_the_same_world_cube() {
+        let source =
+            LocalChunkSource::new(SimpleNoiseProvider::new(), 42, GeneratorConfig::low_spec());
+        let fine = source.load(10.0, 10.0, 0, 0);
+        let coarse = source.load(10.0, 10.0, 0, 1);
+        assert_eq!(
+            coarse.world_size, fine.world_size,
+            "LODs must be interchangeable to the renderer"
+        );
+        assert!(
+            coarse.nodes.len() < fine.nodes.len(),
+            "coarse SVO must be smaller: {} vs {}",
+            coarse.nodes.len(),
+            fine.nodes.len()
+        );
+        assert!(
+            !coarse.collision.is_empty(),
+            "coarse chunks still collide (they cover the pre-refinement window)"
         );
     }
 }

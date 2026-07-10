@@ -61,10 +61,12 @@ impl StreamingPolicy {
     }
 }
 
-/// A resident chunk: payload plus its world origin.
+/// A resident chunk: payload plus its world origin and current level of
+/// detail (0 = full resolution; higher = coarser, see `ChunkSourcePort`).
 #[derive(Debug, Clone)]
 pub struct LoadedChunk {
     pub origin: (f32, f32),
+    pub lod: u8,
     pub payload: ChunkPayload,
 }
 
@@ -167,6 +169,7 @@ mod tests {
             chunk_key(0.0, 0.0),
             LoadedChunk {
                 origin: (0.0, 0.0),
+                lod: 0,
                 payload: payload.clone(),
             },
         );
@@ -174,6 +177,7 @@ mod tests {
             chunk_key(10.0, 0.0),
             LoadedChunk {
                 origin: (10.0, 0.0),
+                lod: 0,
                 payload,
             },
         );

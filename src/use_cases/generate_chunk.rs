@@ -80,8 +80,18 @@ impl GeneratorConfig {
         self
     }
 
+    /// The same chunk at a coarser level of detail: voxels double per LOD
+    /// step, so lod 1 costs ~1/8 of lod 0 to generate, light, and serialize.
+    /// `svo_world_size()` is invariant across LODs (half the voxels at twice
+    /// the scale), so payloads of any LOD are interchangeable to the renderer.
+    pub fn at_lod(mut self, lod: u8) -> Self {
+        self.voxel_scale *= (1u32 << lod.min(4)) as f32;
+        self
+    }
+
     pub fn svo_depth(&self) -> u32 {
-        if self.voxel_scale > 0.15 { 6 } else { 8 }
+        let voxels = (self.chunk_size / self.voxel_scale).round().max(1.0) as u32;
+        voxels.next_power_of_two().trailing_zeros()
     }
 
     pub fn svo_world_size(&self) -> f32 {
@@ -308,10 +318,13 @@ impl<'a> GenerateChunkArchitectureUseCase<'a> {
         let width = (config.chunk_size / config.voxel_scale) as usize;
         let depth = (config.chunk_size / config.voxel_scale) as usize;
 
-        let cell_vw = (5.0 / config.voxel_scale) as usize;
-        let cell_vd = (5.0 / config.voxel_scale) as usize;
-        let cell_w = width / cell_vw;
-        let cell_d = depth / cell_vd;
+        // Cell voxel borders derive from world space (cells are 5.0 units) so
+        // every LOD of a chunk puts its walls on the same world planes.
+        // Truncating a fixed voxels-per-cell instead compresses the maze at
+        // scales where 5.0/voxel_scale is fractional.
+        let cell_border = |c: usize| (c as f32 * 5.0 / config.voxel_scale).round() as usize;
+        let cell_w = ((config.chunk_size / 5.0).round() as usize).max(1);
+        let cell_d = cell_w;
 
         let mut abstract_grid = Grid::new(cell_w, cell_d);
 
@@ -393,6 +406,16 @@ impl<'a> GenerateChunkArchitectureUseCase<'a> {
         let mut rng = StdRng::seed_from_u64(
             (seed as u64) ^ (chunk_pos.x.to_bits() as u64) ^ (chunk_pos.z.to_bits() as u64),
         );
+        // Per-voxel cosmetic noise (floor holes, dotted pillars) draws from
+        // its own stream: the number of those draws depends on voxel
+        // resolution, and letting them share the structural RNG would
+        // desynchronize wall/door placement between LODs of the same chunk.
+        let mut detail_rng = StdRng::seed_from_u64(
+            (seed as u64)
+                ^ (chunk_pos.x.to_bits() as u64)
+                ^ (chunk_pos.z.to_bits() as u64)
+                ^ 0xD57A_11ED,
+        );
 
         let maze_gen = GrowingTreeGenerator {
             junction_density: config.tuning.junction_density,
@@ -443,10 +466,10 @@ impl<'a> GenerateChunkArchitectureUseCase<'a> {
                     }
                     rooms.push(Room {
                         name: "Organic",
-                        x0: cx * cell_vw,
-                        x1: (cx + rw) * cell_vw - 1,
-                        z0: cz * cell_vd,
-                        z1: (cz + rd) * cell_vd - 1,
+                        x0: cell_border(cx),
+                        x1: cell_border(cx + rw) - 1,
+                        z0: cell_border(cz),
+                        z1: cell_border(cz + rd) - 1,
                     });
                 }
             }
@@ -533,10 +556,10 @@ impl<'a> GenerateChunkArchitectureUseCase<'a> {
         for cz in 0..cell_d {
             for cx in 0..cell_w {
                 let cell = abstract_grid.get(cx, cz).unwrap();
-                let v_x0 = cx * cell_vw;
-                let v_z0 = cz * cell_vd;
-                let v_x1 = v_x0 + cell_vw - 1;
-                let v_z1 = v_z0 + cell_vd - 1;
+                let v_x0 = cell_border(cx);
+                let v_z0 = cell_border(cz);
+                let v_x1 = (cell_border(cx + 1) - 1).min(width - 1);
+                let v_z1 = (cell_border(cz + 1) - 1).min(depth - 1);
 
                 use crate::domain::entities::cell::MicrobiomeZone;
                 let cell_h_units = match cell.zone {
@@ -556,7 +579,7 @@ impl<'a> GenerateChunkArchitectureUseCase<'a> {
 
                         if cell.zone == MicrobiomeZone::Holes {
                             if vx > v_x0 + 5 && vx < v_x1 - 5 && vz > v_z0 + 5 && vz < v_z1 - 5 {
-                                if rng.random_bool(0.05) {
+                                if detail_rng.random_bool(0.05) {
                                     grid.set(vx, 0, vz, VOXEL_AIR);
                                 }
                             }
@@ -593,8 +616,8 @@ impl<'a> GenerateChunkArchitectureUseCase<'a> {
                         grid.set(v_x1, y, v_z0, wall_type);
                         grid.set(v_x0, y, v_z1, wall_type);
                         grid.set(v_x1, y, v_z1, wall_type);
-                        if rng.random_bool(0.3) {
-                            grid.set(v_x0 + cell_vw / 2, y, v_z0 + cell_vd / 2, wall_type);
+                        if detail_rng.random_bool(0.3) {
+                            grid.set((v_x0 + v_x1 + 1) / 2, y, (v_z0 + v_z1 + 1) / 2, wall_type);
                         }
                     }
                     continue;
@@ -616,13 +639,16 @@ impl<'a> GenerateChunkArchitectureUseCase<'a> {
                             3.5
                         };
                         let hole_w = (hole_units / config.voxel_scale) as usize;
-                        let min_offset = (0.5 / config.voxel_scale) as usize;
-                        let max_offset = cell_vw.saturating_sub(hole_w + min_offset);
-                        let offset = if max_offset > min_offset {
-                            rng.random_range(min_offset..max_offset)
+                        // Drawn in centimetres of the 5.0-unit cell span, not
+                        // voxels, so every LOD picks the same door position.
+                        let hole_cm = (hole_units * 100.0) as u32;
+                        let max_offset_cm = 500u32.saturating_sub(hole_cm + 50);
+                        let offset_cm = if max_offset_cm > 50 {
+                            rng.random_range(50..max_offset_cm)
                         } else {
-                            min_offset
+                            50
                         };
+                        let offset = (offset_cm as f32 / 100.0 / config.voxel_scale) as usize;
                         let hole_x0 = v_x0 + offset;
                         let hole_x1 = hole_x0 + hole_w;
 
@@ -650,7 +676,7 @@ impl<'a> GenerateChunkArchitectureUseCase<'a> {
                 } else if cz == cell_d - 1 {
                     // Chunk boundary (force holes for connectivity)
                     let hole_w = (2.0 / config.voxel_scale) as usize;
-                    let hole_x0 = v_x0 + cell_vw / 2 - hole_w / 2;
+                    let hole_x0 = (v_x0 + v_x1 + 1) / 2 - hole_w / 2;
                     for vx in v_x0..=v_x1 {
                         let is_hole = vx >= hole_x0 && vx < hole_x0 + hole_w;
                         if !is_hole {
@@ -687,13 +713,15 @@ impl<'a> GenerateChunkArchitectureUseCase<'a> {
                             3.5
                         };
                         let hole_w = (hole_units / config.voxel_scale) as usize;
-                        let min_offset = (0.5 / config.voxel_scale) as usize;
-                        let max_offset = cell_vd.saturating_sub(hole_w + min_offset);
-                        let offset = if max_offset > min_offset {
-                            rng.random_range(min_offset..max_offset)
+                        // Centimetre draw, same reasoning as the south wall.
+                        let hole_cm = (hole_units * 100.0) as u32;
+                        let max_offset_cm = 500u32.saturating_sub(hole_cm + 50);
+                        let offset_cm = if max_offset_cm > 50 {
+                            rng.random_range(50..max_offset_cm)
                         } else {
-                            min_offset
+                            50
                         };
+                        let offset = (offset_cm as f32 / 100.0 / config.voxel_scale) as usize;
                         let hole_z0 = v_z0 + offset;
                         let hole_z1 = hole_z0 + hole_w;
 
@@ -720,7 +748,7 @@ impl<'a> GenerateChunkArchitectureUseCase<'a> {
                     }
                 } else if cx == cell_w - 1 {
                     let hole_w = (2.0 / config.voxel_scale) as usize;
-                    let hole_z0 = v_z0 + cell_vd / 2 - hole_w / 2;
+                    let hole_z0 = (v_z0 + v_z1 + 1) / 2 - hole_w / 2;
                     for vz in v_z0..=v_z1 {
                         let is_hole = vz >= hole_z0 && vz < hole_z0 + hole_w;
                         if !is_hole {
@@ -783,7 +811,7 @@ impl<'a> GenerateChunkArchitectureUseCase<'a> {
                 }
 
                 if is_ns_hall && !is_ew_hall {
-                    let inset_x = (cell_vw.saturating_sub(26)) / 2;
+                    let inset_x = ((v_x1 - v_x0 + 1).saturating_sub(26)) / 2;
                     for vx in v_x0..=(v_x0 + inset_x) {
                         for vz in v_z0..=v_z1 {
                             for y in 1..=wall_max_y {
@@ -799,7 +827,7 @@ impl<'a> GenerateChunkArchitectureUseCase<'a> {
                         }
                     }
                 } else if is_ew_hall && !is_ns_hall {
-                    let inset_z = (cell_vd.saturating_sub(26)) / 2;
+                    let inset_z = ((v_z1 - v_z0 + 1).saturating_sub(26)) / 2;
                     for vz in v_z0..=(v_z0 + inset_z) {
                         for vx in v_x0..=v_x1 {
                             for y in 1..=wall_max_y {
@@ -815,8 +843,8 @@ impl<'a> GenerateChunkArchitectureUseCase<'a> {
                         }
                     }
                 } else if is_ns_hall && is_ew_hall {
-                    let inset_x = (cell_vw.saturating_sub(26)) / 2;
-                    let inset_z = (cell_vd.saturating_sub(26)) / 2;
+                    let inset_x = ((v_x1 - v_x0 + 1).saturating_sub(26)) / 2;
+                    let inset_z = ((v_z1 - v_z0 + 1).saturating_sub(26)) / 2;
                     for y in 1..=wall_max_y {
                         for vx in v_x0..=(v_x0 + inset_x) {
                             for vz in v_z0..=(v_z0 + inset_z) {
@@ -864,10 +892,10 @@ impl<'a> GenerateChunkArchitectureUseCase<'a> {
                 continue;
             }
 
-            let v_z0 = cz * cell_vd;
-            let v_z1 = v_z0 + cell_vd - 1;
+            let v_z0 = cell_border(cz);
+            let v_z1 = (cell_border(cz + 1) - 1).min(depth - 1);
             let hole_w = (2.0 / config.voxel_scale) as usize;
-            let hole_z0 = v_z0 + cell_vd / 2 - hole_w / 2;
+            let hole_z0 = (v_z0 + v_z1 + 1) / 2 - hole_w / 2;
             for vz in v_z0..=v_z1 {
                 let is_hole = vz >= hole_z0 && vz < hole_z0 + hole_w;
                 if !is_hole {
@@ -908,10 +936,10 @@ impl<'a> GenerateChunkArchitectureUseCase<'a> {
                 continue;
             }
 
-            let v_x0 = cx * cell_vw;
-            let v_x1 = v_x0 + cell_vw - 1;
+            let v_x0 = cell_border(cx);
+            let v_x1 = (cell_border(cx + 1) - 1).min(width - 1);
             let hole_w = (2.0 / config.voxel_scale) as usize;
-            let hole_x0 = v_x0 + cell_vw / 2 - hole_w / 2;
+            let hole_x0 = (v_x0 + v_x1 + 1) / 2 - hole_w / 2;
             for vx in v_x0..=v_x1 {
                 let is_hole = vx >= hole_x0 && vx < hole_x0 + hole_w;
                 if !is_hole {
@@ -954,12 +982,17 @@ impl<'a> GenerateChunkArchitectureUseCase<'a> {
                     possible_stamps.push(stamp);
                 }
             }
+            // Both rolls happen whether or not a stamp fits: which stamps fit
+            // depends on voxel resolution, and skipping draws would
+            // desynchronize the structural RNG between LODs of the chunk.
+            let stamp_roll = rng.random_range(0..usize::MAX);
+            let stairs_roll = rng.random_bool(0.15 * (config.tuning.stairs_density as f64));
             if !possible_stamps.is_empty() {
-                let mut stamp = possible_stamps[rng.random_range(0..possible_stamps.len())];
+                let mut stamp = possible_stamps[stamp_roll % possible_stamps.len()];
 
                 // Low-frequency stairs chance override
                 let stairway = RoomStamp::stairway();
-                if rng.random_bool(0.15 * (config.tuning.stairs_density as f64)) {
+                if stairs_roll {
                     stamp = &stairway;
                 }
 
@@ -1102,6 +1135,82 @@ mod tests {
         fn evaluate_2d(&self, _seed: u32, _pos: Position) -> f32 {
             self.value
         }
+    }
+
+    #[test]
+    fn svo_depth_matches_legacy_values_for_both_specs() {
+        assert_eq!(GeneratorConfig::low_spec().svo_depth(), 6);
+        assert_eq!(GeneratorConfig::high_spec().svo_depth(), 8);
+    }
+
+    #[test]
+    fn at_lod_halves_resolution_but_keeps_world_size() {
+        for base in [GeneratorConfig::low_spec(), GeneratorConfig::high_spec()] {
+            let coarse = base.at_lod(1);
+            assert_eq!(coarse.svo_depth(), base.svo_depth() - 1);
+            assert_eq!(
+                coarse.svo_world_size(),
+                base.svo_world_size(),
+                "payloads of any LOD must be interchangeable to the renderer"
+            );
+            assert_eq!(base.at_lod(0).svo_depth(), base.svo_depth());
+        }
+    }
+
+    #[test]
+    fn coarse_chunk_generates_the_same_layout_smaller() {
+        let noise = MockNoiseProvider { value: 0.0 };
+        let generator = GenerateChunkArchitectureUseCase::new(&noise);
+        let fine = generator.execute(
+            Position::new(10.0, 10.0),
+            42,
+            GeneratorConfig::low_spec().with_level(0),
+        );
+        let coarse = generator.execute(
+            Position::new(10.0, 10.0),
+            42,
+            GeneratorConfig::low_spec().with_level(0).at_lod(1),
+        );
+        assert_eq!(coarse.width() * 2, fine.width());
+        assert_eq!(coarse.depth() * 2, fine.depth());
+        // Same maze at half resolution. Cell sizes truncate differently per
+        // scale (5.0/0.4 = 12 voxels vs 25 at fine), so wall planes may land
+        // one fine voxel off; an LOD proxy only needs walls to line up to
+        // within that tolerance.
+        let wall = crate::domain::entities::voxel_grid::VOXEL_WALL;
+        let mut wall_match = 0usize;
+        let mut wall_total = 0usize;
+        for z in 0..coarse.depth() {
+            for x in 0..coarse.width() {
+                if coarse.get(x, 1, z) != wall {
+                    continue;
+                }
+                wall_total += 1;
+                let (fx, fz) = (x * 2, z * 2);
+                let mut near = false;
+                for dz in -1i32..=2 {
+                    for dx in -1i32..=2 {
+                        let (sx, sz) = (fx as i32 + dx, fz as i32 + dz);
+                        if sx >= 0
+                            && sz >= 0
+                            && (sx as usize) < fine.width()
+                            && (sz as usize) < fine.depth()
+                            && fine.get(sx as usize, 1, sz as usize) == wall
+                        {
+                            near = true;
+                        }
+                    }
+                }
+                if near {
+                    wall_match += 1;
+                }
+            }
+        }
+        assert!(wall_total > 0, "coarse chunk must still contain walls");
+        assert!(
+            wall_match * 10 >= wall_total * 9,
+            "coarse walls should lie within one fine voxel of fine walls: {wall_match}/{wall_total}"
+        );
     }
 
     #[test]

@@ -22,10 +22,16 @@ pub struct EngineConfig {
     pub chunk_radius: i32,
     /// Player spawn (eye position).
     pub spawn: [f32; 3],
-    /// Chunks generated per tick. 2 balances streaming latency against
-    /// frame hitches: one chunk costs ~15 ms native (more in wasm), so
-    /// higher budgets stall the frame visibly.
+    /// Full-resolution chunk loads per tick. 2 balances streaming latency
+    /// against frame hitches: one fine chunk costs ~15 ms native (more in
+    /// wasm), so higher budgets stall the frame visibly. Coarse loads cost
+    /// a fraction of this budget (see `FINE_LOAD_COST`).
     pub max_loads_per_tick: usize,
+    /// Screen-space-error proxy: chunks whose nearest point is farther than
+    /// this from the player stay at the coarse LOD; nearer chunks refine to
+    /// full resolution. A coarse voxel at this distance projects to roughly
+    /// the same pixels as a fine voxel at half of it.
+    pub fine_distance: f32,
 }
 
 impl Default for EngineConfig {
@@ -36,6 +42,7 @@ impl Default for EngineConfig {
             chunk_radius: 1,
             spawn: [5.0, 1.7, 5.0],
             max_loads_per_tick: 2,
+            fine_distance: 15.0,
         }
     }
 }
@@ -56,6 +63,8 @@ pub struct InputFrame {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct HudStats {
     pub resident_chunks: usize,
+    /// Chunks resident at full resolution; the rest are coarse LOD.
+    pub fine_chunks: usize,
     pub atlas_nodes: usize,
     pub collision_boxes: usize,
     pub resolution_scale: f32,
@@ -132,6 +141,15 @@ impl PerfGovernor {
         }
     }
 }
+
+/// The single coarse LOD used for progressive availability: every missing
+/// chunk is first loaded at this LOD (voxels 2x the size, ~1/8 the cost) so
+/// the whole streaming footprint becomes visible before any chunk is refined.
+const COARSE_LOD: u8 = 1;
+/// Budget units one fine load costs; a coarse load costs 1. Coarse generation
+/// touches ~1/8 the voxels but has fixed per-chunk overhead, so 4 (not 8)
+/// keeps the worst-case tick cost at the old two-fine-loads level.
+const FINE_LOAD_COST: u32 = 4;
 
 /// Backrooms level ids the engine can noclip between.
 const LEVEL_BACKROOMS: u32 = 0;
@@ -290,12 +308,32 @@ impl Engine {
         self.renderer.draw(&frame, &self.draws);
     }
 
-    /// Loads at most `max_loads_per_tick` missing chunks (nearest first),
-    /// evicts out-of-range ones, and updates the pooled atlas + collision
-    /// world only when the resident set actually changed. Newly loaded
-    /// chunks upload only their own atlas slot rows; a full re-upload only
-    /// happens on pool relayouts (first load, bigger chunks, level switch)
-    /// or on back ends without partial-update support.
+    /// Squared distance from the player to the nearest point of a chunk's
+    /// 2D footprint; 0 inside the chunk. Drives the fine/coarse LOD choice.
+    fn chunk_dist2(&self, origin_x: f32, origin_z: f32) -> f32 {
+        let cs = self.config.chunk_size;
+        let (px, pz) = (self.player.position[0], self.player.position[2]);
+        let dx = (origin_x - px).max(px - (origin_x + cs)).max(0.0);
+        let dz = (origin_z - pz).max(pz - (origin_z + cs)).max(0.0);
+        dx * dx + dz * dz
+    }
+
+    /// Progressive, error-driven chunk streaming.
+    ///
+    /// Availability first: every missing chunk (nearest first) loads at the
+    /// cheap coarse LOD, so the whole footprint renders before any chunk is
+    /// refined. Refinement second: with leftover budget, the nearest
+    /// resident coarse chunk within `fine_distance` reloads at full
+    /// resolution in place. Chunks beyond `fine_distance` stay coarse — at
+    /// that range a coarse voxel projects to about a fine voxel's pixels —
+    /// and refinement is monotonic while resident, so there is no flapping.
+    ///
+    /// Both phases share one per-tick cost budget (coarse = 1 unit, fine =
+    /// `FINE_LOAD_COST`), keeping the worst-case tick at the old cost of
+    /// `max_loads_per_tick` fine loads. Newly loaded and refined chunks
+    /// upload only their own atlas slot rows; a full re-upload only happens
+    /// on pool relayouts (first load, bigger chunks, level switch) or on
+    /// back ends without partial-update support.
     fn stream_chunks(&mut self) {
         let desired = self
             .policy
@@ -314,24 +352,59 @@ impl Engine {
             self.pool.release(key);
         }
 
+        let mut budget = self.config.max_loads_per_tick as u32 * FINE_LOAD_COST;
         let mut loaded: Vec<ChunkKey> = Vec::new();
+
+        // Phase 1 — availability: missing chunks come in coarse, nearest
+        // first. Only a leftover budget flows into refinement, so a moving
+        // player always fills holes before sharpening anything.
         for &(ox, oz) in &desired {
-            if loaded.len() >= self.config.max_loads_per_tick {
+            if budget == 0 {
                 break;
             }
             let key = chunk_key(ox, oz);
             if !self.store.contains(key) {
-                let payload = self.source.load(ox, oz, self.level);
+                let payload = self.source.load(ox, oz, self.level, COARSE_LOD);
                 self.store.insert(
                     key,
                     LoadedChunk {
                         origin: (ox, oz),
+                        lod: COARSE_LOD,
                         payload,
                     },
                 );
                 loaded.push(key);
+                budget -= 1;
                 changed = true;
             }
+        }
+
+        // Phase 2 — refinement: nearest coarse chunk inside the fine ring.
+        let fine_d2 = self.config.fine_distance * self.config.fine_distance;
+        while budget >= FINE_LOAD_COST {
+            let target = desired.iter().copied().find(|&(ox, oz)| {
+                self.chunk_dist2(ox, oz) <= fine_d2
+                    && self
+                        .store
+                        .get(chunk_key(ox, oz))
+                        .is_some_and(|c| c.lod > 0)
+            });
+            let Some((ox, oz)) = target else { break };
+            let key = chunk_key(ox, oz);
+            let payload = self.source.load(ox, oz, self.level, 0);
+            self.store.insert(
+                key,
+                LoadedChunk {
+                    origin: (ox, oz),
+                    lod: 0,
+                    payload,
+                },
+            );
+            if !loaded.contains(&key) {
+                loaded.push(key);
+            }
+            budget -= FINE_LOAD_COST;
+            changed = true;
         }
 
         if !changed {
@@ -419,6 +492,7 @@ impl Engine {
         );
         HudStats {
             resident_chunks: self.store.len(),
+            fine_chunks: self.store.iter_ordered().filter(|c| c.lod == 0).count(),
             atlas_nodes: self.atlas_nodes,
             collision_boxes: self.world.len(),
             resolution_scale: self.governor.scale(),
@@ -463,7 +537,7 @@ mod tests {
     struct FlatChunkSource;
 
     impl ChunkSourcePort for FlatChunkSource {
-        fn load(&self, origin_x: f32, _origin_z: f32, _level: u32) -> ChunkPayload {
+        fn load(&self, origin_x: f32, _origin_z: f32, _level: u32, _lod: u8) -> ChunkPayload {
             ChunkPayload {
                 root: 0,
                 nodes: [1u32, 0, 0, 0].repeat(1024), // one padded row of air leaves
@@ -480,7 +554,7 @@ mod tests {
     }
 
     impl ChunkSourcePort for TrappingChunkSource {
-        fn load(&self, _x: f32, _z: f32, level: u32) -> ChunkPayload {
+        fn load(&self, _x: f32, _z: f32, level: u32, _lod: u8) -> ChunkPayload {
             self.levels.borrow_mut().push(level);
             ChunkPayload {
                 root: 0,
@@ -504,25 +578,61 @@ mod tests {
     }
 
     #[test]
-    fn streams_multiple_chunks_per_tick_up_to_max_loads() {
+    fn streams_coarse_first_then_refines_nearest_first() {
         let (mut engine, uploads, _draws) = engine_with_recorder();
         let input = InputFrame::default();
 
-        // 9 chunks total are desired (radius 1). With max_loads_per_tick=2:
-        // 2+2+2+2+1 over five ticks.
-        for expected in [2usize, 4, 6, 8, 9] {
+        // 9 chunks are desired (radius 1). The per-tick budget is
+        // max_loads_per_tick * FINE_LOAD_COST = 8 units; a coarse load costs
+        // 1, a fine load 4. Tick 1: eight coarse loads — the world is
+        // visible (and `ready`) after one tick instead of five.
+        engine.tick(1.0 / 60.0, &input);
+        assert_eq!(engine.stats().resident_chunks, 8);
+        assert_eq!(engine.stats().fine_chunks, 0);
+        assert!(engine.stats().ready, "coarse spawn chunk flips ready");
+
+        // Tick 2: the last coarse load + one refinement. Ticks 3-6: two
+        // refinements each; every chunk is within fine_distance (15) here.
+        for expected_fine in [1usize, 3, 5, 7, 9] {
             engine.tick(1.0 / 60.0, &input);
-            assert_eq!(engine.stats().resident_chunks, expected);
+            assert_eq!(engine.stats().resident_chunks, 9);
+            assert_eq!(engine.stats().fine_chunks, expected_fine);
         }
-        assert_eq!(uploads.borrow().len(), 5);
+        assert_eq!(uploads.borrow().len(), 6, "one upload per changed tick");
 
         // Subsequent ticks should not load anything or re-upload.
         for _ in 0..5 {
             engine.tick(1.0 / 60.0, &input);
         }
         assert_eq!(engine.stats().resident_chunks, 9);
-        assert_eq!(uploads.borrow().len(), 5);
-        assert!(engine.stats().ready);
+        assert_eq!(engine.stats().fine_chunks, 9);
+        assert_eq!(uploads.borrow().len(), 6);
+    }
+
+    #[test]
+    fn chunks_beyond_fine_distance_stay_coarse() {
+        let renderer = RecordingRenderer::default();
+        let mut engine = Engine::new(
+            EngineConfig {
+                // Spawn is at (5,5) mid-chunk: every neighbour chunk's
+                // nearest point is >= 5 units away, so only the player's own
+                // chunk sits inside the fine ring.
+                fine_distance: 3.0,
+                ..EngineConfig::default()
+            },
+            Box::new(renderer),
+            Box::new(FlatChunkSource),
+        );
+        let input = InputFrame::default();
+        for _ in 0..30 {
+            engine.tick(1.0 / 60.0, &input);
+        }
+        assert_eq!(engine.stats().resident_chunks, 9);
+        assert_eq!(
+            engine.stats().fine_chunks,
+            1,
+            "distant chunks must keep their cheap coarse LOD"
+        );
     }
 
     #[test]
@@ -543,10 +653,12 @@ mod tests {
             engine.tick(1.0 / 60.0, &input);
         }
         assert_eq!(engine.stats().resident_chunks, 9);
-        // The first tick sizes the pool (full upload of 2 chunks); every
-        // later load goes through the partial row path.
+        assert_eq!(engine.stats().fine_chunks, 9);
+        // The first tick sizes the pool (full upload of its 8 coarse
+        // chunks); every later load — the 9th coarse chunk plus all 9 in-
+        // place refinements — goes through the partial row path.
         assert_eq!(uploads.borrow().len(), 1, "exactly one full upload");
-        assert_eq!(row_uploads.borrow().len(), 7, "remaining chunks partial");
+        assert_eq!(row_uploads.borrow().len(), 10, "remaining loads partial");
     }
 
     #[test]
@@ -558,8 +670,8 @@ mod tests {
         }
         assert_eq!(
             uploads.borrow().len(),
-            5,
-            "no uploads once resident set is stable"
+            6,
+            "no uploads once resident set is stable and fully refined"
         );
     }
 

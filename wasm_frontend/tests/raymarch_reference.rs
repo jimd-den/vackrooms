@@ -282,7 +282,8 @@ fn multi_chunk_raymarch_reports_no_phantom_geometry() {
             let (ox, oz) = (dx as f32 * 10.0, dz as f32 * 10.0);
             chunks.push(LoadedChunk {
                 origin: (ox, oz),
-                payload: source.load(ox, oz, 0),
+                lod: 0,
+                payload: source.load(ox, oz, 0, 0),
             });
         }
     }
@@ -365,7 +366,8 @@ fn pitched_rays_never_escape_through_cracks() {
             let (ox, oz) = (dx as f32 * 10.0, dz as f32 * 10.0);
             chunks.push(LoadedChunk {
                 origin: (ox, oz),
-                payload: source.load(ox, oz, 0),
+                lod: 0,
+                payload: source.load(ox, oz, 0, 0),
             });
         }
     }
