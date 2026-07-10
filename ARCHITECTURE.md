@@ -3,8 +3,10 @@
 A voxel-only rendering engine built on **Clean Architecture**, targeting
 low-spec hardware. The whole engine — procedural generation, lighting, sparse
 voxel octree (SVO) construction, chunk streaming, player physics, and WebGL2
-raymarching — compiles to a single ~140 KB WebAssembly module. The browser
-runs it; a zero-dependency native HTTP server merely serves the files.
+raymarching — compiles to a single ~410 KB WebAssembly module. The browser
+runs it; a zero-dependency native HTTP server merely serves the files (or, on
+GitHub Pages, static files alone — the wasm engine generates chunks entirely
+client-side and needs no server).
 
 ## Rendering family
 
@@ -206,7 +208,7 @@ through a wall.
 
 Ports make the interesting logic natively testable — no browser, no GPU:
 
-- `cargo test --workspace` runs 40 tests: entities, generation, lighting,
+- `cargo test --workspace` runs 116 tests: entities, generation, lighting,
   octree build/serialize, plus the front end's player physics, sliding
   collision, streaming policy/eviction, atlas rebasing, input mapping, and
   the resolution governor.
