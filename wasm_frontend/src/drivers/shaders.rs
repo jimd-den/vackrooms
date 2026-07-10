@@ -489,10 +489,10 @@ void main() {
 pub const SURFACE_VERTEX_SHADER: &str = r#"#version 300 es
 precision highp float;
 
-in vec3 aPosition;
+layout(location = 0) in vec3 aPosition;
 in float aNormalAxis;
 in float aMaterial;
-in float aLight;
+in float aStaticIndirect;
 in float aAo;
 
 uniform mat4 uProjection;
@@ -502,7 +502,7 @@ uniform vec3 uChunkOrigin;
 out vec3 vWorldPosition;
 out vec3 vNormal;
 flat out float vMaterial;
-flat out float vLight;
+flat out float vStaticIndirect;
 flat out float vAo;
 
 vec3 normalForAxis(float axis) {
@@ -519,7 +519,7 @@ void main() {
     vWorldPosition = world;
     vNormal = normalForAxis(aNormalAxis);
     vMaterial = aMaterial;
-    vLight = aLight;
+    vStaticIndirect = aStaticIndirect;
     vAo = aAo;
     gl_Position = uProjection * uView * vec4(world, 1.0);
 }
@@ -527,15 +527,28 @@ void main() {
 
 pub const SURFACE_FRAGMENT_SHADER: &str = r#"#version 300 es
 precision highp float;
+precision highp sampler3D;
 
 in vec3 vWorldPosition;
 in vec3 vNormal;
 flat in float vMaterial;
-flat in float vLight;
+flat in float vStaticIndirect;
 flat in float vAo;
 
 uniform vec3 uCameraPosition;
 uniform int uFlashlightEnabled;
+uniform sampler3D uLightVolume;
+uniform vec3 uChunkOrigin;
+uniform vec3 uChunkSize;
+
+uniform int uLightCount;
+uniform vec3 uLightPositions[4];
+uniform vec3 uLightColors[4];
+uniform vec4 uLightParams[4];
+
+uniform sampler2D uShadowMap;
+uniform mat4 uLightViewProjection;
+uniform int uShadowedLightIndex;
 
 out vec4 fragColor;
 
@@ -551,8 +564,92 @@ vec3 materialColor(float material) {
     return vec3(1.0, 0.16, 0.10);                      // red light
 }
 
+float pcf4(sampler2D shadowMap, vec2 uv, float compareDepth) {
+    vec2 texelSize = 1.0 / vec2(textureSize(shadowMap, 0));
+    float shadow = 0.0;
+    
+    vec2 offsets[4] = vec2[](
+        vec2(-0.5, -0.5), vec2(0.5, -0.5),
+        vec2(-0.5,  0.5), vec2(0.5,  0.5)
+    );
+    
+    for(int i = 0; i < 4; i++) {
+        float pcfDepth = texture(shadowMap, uv + offsets[i] * texelSize).r;
+        shadow += (compareDepth > pcfDepth) ? 0.0 : 1.0;
+    }
+    return shadow / 4.0;
+}
+
+float ign(vec2 p) {
+    vec3 magic = vec3(0.06711056, 0.00583715, 52.9829189);
+    return fract(magic.z * fract(dot(p, magic.xy)));
+}
+
+float shadowVisibility(vec3 worldPos, vec3 normal, vec3 lightDir, vec2 halfSize) {
+    // Interleaved gradient noise for area sampling
+    float noise = ign(gl_FragCoord.xy) * 6.283185;
+    vec2 offset = vec2(cos(noise), sin(noise)) * halfSize;
+    
+    // Simulate moving the light by moving the receiver in the opposite direction
+    vec3 jitteredPos = worldPos + vec3(-offset.x, 0.0, -offset.y);
+    
+    vec4 lightClip = uLightViewProjection * vec4(jitteredPos + normal * 0.025, 1.0);
+    vec3 p = lightClip.xyz / lightClip.w;
+    vec2 uv = p.xy * 0.5 + 0.5;
+    float receiverDepth = p.z * 0.5 + 0.5;
+
+    if (any(lessThan(uv, vec2(0.0))) || any(greaterThan(uv, vec2(1.0))) || receiverDepth >= 1.0) {
+        return 1.0;
+    }
+
+    float bias = max(0.003 * (1.0 - dot(normal, lightDir)), 0.0008);
+    return pcf4(uShadowMap, uv, receiverDepth - bias);
+}
+
 bool emissive(float material) {
     return abs(material - 4.0) < 0.1 || abs(material - 9.0) < 0.1;
+}
+
+float hash3D(vec3 p) {
+    return fract(sin(dot(p, vec3(12.9898, 78.233, 45.164))) * 43758.5453);
+}
+
+float getOrderedDither() {
+    int x = int(gl_FragCoord.x) % 4;
+    int y = int(gl_FragCoord.y) % 4;
+    int index = x + y * 4;
+    float threshold = 0.0;
+    if (index == 0) threshold = 0.0625;
+    else if (index == 1) threshold = 0.5625;
+    else if (index == 2) threshold = 0.1875;
+    else if (index == 3) threshold = 0.6875;
+    else if (index == 4) threshold = 0.8125;
+    else if (index == 5) threshold = 0.3125;
+    else if (index == 6) threshold = 0.9375;
+    else if (index == 7) threshold = 0.4375;
+    else if (index == 8) threshold = 0.25;
+    else if (index == 9) threshold = 0.75;
+    else if (index == 10) threshold = 0.125;
+    else if (index == 11) threshold = 0.625;
+    else if (index == 12) threshold = 0.875;
+    else if (index == 13) threshold = 0.375;
+    else if (index == 14) threshold = 0.95;
+    else if (index == 15) threshold = 0.45;
+    return threshold - 0.5;
+}
+
+vec3 quantize5(vec3 lightColor, float dither) {
+    vec3 bands = lightColor * 4.0;
+    bands.r = floor(bands.r + dither * 0.4 + 0.5) / 4.0;
+    bands.g = floor(bands.g + dither * 0.4 + 0.5) / 4.0;
+    bands.b = floor(bands.b + dither * 0.4 + 0.5) / 4.0;
+    return max(bands, 0.0);
+}
+
+float getGrime(vec3 pos) {
+    float n = sin(pos.x * 0.15) * cos(pos.z * 0.15) * sin(pos.y * 0.3);
+    n += 0.35 * sin(pos.x * 0.8 + pos.y * 0.5) * cos(pos.z * 0.8);
+    return mix(0.85, 1.0, clamp(n * 0.5 + 0.5, 0.0, 1.0));
 }
 
 void main() {
@@ -562,31 +659,183 @@ void main() {
     float distanceToCamera = length(toCamera);
     vec3 V = toCamera / max(distanceToCamera, 0.001);
 
-    float baked = clamp(vLight / 15.0, 0.0, 1.0);
-    float faceResponse = N.y > 0.5 ? 1.0 : (N.y < -0.5 ? 0.74 : 0.86);
-    float ao = mix(1.0, 0.58, clamp(vAo, 0.0, 1.0));
-    vec3 indirect = vec3(0.09, 0.075, 0.035)
-        + vec3(1.0, 0.95, 0.72) * (0.08 + 0.92 * baked);
+    vec3 uvw = (vWorldPosition - uChunkOrigin) / uChunkSize;
+    vec3 irradiance = texture(uLightVolume, clamp(uvw, 0.0, 1.0)).rgb;
+    irradiance = max(irradiance, vec3(0.16, 0.13, 0.07));
+    irradiance = mix(vec3(0.18, 0.15, 0.08), irradiance, 0.25);    
+    
+    // Upward-facing surfaces brightest, downward surfaces notably darker, side walls vary subtly by cardinal direction
+    float faceResponse = 0.8;
+    if (N.y > 0.5) {
+        faceResponse = 1.0;
+    } else if (N.y < -0.5) {
+        faceResponse = 0.35;
+    } else {
+        faceResponse = 0.65 + 0.1 * N.x + 0.05 * N.z;
+    }
+    
+    // Strengthen voxel AO, but clamp so it is never pure black
+    float ao = mix(1.0, 0.22, clamp(vAo * 1.3, 0.0, 1.0));
+    
+    float roughness = 0.8;
+    if (vMaterial > 1.5 && vMaterial < 2.5) {
+        roughness = 0.4; // Pillars
+    } else if (vMaterial > 0.5 && vMaterial < 1.5) {
+        roughness = 0.6; // Floor
+    }
+
+    // Yellow-green ambient and olive shadows
+    vec3 ambientUp = vec3(0.35, 0.38, 0.22) * irradiance;
+    vec3 ambientDown = vec3(0.14, 0.15, 0.08) * irradiance;
+    vec3 ambient = mix(ambientDown, ambientUp, N.y * 0.5 + 0.5) * ao * faceResponse;
 
     float flashlight = 0.0;
     if (uFlashlightEnabled == 1) {
-        // The flashlight follows the view sufficiently closely for a cheap
-        // stabilizing fill light; no shadow map or extra geometry pass.
         float facing = max(dot(N, V), 0.0);
-        flashlight = facing * facing * (1.0 - smoothstep(2.0, 24.0, distanceToCamera)) * 1.35;
+        flashlight = facing * facing * (1.0 - smoothstep(2.0, 24.0, distanceToCamera)) * 1.5;
     }
 
     vec3 color;
     if (emissive(vMaterial)) {
-        color = albedo * (1.7 + 0.35 * baked);
+        // Restrained emissive fixtures
+        color = albedo * 1.5;
     } else {
-        color = albedo * (indirect * faceResponse * ao + vec3(flashlight));
+        vec3 directDiffuse = vec3(0.0);
+        vec3 directSpecular = vec3(0.0);
+        
+        for (int i = 0; i < 4; ++i) {
+            if (i >= uLightCount) break;
+            
+            vec3 toLight = uLightPositions[i] - vWorldPosition;
+            float d2 = dot(toLight, toLight);
+            float range = uLightParams[i].x;
+            float range2 = range * range;
+
+            if (d2 >= range2) continue;
+
+            float d = sqrt(d2);
+            vec3 L = toLight / max(d, 0.001);
+            
+            float ndotl = max(dot(N, L), 0.0);
+            
+            // Specular (Blinn-Phong)
+            vec3 H = normalize(L + V);
+            float ndoth = max(dot(N, H), 0.0);
+            float specPower = exp2(10.0 * (1.0 - roughness) + 1.0);
+            float specular = pow(ndoth, specPower) * (1.0 - roughness) * 0.5;
+
+            // Inverse square falloff
+            float falloff = pow(max(1.0 - d2 / range2, 0.0), 2.0) / (1.0 + 0.05 * d2);
+
+            float visible = 1.0;
+            if (i == uShadowedLightIndex) {
+                visible = shadowVisibility(vWorldPosition, N, L, uLightParams[i].zw);
+            }
+
+            // Subtle deterministic world-space fluorescent flicker/noise to direct light only
+            float lightHash = hash3D(uLightPositions[i] * 10.0);
+            float eyeHum = hash3D(vWorldPosition + uCameraPosition * 0.01);
+            float directMod = (1.0 + 0.05 * (lightHash - 0.5)) * (1.0 + 0.02 * (eyeHum - 0.5));
+
+            // Cream highlights under fixtures
+            vec3 lightColor = mix(uLightColors[i], vec3(1.0, 0.96, 0.85), 0.3);
+
+            directDiffuse += lightColor * uLightParams[i].y * falloff * visible * ndotl * directMod;
+            directSpecular += lightColor * uLightParams[i].y * falloff * visible * specular * directMod;
+        }
+
+        // Quantize indirect (ambient) + direct diffuse into 5 bands with ordered dithering
+        float ditherVal = getOrderedDither();
+        vec3 totalDiffuseLight = quantize5(ambient + directDiffuse, ditherVal);
+
+        // Low-frequency grime/stain modulation on albedo
+        float grime = getGrime(vWorldPosition);
+        vec3 modulatedAlbedo = albedo * grime;
+
+        color = totalDiffuseLight * modulatedAlbedo + directSpecular + modulatedAlbedo * vec3(flashlight);
     }
 
-    float fog = exp(-distanceToCamera * 0.040);
-    color = mix(vec3(0.065, 0.055, 0.025), color, fog);
+    // Fog with onset distance - pushed further back for large open spaces like the Atrium
+    float fogOnset = 15.0;
+    float fogDist = max(0.0, distanceToCamera - fogOnset);
+    float fogDensity = 0.028;
+    float heightFactor = 1.0 + 0.35 * smoothstep(0.0, 3.4, vWorldPosition.y);
+    
+    // Ensure fog reaches exactly 1.0 before the chunk ungenerated boundary
+    float fogAmount = 1.0 - exp(-fogDist * fogDensity * heightFactor);
+    fogAmount = max(fogAmount, smoothstep(38.0, 50.0, distanceToCamera));
+
+    // Volumetric scattering (glow) 
+    vec3 glow = vec3(0.0);
+    for (int i = 0; i < 4; ++i) {
+        if (i >= uLightCount) break;
+        vec3 toLight = uLightPositions[i] - uCameraPosition;
+        float dl = length(toLight);
+        vec3 L = toLight / max(dl, 0.001);
+        
+        float cosTheta = max(dot(L, V), 0.0);
+        float phase = pow(cosTheta, 12.0) * 0.6 + pow(cosTheta, 4.0) * 0.15;
+        
+        float depthMask = smoothstep(dl - 2.0, dl + 2.0, distanceToCamera);
+        float attenuation = smoothstep(45.0, 0.0, dl);
+        
+        glow += uLightColors[i] * uLightParams[i].y * phase * attenuation * depthMask * 2.5;
+    }
+
+    // Slight distance desaturation and contrast compression before fog, retaining bright emissive ceiling fixtures
+    if (!emissive(vMaterial)) {
+        float desatFactor = clamp(distanceToCamera * 0.015, 0.0, 0.55);
+        float gray = dot(color, vec3(0.299, 0.587, 0.114));
+        color = mix(color, vec3(gray), desatFactor);
+        color = mix(color, vec3(0.22, 0.18, 0.12), desatFactor * 0.35); // pull toward a warm middle gray
+    }
+
+    // Baseline fog color
+    vec3 baselineFogColor = vec3(0.15, 0.125, 0.055);
+    
+    // Height-based fog color: warmer/darker near the floor, sickly-green/dimmer near the ceiling
+    float hNorm = clamp(vWorldPosition.y / 5.0, 0.0, 1.0);
+    vec3 heightFogColor = mix(
+        vec3(0.12, 0.09, 0.035), // warmer/darker near the floor
+        vec3(0.14, 0.15, 0.06), // sickly-green/dimmer near the ceiling
+        hNorm
+    );
+    
+    // Seamless transition back to baseline fog color at far boundary
+    float farFade = smoothstep(35.0, 50.0, distanceToCamera);
+    vec3 currentFogColor = mix(heightFogColor, baselineFogColor, farFade);
+    
+    // Also fade the volumetric glow to 0 at the far clip so it doesn't cause a gap
+    currentFogColor += glow * (1.0 - farFade);
+    
+    // Blend geometry color toward currentFogColor
+    color = mix(color, currentFogColor, clamp(fogAmount, 0.0, 1.0));
+    
+    // Add a subtle ambient glow to the near-field (so it isn't completely dry and flat up close)
+    color += glow * 0.12 * exp(-distanceToCamera * 0.05);
+
+    // Simple tone mapping and gamma
     color = color / (color + vec3(1.0));
     color = pow(color, vec3(1.0 / 2.2));
+    
     fragColor = vec4(color, 1.0);
+}
+"#;
+
+pub const SHADOW_VERTEX_SHADER: &str = r#"#version 300 es
+layout(location = 0) in vec3 aPosition;
+uniform mat4 uLightViewProjection;
+uniform vec3 uChunkOrigin;
+
+void main() {
+    vec3 worldPosition = uChunkOrigin + aPosition * (1.0 / 1024.0);
+    gl_Position = uLightViewProjection * vec4(worldPosition, 1.0);
+}
+"#;
+
+pub const SHADOW_FRAGMENT_SHADER: &str = r#"#version 300 es
+precision highp float;
+void main() {
+    // Depth is automatically written to the depth buffer.
 }
 "#;

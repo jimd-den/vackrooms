@@ -29,7 +29,26 @@ impl CpuCanvasRenderer {
     }
 
     pub fn resize(&mut self, width: u32, height: u32) {
-        self.rasterizer.resize(width as usize, height as usize);
+        // Impose a low CPU backing resolution cap (480x270 max), keeping aspect ratio
+        let max_w = 480.0;
+        let max_h = 270.0;
+        let scale = (max_w / width as f32).min(max_h / height as f32).min(1.0);
+        let w = ((width as f32 * scale).round() as usize).max(1);
+        let h = ((height as f32 * scale).round() as usize).max(1);
+
+        self.rasterizer.resize(w, h);
+    }
+
+    pub fn telemetry_string(&self) -> String {
+        let stats = self.rasterizer.telemetry();
+        format!(
+            "V:{} (D:{})/S:{}/P:{}K{}",
+            stats.visited_nodes,
+            stats.max_virtual_depth,
+            stats.splat_count,
+            stats.pixel_writes / 1000,
+            if stats.budget_exhausted { "!" } else { "" }
+        )
     }
 }
 
@@ -38,13 +57,20 @@ impl RendererPort for CpuCanvasRenderer {
         self.rasterizer.upload_atlas(texels);
     }
 
+    fn cpu_telemetry_string(&self) -> Option<String> {
+        Some(self.telemetry_string())
+    }
+
     fn draw(&mut self, frame: &FrameParams, chunks: &[ChunkDraw]) {
         self.rasterizer.draw(frame, chunks);
         let width = self.rasterizer.width() as u32;
+        let height = self.rasterizer.height() as u32;
+        let fb = self.rasterizer.framebuffer();
+        
         if let Ok(image) = ImageData::new_with_u8_clamped_array_and_sh(
-            Clamped(self.rasterizer.framebuffer()),
+            Clamped(fb),
             width,
-            self.rasterizer.height() as u32,
+            height,
         ) {
             let _ = self.ctx.put_image_data(&image, 0.0, 0.0);
         }

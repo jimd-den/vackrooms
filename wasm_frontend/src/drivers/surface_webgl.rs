@@ -28,6 +28,20 @@ struct Uniforms {
     chunk_origin: Option<WebGlUniformLocation>,
     camera_position: Option<WebGlUniformLocation>,
     flashlight: Option<WebGlUniformLocation>,
+    light_volume: Option<WebGlUniformLocation>,
+    chunk_size: Option<WebGlUniformLocation>,
+    light_count: Option<WebGlUniformLocation>,
+    light_positions: Option<WebGlUniformLocation>,
+    light_colors: Option<WebGlUniformLocation>,
+    light_params: Option<WebGlUniformLocation>,
+    shadow_map: Option<WebGlUniformLocation>,
+    light_view_proj: Option<WebGlUniformLocation>,
+    shadowed_light_index: Option<WebGlUniformLocation>,
+}
+
+struct ShadowUniforms {
+    light_view_proj: Option<WebGlUniformLocation>,
+    chunk_origin: Option<WebGlUniformLocation>,
 }
 
 struct GpuMesh {
@@ -37,6 +51,8 @@ struct GpuMesh {
     index_count: i32,
     origin: [f32; 3],
     bounds_max: [f32; 3],
+    light_texture: web_sys::WebGlTexture,
+    lights: Vec<crate::application::ports::LightSource>,
 }
 
 /// Surface rasterizer with incremental chunk mesh uploads. One VAO/VBO/IBO
@@ -51,6 +67,10 @@ pub struct SurfaceRenderer {
     timer_extension: Option<Object>,
     pending_timer: Option<WebGlQuery>,
     last_gpu_ms: Option<f32>,
+    shadow_program: WebGlProgram,
+    shadow_uniforms: ShadowUniforms,
+    shadow_fbo: web_sys::WebGlFramebuffer,
+    shadow_texture: web_sys::WebGlTexture,
 }
 
 impl SurfaceRenderer {
@@ -77,11 +97,42 @@ impl SurfaceRenderer {
             chunk_origin: gl.get_uniform_location(&program, "uChunkOrigin"),
             camera_position: gl.get_uniform_location(&program, "uCameraPosition"),
             flashlight: gl.get_uniform_location(&program, "uFlashlightEnabled"),
+            light_volume: gl.get_uniform_location(&program, "uLightVolume"),
+            chunk_size: gl.get_uniform_location(&program, "uChunkSize"),
+            light_count: gl.get_uniform_location(&program, "uLightCount"),
+            light_positions: gl.get_uniform_location(&program, "uLightPositions"),
+            light_colors: gl.get_uniform_location(&program, "uLightColors"),
+            light_params: gl.get_uniform_location(&program, "uLightParams"),
+            shadow_map: gl.get_uniform_location(&program, "uShadowMap"),
+            light_view_proj: gl.get_uniform_location(&program, "uLightViewProjection"),
+            shadowed_light_index: gl.get_uniform_location(&program, "uShadowedLightIndex"),
         };
         let timer_extension = gl
             .get_extension("EXT_disjoint_timer_query_webgl2")
             .ok()
             .flatten();
+
+        let shadow_program = link_program(&gl, crate::drivers::shaders::SHADOW_VERTEX_SHADER, crate::drivers::shaders::SHADOW_FRAGMENT_SHADER)?;
+        let shadow_uniforms = ShadowUniforms {
+            light_view_proj: gl.get_uniform_location(&shadow_program, "uLightViewProjection"),
+            chunk_origin: gl.get_uniform_location(&shadow_program, "uChunkOrigin"),
+        };
+
+        let shadow_texture = gl.create_texture().unwrap();
+        gl.bind_texture(Gl::TEXTURE_2D, Some(&shadow_texture));
+        gl.tex_image_2d_with_i32_and_i32_and_i32_and_format_and_type_and_opt_u8_array(
+            Gl::TEXTURE_2D, 0, Gl::DEPTH_COMPONENT16 as i32, 128, 128, 0,
+            Gl::DEPTH_COMPONENT, Gl::UNSIGNED_SHORT, None
+        ).unwrap();
+        gl.tex_parameteri(Gl::TEXTURE_2D, Gl::TEXTURE_MIN_FILTER, Gl::NEAREST as i32);
+        gl.tex_parameteri(Gl::TEXTURE_2D, Gl::TEXTURE_MAG_FILTER, Gl::NEAREST as i32);
+        gl.tex_parameteri(Gl::TEXTURE_2D, Gl::TEXTURE_WRAP_S, Gl::CLAMP_TO_EDGE as i32);
+        gl.tex_parameteri(Gl::TEXTURE_2D, Gl::TEXTURE_WRAP_T, Gl::CLAMP_TO_EDGE as i32);
+
+        let shadow_fbo = gl.create_framebuffer().unwrap();
+        gl.bind_framebuffer(Gl::FRAMEBUFFER, Some(&shadow_fbo));
+        gl.framebuffer_texture_2d(Gl::FRAMEBUFFER, Gl::DEPTH_ATTACHMENT, Gl::TEXTURE_2D, Some(&shadow_texture), 0);
+        gl.bind_framebuffer(Gl::FRAMEBUFFER, None);
 
         Ok(Self {
             gl,
@@ -93,6 +144,10 @@ impl SurfaceRenderer {
             timer_extension,
             pending_timer: None,
             last_gpu_ms: None,
+            shadow_program,
+            shadow_uniforms,
+            shadow_fbo,
+            shadow_texture,
         })
     }
 
@@ -105,6 +160,7 @@ impl SurfaceRenderer {
         self.gl.delete_vertex_array(Some(&mesh.vao));
         self.gl.delete_buffer(Some(&mesh.vertex_buffer));
         self.gl.delete_buffer(Some(&mesh.index_buffer));
+        self.gl.delete_texture(Some(&mesh.light_texture));
     }
 
     fn upload_surface(&mut self, chunk: SurfaceChunk<'_>) {
@@ -126,7 +182,7 @@ impl SurfaceRenderer {
             packed.extend_from_slice(&v.position[0].to_le_bytes());
             packed.extend_from_slice(&v.position[1].to_le_bytes());
             packed.extend_from_slice(&v.position[2].to_le_bytes());
-            packed.extend_from_slice(&[v.normal_axis, v.material, v.light, v.ao]);
+            packed.extend_from_slice(&[v.normal_axis, v.material, v.static_indirect, v.ao]);
         }
         gl.bind_buffer(Gl::ARRAY_BUFFER, Some(&vertex_buffer));
         let vertex_bytes = Uint8Array::from(packed.as_slice());
@@ -145,6 +201,27 @@ impl SurfaceRenderer {
         gl.bind_buffer(Gl::ARRAY_BUFFER, None);
         gl.bind_buffer(Gl::ELEMENT_ARRAY_BUFFER, None);
 
+        let light_texture = gl.create_texture().expect("create light texture");
+        gl.bind_texture(Gl::TEXTURE_3D, Some(&light_texture));
+        gl.tex_image_3d_with_opt_u8_array(
+            Gl::TEXTURE_3D,
+            0,
+            Gl::RGB8 as i32,
+            chunk.mesh.light_volume_size[0] as i32,
+            chunk.mesh.light_volume_size[1] as i32,
+            chunk.mesh.light_volume_size[2] as i32,
+            0,
+            Gl::RGB,
+            Gl::UNSIGNED_BYTE,
+            Some(&chunk.mesh.light_volume),
+        ).unwrap();
+        gl.tex_parameteri(Gl::TEXTURE_3D, Gl::TEXTURE_MIN_FILTER, Gl::LINEAR as i32);
+        gl.tex_parameteri(Gl::TEXTURE_3D, Gl::TEXTURE_MAG_FILTER, Gl::LINEAR as i32);
+        gl.tex_parameteri(Gl::TEXTURE_3D, Gl::TEXTURE_WRAP_S, Gl::CLAMP_TO_EDGE as i32);
+        gl.tex_parameteri(Gl::TEXTURE_3D, Gl::TEXTURE_WRAP_T, Gl::CLAMP_TO_EDGE as i32);
+        gl.tex_parameteri(Gl::TEXTURE_3D, Gl::TEXTURE_WRAP_R, Gl::CLAMP_TO_EDGE as i32);
+        gl.bind_texture(Gl::TEXTURE_3D, None);
+ 
         self.meshes.insert(
             chunk.key,
             GpuMesh {
@@ -154,6 +231,8 @@ impl SurfaceRenderer {
                 index_count: chunk.mesh.indices.len().min(i32::MAX as usize) as i32,
                 origin: chunk.origin,
                 bounds_max: chunk.mesh.bounds.max,
+                light_texture,
+                lights: chunk.mesh.lights.clone(),
             },
         );
     }
@@ -164,7 +243,7 @@ impl SurfaceRenderer {
             ("aPosition", 3, Gl::UNSIGNED_SHORT, 0),
             ("aNormalAxis", 1, Gl::UNSIGNED_BYTE, 6),
             ("aMaterial", 1, Gl::UNSIGNED_BYTE, 7),
-            ("aLight", 1, Gl::UNSIGNED_BYTE, 8),
+            ("aStaticIndirect", 1, Gl::UNSIGNED_BYTE, 8),
             ("aAo", 1, Gl::UNSIGNED_BYTE, 9),
         ] {
             let location = gl.get_attrib_location(&self.program, name);
@@ -289,7 +368,8 @@ impl RendererPort for SurfaceRenderer {
         {
             let gl = &self.gl;
             gl.viewport(0, 0, self.width, self.height);
-            gl.clear_color(0.018, 0.016, 0.009, 1.0);
+            // Match the shader's fog color to hide ungenerated chunk boundaries
+            gl.clear_color(0.15, 0.125, 0.055, 1.0);
             gl.clear_depth(1.0);
             gl.clear(Gl::COLOR_BUFFER_BIT | Gl::DEPTH_BUFFER_BIT);
             gl.enable(Gl::DEPTH_TEST);
@@ -317,16 +397,148 @@ impl RendererPort for SurfaceRenderer {
                 if frame.flashlight { 1 } else { 0 },
             );
 
+            // 1. Collect all visible meshes
+            let mut visible_meshes = Vec::new();
             for mesh in self.meshes.values() {
-                if !Self::mesh_visible(mesh, frame) {
-                    continue;
+                if Self::mesh_visible(mesh, frame) {
+                    visible_meshes.push(mesh);
                 }
+            }
+
+            // 2. Collect unique lights across all visible chunks, deduplicated by id
+            let mut unique_lights = HashMap::new();
+            for mesh in &visible_meshes {
+                for light in &mesh.lights {
+                    if light.enabled {
+                        unique_lights.insert(light.id, light);
+                    }
+                }
+            }
+
+            // 3. Sort lights by importance near the player (radius / (distance^2 + 0.1))
+            let mut lights_with_importance: Vec<(&crate::application::ports::LightSource, f32)> = unique_lights
+                .values()
+                .map(|&light| {
+                    let dx = light.position[0] - frame.camera_pos[0];
+                    let dy = light.position[1] - frame.camera_pos[1];
+                    let dz = light.position[2] - frame.camera_pos[2];
+                    let dist2 = dx * dx + dy * dy + dz * dz;
+                    let importance = light.radius / (dist2 + 0.1);
+                    (light, importance)
+                })
+                .collect();
+            lights_with_importance.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+            // Select up to 4 lights for the global shader uniforms
+            let global_light_count = lights_with_importance.len().min(4);
+            let mut global_light_positions = [0.0; 12];
+            let mut global_light_colors = [0.0; 12];
+            let mut global_light_params = [0.0; 16];
+            
+            for i in 0..global_light_count {
+                let light = lights_with_importance[i].0;
+                global_light_positions[i * 3] = light.position[0];
+                global_light_positions[i * 3 + 1] = light.position[1];
+                global_light_positions[i * 3 + 2] = light.position[2];
+                global_light_colors[i * 3] = light.color[0];
+                global_light_colors[i * 3 + 1] = light.color[1];
+                global_light_colors[i * 3 + 2] = light.color[2];
+                global_light_params[i * 4] = light.radius;
+                global_light_params[i * 4 + 1] = if light.radius > 20.0 { 3.0 } else { 1.0 }; // intensity
+                global_light_params[i * 4 + 2] = light.half_size[0];
+                global_light_params[i * 4 + 3] = light.half_size[1];
+            }
+
+            let mut shadowed_light_index = -1;
+            let mut light_view_proj = [0.0; 16];
+
+            if global_light_count > 0 {
+                // The top light is the hero light
+                shadowed_light_index = 0;
+                let hero_light = lights_with_importance[0].0;
+                let lx = hero_light.position[0];
+                let ly = hero_light.position[1];
+                let lz = hero_light.position[2];
+
+                // Derive shadow coverage and far depth from light range/height
+                let range = hero_light.radius;
+                let ortho_half = range * 0.75; // Focus the 128x128 resolution slightly
+                let far_depth = range * 1.2;
+                
+                let proj = ortho_matrix(-ortho_half, ortho_half, -ortho_half, ortho_half, 0.1, far_depth);
+                let view = look_at_matrix_down([lx, ly, lz]);
+                light_view_proj = multiply_matrices(&proj, &view);
+
+                // --- GLOBAL SHADOW PASS ---
+                // Render ALL visible meshes into the shadow map
+                gl.bind_framebuffer(Gl::FRAMEBUFFER, Some(&self.shadow_fbo));
+                gl.viewport(0, 0, 128, 128);
+                gl.color_mask(false, false, false, false);
+                gl.clear_depth(1.0);
+                gl.clear(Gl::DEPTH_BUFFER_BIT);
+                gl.use_program(Some(&self.shadow_program));
+
+                gl.uniform_matrix4fv_with_f32_array(self.shadow_uniforms.light_view_proj.as_ref(), false, &light_view_proj);
+                
+                for mesh in &visible_meshes {
+                    gl.uniform3f(self.shadow_uniforms.chunk_origin.as_ref(), mesh.origin[0], mesh.origin[1], mesh.origin[2]);
+                    gl.bind_vertex_array(Some(&mesh.vao));
+                    gl.draw_elements_with_i32(Gl::TRIANGLES, mesh.index_count, Gl::UNSIGNED_INT, 0);
+                }
+
+                // Restore state for main pass
+                gl.bind_framebuffer(Gl::FRAMEBUFFER, None);
+                gl.viewport(0, 0, self.width, self.height);
+                gl.color_mask(true, true, true, true);
+            }
+
+            gl.use_program(Some(&self.program));
+
+            // Upload camera position and flashlight status
+            gl.uniform3f(
+                self.uniforms.camera_position.as_ref(),
+                frame.camera_pos[0],
+                frame.camera_pos[1],
+                frame.camera_pos[2],
+            );
+            gl.uniform1i(
+                self.uniforms.flashlight.as_ref(),
+                if frame.flashlight { 1 } else { 0 },
+            );
+
+            // Upload global lights (done once per frame)
+            gl.uniform1i(self.uniforms.light_count.as_ref(), global_light_count as i32);
+            if global_light_count > 0 {
+                gl.uniform3fv_with_f32_array(self.uniforms.light_positions.as_ref(), &global_light_positions);
+                gl.uniform3fv_with_f32_array(self.uniforms.light_colors.as_ref(), &global_light_colors);
+                gl.uniform4fv_with_f32_array(self.uniforms.light_params.as_ref(), &global_light_params);
+
+                gl.active_texture(Gl::TEXTURE1);
+                gl.bind_texture(Gl::TEXTURE_2D, Some(&self.shadow_texture));
+                gl.uniform1i(self.uniforms.shadow_map.as_ref(), 1);
+                gl.uniform_matrix4fv_with_f32_array(self.uniforms.light_view_proj.as_ref(), false, &light_view_proj);
+                gl.uniform1i(self.uniforms.shadowed_light_index.as_ref(), shadowed_light_index);
+            } else {
+                gl.uniform1i(self.uniforms.shadowed_light_index.as_ref(), -1);
+            }
+
+            for mesh in &visible_meshes {
                 gl.uniform3f(
                     self.uniforms.chunk_origin.as_ref(),
                     mesh.origin[0],
                     mesh.origin[1],
                     mesh.origin[2],
                 );
+                gl.uniform3f(
+                    self.uniforms.chunk_size.as_ref(),
+                    mesh.bounds_max[0],
+                    mesh.bounds_max[1],
+                    mesh.bounds_max[2],
+                );
+                gl.active_texture(Gl::TEXTURE0);
+                gl.bind_texture(Gl::TEXTURE_3D, Some(&mesh.light_texture));
+                gl.uniform1i(self.uniforms.light_volume.as_ref(), 0);
+
                 gl.bind_vertex_array(Some(&mesh.vao));
                 gl.draw_elements_with_i32(Gl::TRIANGLES, mesh.index_count, Gl::UNSIGNED_INT, 0);
             }
@@ -385,6 +597,58 @@ fn camera_matrices(frame: &FrameParams, width: i32, height: i32) -> ([f32; 16], 
         0.0,
     ];
     (projection, view)
+}
+
+fn ortho_matrix(left: f32, right: f32, bottom: f32, top: f32, near: f32, far: f32) -> [f32; 16] {
+    let mut m = [0.0; 16];
+    m[0] = 2.0 / (right - left);
+    m[5] = 2.0 / (top - bottom);
+    m[10] = -2.0 / (far - near);
+    m[12] = -(right + left) / (right - left);
+    m[13] = -(top + bottom) / (top - bottom);
+    m[14] = -(far + near) / (far - near);
+    m[15] = 1.0;
+    m
+}
+
+fn look_at_matrix_down(eye: [f32; 3]) -> [f32; 16] {
+    // Looking straight down (-Y), up is -Z
+    let forward = [0.0, -1.0, 0.0];
+    let up = [0.0, 0.0, -1.0];
+    let right = [1.0, 0.0, 0.0];
+    
+    let mut m = [0.0; 16];
+    m[0] = right[0];
+    m[1] = up[0];
+    m[2] = -forward[0];
+    
+    m[4] = right[1];
+    m[5] = up[1];
+    m[6] = -forward[1];
+    
+    m[8] = right[2];
+    m[9] = up[2];
+    m[10] = -forward[2];
+    
+    m[12] = -(right[0] * eye[0] + right[1] * eye[1] + right[2] * eye[2]);
+    m[13] = -(up[0] * eye[0] + up[1] * eye[1] + up[2] * eye[2]);
+    m[14] = -(-forward[0] * eye[0] + -forward[1] * eye[1] + -forward[2] * eye[2]);
+    m[15] = 1.0;
+    m
+}
+
+fn multiply_matrices(a: &[f32; 16], b: &[f32; 16]) -> [f32; 16] {
+    let mut m = [0.0; 16];
+    for col in 0..4 {
+        for row in 0..4 {
+            m[col * 4 + row] = 
+                a[0 * 4 + row] * b[col * 4 + 0] +
+                a[1 * 4 + row] * b[col * 4 + 1] +
+                a[2 * 4 + row] * b[col * 4 + 2] +
+                a[3 * 4 + row] * b[col * 4 + 3];
+        }
+    }
+    m
 }
 
 fn compile_shader(gl: &Gl, kind: u32, source: &str) -> Result<WebGlShader, JsValue> {

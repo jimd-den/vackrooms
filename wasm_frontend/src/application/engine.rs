@@ -167,6 +167,7 @@ pub struct Engine {
     config: EngineConfig,
     player: Player,
     policy: StreamingPolicy,
+    visual_policy: StreamingPolicy,
     store: ChunkStore,
     pool: AtlasPool,
     world: CollisionWorld,
@@ -191,12 +192,21 @@ impl Engine {
         renderer: Box<dyn RendererPort>,
         source: Box<dyn ChunkSourcePort>,
     ) -> Self {
-        let radius = config.chunk_radius.clamp(0, 2); // 5x5 max = shader table size
+        let radius = config.chunk_radius.clamp(0, 2);
+        let visual_radius = if renderer.uses_surface_meshes() {
+            4
+        } else {
+            radius
+        };
         Self {
             player: Player::new(config.spawn),
             policy: StreamingPolicy {
                 chunk_size: config.chunk_size,
                 radius,
+            },
+            visual_policy: StreamingPolicy {
+                chunk_size: config.chunk_size,
+                radius: visual_radius,
             },
             store: ChunkStore::new(),
             pool: AtlasPool::new(),
@@ -344,7 +354,10 @@ impl Engine {
         let desired = self
             .policy
             .desired_origins(self.player.position[0], self.player.position[2]);
-        let keep: Vec<_> = desired.iter().map(|&(x, z)| chunk_key(x, z)).collect();
+        let desired_visual = self
+            .visual_policy
+            .desired_origins(self.player.position[0], self.player.position[2]);
+        let keep: Vec<_> = desired_visual.iter().map(|&(x, z)| chunk_key(x, z)).collect();
 
         // Free the atlas slots of chunks about to be evicted.
         let evicted: Vec<ChunkKey> = self
@@ -370,7 +383,7 @@ impl Engine {
         // Phase 1 — availability: missing chunks come in coarse, nearest
         // first. Only a leftover budget flows into refinement, so a moving
         // player always fills holes before sharpening anything.
-        for &(ox, oz) in &desired {
+        for &(ox, oz) in &desired_visual {
             if budget == 0 {
                 break;
             }

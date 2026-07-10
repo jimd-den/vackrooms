@@ -31,12 +31,39 @@ pub fn build_surface_mesh(
             depth as f32 * voxel_scale,
         ],
     );
+    let mut lights = Vec::new();
+    for rl in &halo_grid.runtime_lights {
+        lights.push(crate::application::ports::LightSource {
+            id: rl.world_pos[0].to_bits() as u64 ^ rl.world_pos[2].to_bits() as u64,
+            position: rl.world_pos,
+            half_size: rl.half_size,
+            color: rl.rgb,
+            radius: rl.range,
+            flicker_mode: 0,
+            enabled: rl.enabled,
+        });
+    }
+
     let mut mesh = SurfaceMeshPayload {
         vertices: Vec::with_capacity(quads.len() * 4),
         indices: Vec::with_capacity(quads.len() * 6),
         bounds,
         lod,
+        light_volume: Vec::with_capacity(width * halo_grid.height() * depth * 3),
+        light_volume_size: [width as u32, halo_grid.height() as u32, depth as u32],
+        lights,
     };
+    for z in 0..depth {
+        for y in 0..halo_grid.height() {
+            for x in 0..width {
+                let [r, g, b] = halo_grid.get_light_rgb(x + lateral_padding, y, z + lateral_padding);
+                // The grid light is 0-15, WebGL expects 0-255 for gl.UNSIGNED_BYTE RGB textures.
+                mesh.light_volume.push(r * 17);
+                mesh.light_volume.push(g * 17);
+                mesh.light_volume.push(b * 17);
+            }
+        }
+    }
     for quad in &quads {
         append_quad(&mut mesh, quad, voxel_scale);
     }
@@ -105,7 +132,7 @@ fn append_quad(mesh: &mut SurfaceMeshPayload, quad: &MergedQuad, voxel_scale: f3
             position: position.map(pack_position),
             normal_axis,
             material,
-            light: quad.light,
+            static_indirect: quad.light,
             ao: quad.ao,
         });
     }

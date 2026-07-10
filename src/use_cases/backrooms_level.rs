@@ -617,9 +617,7 @@ impl LevelGenerator for BackroomsLevel {
         let height = (GRID_HEIGHT_UNITS / s) as usize;
         let mut grid = VoxelGrid::new(width, height, depth);
 
-        // Architecture first: plan every region this chunk overlaps. The
-        // plans are pure functions of (seed, region), so any chunk in the
-        // region sees the identical plan.
+        // Architecture first: plan every region this chunk overlaps.
         let plans =
             BackroomsLevel::region_plans_for(chunk_pos, config.chunk_size, seed, &config, noise);
         let plan_of = |wx: f32, wz: f32| -> &RegionPlan {
@@ -630,6 +628,64 @@ impl LevelGenerator for BackroomsLevel {
                 .map(|(_, p)| p)
                 .unwrap_or(&plans[0].1)
         };
+
+        use crate::domain::entities::architecture::{RuntimeLight, LightKind};
+        let mut seen = std::collections::HashSet::new();
+        for (_, plan) in &plans {
+            for a in &plan.assemblies {
+                if a.corruption.abandoned {
+                    continue;
+                }
+                for f in &a.fixtures {
+                    if !f.lit { continue; }
+                    let key = (f.at.x.to_bits(), f.at.z.to_bits());
+                    if !seen.insert(key) { continue; }
+                    
+                    let cx = f.at.x - chunk_pos.x;
+                    let cz = f.at.z - chunk_pos.z;
+                    if cx >= -15.0 && cx <= config.chunk_size + 15.0 && cz >= -15.0 && cz <= config.chunk_size + 15.0 {
+                        let y = a.ceiling_zones.iter()
+                            .find(|z| z.area.contains(f.at.x, f.at.z))
+                            .map(|z| z.height_units)
+                            .unwrap_or(4.0) - 1.1; // Hang below the ceiling (never flush)
+                            
+                        let kind = if f.half_x > f.half_z * 2.0 || f.half_z > f.half_x * 2.0 {
+                            LightKind::Strip
+                        } else {
+                            LightKind::CeilingPanel
+                        };
+
+                        // Ensure we don't spawn a light buried inside a pillar
+                        let mut is_buried = false;
+                        if cx >= 0.0 && cx < config.chunk_size && cz >= 0.0 && cz < config.chunk_size {
+                            let vx = cx.floor() as usize;
+                            let vz = cz.floor() as usize;
+                            let vy = (y / config.voxel_scale).floor() as usize;
+                            if vy < grid.height() {
+                                let v = grid.get(vx, vy, vz);
+                                if v != crate::domain::entities::voxel_grid::VOXEL_AIR && v != crate::domain::entities::voxel_grid::VOXEL_LIGHT {
+                                    is_buried = true;
+                                }
+                            }
+                        }
+
+                        if !is_buried {
+                            let is_atrium = matches!(a.program, crate::domain::entities::architecture::SpaceProgram::Atrium);
+                            
+                            grid.runtime_lights.push(RuntimeLight {
+                                world_pos: [f.at.x, y, f.at.z],
+                                half_size: [f.half_x, f.half_z],
+                                rgb: [1.0, 0.95, 0.8],
+                                range: if is_atrium { 24.0 } else { 16.0 },
+                                intensity: if is_atrium { 3.0 } else { 1.0 },
+                                enabled: true,
+                                kind,
+                            });
+                        }
+                    }
+                }
+            }
+        }
 
         // Plan every column plus a 1-voxel margin: ceiling skirts must seal
         // height steps across chunk borders too.

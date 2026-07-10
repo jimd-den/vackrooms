@@ -19,8 +19,19 @@ pub struct PackedVertex {
     pub position: [u16; 3],
     pub normal_axis: u8,
     pub material: u8,
-    pub light: u8,
+    pub static_indirect: u8,
     pub ao: u8,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct LightSource {
+    pub id: u64,
+    pub position: [f32; 3],
+    pub half_size: [f32; 2],
+    pub color: [f32; 3],
+    pub radius: f32,
+    pub flicker_mode: u8,
+    pub enabled: bool,
 }
 
 /// Indexed greedy-mesh payload for one chunk. The SVO payload remains
@@ -32,6 +43,9 @@ pub struct SurfaceMeshPayload {
     pub indices: Vec<u32>,
     pub bounds: Aabb,
     pub lod: u8,
+    pub light_volume: Vec<u8>,
+    pub light_volume_size: [u32; 3],
+    pub lights: Vec<LightSource>,
 }
 
 impl SurfaceMeshPayload {
@@ -41,6 +55,9 @@ impl SurfaceMeshPayload {
             indices: Vec::new(),
             bounds: Aabb::new([0.0; 3], [0.0; 3]),
             lod,
+            light_volume: Vec::new(),
+            light_volume_size: [0, 0, 0],
+            lights: Vec::new(),
         }
     }
 }
@@ -101,6 +118,11 @@ pub trait RendererPort {
     /// Last asynchronous GPU timing sample, when the driver supports
     /// `EXT_disjoint_timer_query_webgl2`.
     fn gpu_frame_ms(&self) -> Option<f32> {
+        None
+    }
+
+    /// Telemetry data from the CPU renderer fallback, if applicable.
+    fn cpu_telemetry_string(&self) -> Option<String> {
         None
     }
 

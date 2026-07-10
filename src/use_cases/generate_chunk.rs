@@ -592,32 +592,25 @@ impl<'a> GenerateChunkArchitectureUseCase<'a> {
                         }
 
                         if cell.zone != MicrobiomeZone::Atrium {
-                            // Normal ceilings with optional light
+                            // Normal ceilings with hanging light
+                            grid.set(vx, wall_max_y, vz, VOXEL_CEILING); // Always close the ceiling
                             if cell.zone != MicrobiomeZone::Blackout
                                 && (vx % 10 == 0 && vz % 10 == 0)
                             {
                                 if cell.zone == MicrobiomeZone::RedRoom {
-                                    grid.set(
-                                        vx,
-                                        wall_max_y,
-                                        vz,
-                                        crate::domain::entities::voxel_grid::VOXEL_RED_LIGHT,
-                                    );
+                                    grid.set(vx, wall_max_y - 1, vz, crate::domain::entities::voxel_grid::VOXEL_RED_LIGHT);
                                 } else {
-                                    grid.set(vx, wall_max_y, vz, VOXEL_LIGHT);
+                                    grid.set(vx, wall_max_y - 1, vz, VOXEL_LIGHT);
                                 }
-                            } else {
-                                grid.set(vx, wall_max_y, vz, VOXEL_CEILING);
                             }
                             for y in (wall_max_y + 1)..height {
                                 grid.set(vx, y, vz, VOXEL_CEILING);
                             }
                         } else {
-                            // Atrium ceiling and bright skylight effect
+                            // Atrium ceiling and bright hanging light
+                            grid.set(vx, wall_max_y, vz, VOXEL_CEILING);
                             if (vx % 10 == 0 && vz % 10 == 0) {
-                                grid.set(vx, wall_max_y, vz, VOXEL_LIGHT);
-                            } else {
-                                grid.set(vx, wall_max_y, vz, VOXEL_CEILING);
+                                grid.set(vx, wall_max_y - 1, vz, VOXEL_LIGHT);
                             }
                         }
                     }

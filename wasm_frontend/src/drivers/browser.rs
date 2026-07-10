@@ -104,6 +104,13 @@ impl RendererPort for DriverRenderer {
             DriverRenderer::Raymarch(_) | DriverRenderer::Cpu(_) => None,
         }
     }
+    fn cpu_telemetry_string(&self) -> Option<String> {
+        match self {
+            DriverRenderer::Cpu(r) => r.cpu_telemetry_string(),
+            DriverRenderer::Surface(r) => r.cpu_telemetry_string(),
+            DriverRenderer::Raymarch(r) => r.cpu_telemetry_string(),
+        }
+    }
     fn upload_atlas(&mut self, texels: &[u32]) {
         match self {
             DriverRenderer::Surface(r) => r.upload_atlas(texels),
@@ -149,6 +156,9 @@ impl RendererPort for SharedRenderer {
     }
     fn gpu_frame_ms(&self) -> Option<f32> {
         self.0.borrow().gpu_frame_ms()
+    }
+    fn cpu_telemetry_string(&self) -> Option<String> {
+        self.0.borrow().cpu_telemetry_string()
     }
     fn upload_atlas(&mut self, texels: &[u32]) {
         self.0.borrow_mut().upload_atlas(texels);
@@ -558,20 +568,29 @@ fn run_frame_loop(
                 engine.borrow().stats().resolution_scale as f64
             };
             let scale = governor_scale * renderer.borrow().resolution_factor();
-            let target_w = (loop_window
+            let mut target_w = (loop_window
                 .inner_width()
                 .ok()
                 .and_then(|v| v.as_f64())
                 .unwrap_or(800.0)
                 * scale)
                 .max(1.0) as u32;
-            let target_h = (loop_window
+            let mut target_h = (loop_window
                 .inner_height()
                 .ok()
                 .and_then(|v| v.as_f64())
                 .unwrap_or(600.0)
                 * scale)
                 .max(1.0) as u32;
+
+            if matches!(*renderer.borrow(), DriverRenderer::Cpu(_)) {
+                let max_w = 480.0;
+                let max_h = 270.0;
+                let cap_scale = (max_w / target_w as f32).min(max_h as f32 / target_h as f32).min(1.0);
+                target_w = (target_w as f32 * cap_scale).round() as u32;
+                target_h = (target_h as f32 * cap_scale).round() as u32;
+            }
+
             if canvas.width() != target_w || canvas.height() != target_h {
                 canvas.set_width(target_w);
                 canvas.set_height(target_h);
@@ -613,10 +632,15 @@ fn run_frame_loop(
             hud_nodes.set_text_content(Some(&stats.atlas_nodes.to_string()));
             hud_scale.set_text_content(Some(&format!("{:.0}%", stats.resolution_scale * 100.0)));
             let gpu = renderer.borrow().gpu_frame_ms();
-            hud_gpu.set_text_content(Some(
-                &gpu.map(|ms| format!("{ms:.1} ms"))
-                    .unwrap_or_else(|| "n/a".to_string()),
-            ));
+            let cpu_telemetry = renderer.borrow().cpu_telemetry_string();
+            if let Some(text) = cpu_telemetry {
+                hud_gpu.set_text_content(Some(&text));
+            } else {
+                hud_gpu.set_text_content(Some(
+                    &gpu.map(|ms| format!("{ms:.1} ms"))
+                        .unwrap_or_else(|| "n/a".to_string()),
+                ));
+            }
         }
 
         // Schedule next frame.

@@ -249,6 +249,24 @@ pub struct Fixture {
     pub lit: bool,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LightKind {
+    CeilingPanel,
+    Strip,
+    Emergency,
+}
+
+#[derive(Clone, Debug)]
+pub struct RuntimeLight {
+    pub world_pos: [f32; 3],
+    pub half_size: [f32; 2],
+    pub rgb: [f32; 3],
+    pub range: f32,
+    pub intensity: f32,
+    pub enabled: bool,
+    pub kind: LightKind,
+}
+
 /// A void reserved for building services (risers, plenums). v1: reserved and
 /// rendered as sealed solids; kept in the model so later passes can route
 /// through them.

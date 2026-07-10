@@ -37,7 +37,7 @@ const HALF_FOV_TAN: f32 = 0.767;
 const LOD_CUTOFF_PX: f32 = 1.0;
 /// Solid leaves are virtually subdivided until their projected half-extent
 /// is at most this many pixels.
-const MAX_SPLAT_HALF_PX: f32 = 3.0;
+const MAX_SPLAT_HALF_PX: f32 = 12.0;
 /// Don't subdivide below this world size (guards runaway recursion).
 const MIN_SPLIT_SIZE: f32 = 0.02;
 /// Ignore MIP splats of nodes that are mostly air.
@@ -69,6 +69,7 @@ struct Camera {
     focal_px: f32,
     half_w: f32,
     half_h: f32,
+    flashlight: bool,
 }
 
 impl Camera {
@@ -83,12 +84,22 @@ impl Camera {
             focal_px: height as f32 / (2.0 * HALF_FOV_TAN),
             half_w: width as f32 / 2.0,
             half_h: height as f32 / 2.0,
+            flashlight: frame.flashlight,
         }
     }
 }
 
 fn dot(a: [f32; 3], b: [f32; 3]) -> f32 {
     a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SoftwareRasterizerTelemetry {
+    pub visited_nodes: usize,
+    pub budget_exhausted: bool,
+    pub max_virtual_depth: usize,
+    pub splat_count: usize,
+    pub pixel_writes: usize,
 }
 
 pub struct SoftwareRasterizer {
@@ -100,6 +111,13 @@ pub struct SoftwareRasterizer {
     /// SVO atlas texels: 4 u32 per node (see OctreeGpuSerializer).
     atlas: Vec<u32>,
     mips: Vec<MipNode>,
+    
+    // Telemetry and budgets
+    pub visited_nodes: usize,
+    pub budget_exhausted: bool,
+    pub max_virtual_depth_reached: usize,
+    pub splat_count: usize,
+    pub pixel_writes: usize,
 }
 
 impl SoftwareRasterizer {
@@ -111,6 +129,11 @@ impl SoftwareRasterizer {
             depth: Vec::new(),
             atlas: Vec::new(),
             mips: Vec::new(),
+            visited_nodes: 0,
+            budget_exhausted: false,
+            max_virtual_depth_reached: 0,
+            splat_count: 0,
+            pixel_writes: 0,
         };
         r.resize(width, height);
         r
@@ -149,6 +172,15 @@ impl SoftwareRasterizer {
     /// Fills a depth-tested square splat. `half` is the half-extent in px.
     #[allow(clippy::too_many_arguments)]
     fn splat(&mut self, cx: f32, cy: f32, half: f32, z: f32, r: u8, g: u8, b: u8) {
+        if self.pixel_writes >= 2_000_000 {
+            self.budget_exhausted = true;
+            return;
+        }
+        self.splat_count += 1;
+
+        // Cap the maximum splat size to 32.0 pixels
+        let half = half.min(32.0);
+
         let x0 = (cx - half).floor().max(0.0) as usize;
         let x1 = ((cx + half).ceil() as usize).min(self.width);
         let y0 = (cy - half).floor().max(0.0) as usize;
@@ -164,6 +196,7 @@ impl SoftwareRasterizer {
                     self.rgba[p] = r;
                     self.rgba[p + 1] = g;
                     self.rgba[p + 2] = b;
+                    self.pixel_writes += 1;
                 }
             }
         }
@@ -242,6 +275,16 @@ impl SoftwareRasterizer {
         self.splat(px, py, half_px, dist, r, g, b);
     }
 
+    pub fn telemetry(&self) -> SoftwareRasterizerTelemetry {
+        SoftwareRasterizerTelemetry {
+            visited_nodes: self.visited_nodes,
+            budget_exhausted: self.budget_exhausted,
+            max_virtual_depth: self.max_virtual_depth_reached,
+            splat_count: self.splat_count,
+            pixel_writes: self.pixel_writes,
+        }
+    }
+
     /// Recursive front-to-back node renderer.
     ///
     /// `node_idx == usize::MAX` marks a *virtual* node: a subdivision of a
@@ -255,7 +298,10 @@ impl SoftwareRasterizer {
         size: f32,
         crowded_siblings: u32,
         leaf_attrs: Option<(u32, [f32; 3], f32)>, // (voxel_type, color, light)
+        virtual_depth: usize,
     ) {
+        self.visited_nodes += 1;
+
         let half_size = size * 0.5;
         let center = [min[0] + half_size, min[1] + half_size, min[2] + half_size];
         let radius = size * 0.866; // bounding sphere
@@ -273,7 +319,15 @@ impl SoftwareRasterizer {
 
         let inside = z - radius <= 0.0; // camera inside the bounding sphere
         let (px, py, proj_half, proj_radius) = if inside {
-            (0.0, 0.0, f32::INFINITY, f32::INFINITY)
+            // Camera is near or inside the node.
+            // Compute projection with a clamped, safe depth to avoid division by zero or infinity.
+            let z_safe = z.max(half_size * 0.5).max(0.05);
+            let inv_z = 1.0 / z_safe;
+            let px = cam.half_w + dot(rel, cam.right) * inv_z * cam.focal_px;
+            let py = cam.half_h - dot(rel, cam.up) * inv_z * cam.focal_px;
+            let proj_half = half_size * cam.focal_px * inv_z;
+            let proj_radius = radius * cam.focal_px * inv_z;
+            (px, py, proj_half, proj_radius)
         } else {
             let inv_z = 1.0 / z;
             let px = cam.half_w + dot(rel, cam.right) * inv_z * cam.focal_px;
@@ -312,13 +366,59 @@ impl SoftwareRasterizer {
             }
         };
 
+        // Strict per-frame visited node budget
+        if self.visited_nodes >= 150_000 {
+            self.budget_exhausted = true;
+            if is_leaf {
+                let (voxel_type, color, light) = payload;
+                if voxel_type != VOXEL_AIR {
+                    self.shade_and_splat(
+                        cam,
+                        center,
+                        px,
+                        py,
+                        (proj_half * 1.15).max(0.85),
+                        z,
+                        color,
+                        light,
+                        voxel_type == VOXEL_LIGHT,
+                        crowded_siblings,
+                    );
+                }
+            } else {
+                let mip = self.mips.get(node_idx).copied().unwrap_or_default();
+                if mip.occupancy >= MIN_SPLAT_OCCUPANCY {
+                    self.shade_and_splat(
+                        cam,
+                        center,
+                        px,
+                        py,
+                        1.0,
+                        z,
+                        mip.color,
+                        mip.light,
+                        false,
+                        crowded_siblings,
+                    );
+                }
+            }
+            return;
+        }
+
         if is_leaf {
             let (voxel_type, color, light) = payload;
             if voxel_type == VOXEL_AIR {
                 return;
             }
+
+            if virtual_depth > self.max_virtual_depth_reached {
+                self.max_virtual_depth_reached = virtual_depth;
+            }
+
             // Large collapsed leaf: virtually subdivide until splats are small.
-            if proj_half > MAX_SPLAT_HALF_PX && size > MIN_SPLIT_SIZE {
+            // Do not subdivide if we are inside the node bounding sphere (to avoid infinite loops),
+            // or if we have reached the virtual subdivision depth limit (5).
+            if proj_half > MAX_SPLAT_HALF_PX && size > MIN_SPLIT_SIZE && virtual_depth < 5 && !inside {
                 self.recurse_children_front_to_back(
                     cam,
                     usize::MAX,
@@ -327,6 +427,7 @@ impl SoftwareRasterizer {
                     0xFF,
                     crowded_siblings,
                     Some((voxel_type, color, light)),
+                    virtual_depth,
                 );
             } else {
                 // Inflate the splat size slightly (scale by 1.15, clamp to min 0.85 pixels)
@@ -382,6 +483,7 @@ impl SoftwareRasterizer {
             child_mask,
             child_mask.count_ones(),
             None,
+            virtual_depth,
         );
     }
 
@@ -397,6 +499,7 @@ impl SoftwareRasterizer {
         child_mask: u32,
         crowding: u32,
         leaf_attrs: Option<(u32, [f32; 3], f32)>,
+        virtual_depth: usize,
     ) {
         let cx = min[0] + half_size;
         let cy = min[1] + half_size;
@@ -422,7 +525,15 @@ impl SoftwareRasterizer {
             } else {
                 child_base + child as usize
             };
-            self.render_node(cam, child_idx, child_min, half_size, crowding, leaf_attrs);
+            self.render_node(
+                cam,
+                child_idx,
+                child_min,
+                half_size,
+                crowding,
+                leaf_attrs,
+                if child_base == usize::MAX { virtual_depth + 1 } else { 0 },
+            );
         }
     }
 }
@@ -507,6 +618,12 @@ impl RendererPort for SoftwareRasterizer {
 
     fn draw(&mut self, frame: &FrameParams, chunks: &[ChunkDraw]) {
         self.clear();
+        self.visited_nodes = 0;
+        self.budget_exhausted = false;
+        self.max_virtual_depth_reached = 0;
+        self.splat_count = 0;
+        self.pixel_writes = 0;
+
         if self.atlas.is_empty() {
             return;
         }
@@ -528,6 +645,7 @@ impl RendererPort for SoftwareRasterizer {
                 chunk.world_size,
                 1,
                 None,
+                0,
             );
         }
     }
@@ -870,5 +988,33 @@ mod tests {
             color_left, color_right,
             "Expected a single splat to be flat-shaded (all its pixels have identical color)"
         );
+    }
+
+    #[test]
+    fn camera_inside_large_solid_leaf_terminates_under_budget() {
+        let mut atlas = vec![0u32; 4];
+        atlas[0] = 1; // Leaf
+        atlas[1] = 1; // Solid voxel type
+        atlas[2] = 0xFFFFFF; // White color
+        atlas[3] = 15; // BFS light
+
+        let mut r = SoftwareRasterizer::new(64, 64);
+        r.upload_atlas(&atlas);
+
+        let chunks = [ChunkDraw {
+            origin: [0.0, 0.0, 0.0],
+            root_index: 0,
+            world_size: 16.0, // Very large leaf
+        }];
+
+        // Camera positioned inside the bounding sphere of the root chunk (e.g. at center [8.0, 8.0, 8.0])
+        r.draw(&frame_at([8.0, 8.0, 8.0], 0.0), &chunks);
+
+        let stats = r.telemetry();
+        // Telemetry must show we did NOT trigger infinite recursive virtual subdivision
+        // because camera was inside the node. It should have splatted directly or terminated
+        // with small node count (e.g., visited_nodes <= 10, not 150,000 budget exhausted).
+        assert!(!stats.budget_exhausted);
+        assert!(stats.visited_nodes < 50, "Visited nodes was {}, expected very low", stats.visited_nodes);
     }
 }

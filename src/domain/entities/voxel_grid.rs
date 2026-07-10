@@ -10,6 +10,7 @@ pub struct VoxelGrid {
     light_data: Vec<u8>,
     /// Colored flood-fill light, 0-15 per channel.
     light_rgb: Vec<[u8; 3]>,
+    pub runtime_lights: Vec<crate::domain::entities::architecture::RuntimeLight>,
     face_occlusion: Vec<u8>,
 }
 
@@ -37,6 +38,7 @@ impl VoxelGrid {
             data: vec![VOXEL_AIR; size],
             light_data: vec![0; size],
             light_rgb: vec![[0; 3]; size],
+            runtime_lights: Vec::new(),
             face_occlusion: vec![0; size],
         }
     }
