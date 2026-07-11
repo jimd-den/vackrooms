@@ -265,6 +265,12 @@ pub fn boot() -> Result<(), JsValue> {
     web_sys::console::log_1(&format!("BOOTING ENGINE: query={}", query).into());
     let gen_params = parse_generation_params(&query, WORLD_SEED);
     let high_spec = query.contains("spec=high");
+    // Spawn on the main corridor of region (0,0), looking east down its
+    // west leg: the first frame is a lit, walled corridor receding into
+    // fog — the player knows immediately that this is the Backrooms.
+    let spawn_at = vackrooms::use_cases::region_plan::spawn_point(gen_params.seed);
+    let spawn = [spawn_at.x, 1.7, spawn_at.z];
+    let spawn_yaw = -std::f32::consts::FRAC_PI_2; // face +X
     let (generator_config, engine_config) = if high_spec {
         (
             GeneratorConfig::high_spec().with_tuning(gen_params.tuning),
@@ -272,6 +278,8 @@ pub fn boot() -> Result<(), JsValue> {
                 chunk_size: 20.0,
                 chunk_radius: 2,
                 seed: gen_params.seed,
+                spawn,
+                spawn_yaw,
                 // 5x5 footprint: the outer ring (>= 20 units away) stays at
                 // the coarse LOD, so high spec pays for ~9 fine chunks, not 25.
                 fine_distance: 25.0,
@@ -283,6 +291,8 @@ pub fn boot() -> Result<(), JsValue> {
             GeneratorConfig::low_spec().with_tuning(gen_params.tuning),
             EngineConfig {
                 seed: gen_params.seed,
+                spawn,
+                spawn_yaw,
                 ..EngineConfig::default()
             },
         )
@@ -336,7 +346,7 @@ pub fn boot() -> Result<(), JsValue> {
 
     let is_capture = query.contains("capture=1");
     if is_capture {
-        let mut cam_pos = [5.0, 1.7, 5.0];
+        let mut cam_pos = spawn;
         if let Some(pos_idx) = query.find("camera=") {
             let s = &query[pos_idx + 7..];
             let end = s.find('&').unwrap_or(s.len());

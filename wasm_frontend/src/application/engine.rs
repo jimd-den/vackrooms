@@ -28,6 +28,9 @@ pub struct EngineConfig {
     pub chunk_radius: i32,
     /// Player spawn (eye position).
     pub spawn: [f32; 3],
+    /// Initial yaw, radians. Set by the composition root so the player wakes
+    /// up looking *down* the main corridor, not at a wall.
+    pub spawn_yaw: f32,
     /// Full-resolution chunk loads per tick. 2 balances streaming latency
     /// against frame hitches: one fine chunk costs ~15 ms native (more in
     /// wasm), so higher budgets stall the frame visibly. Coarse loads cost
@@ -47,6 +50,7 @@ impl Default for EngineConfig {
             chunk_size: 10.0,
             chunk_radius: 1,
             spawn: [5.0, 1.7, 5.0],
+            spawn_yaw: 0.0,
             max_loads_per_tick: 2,
             fine_distance: 15.0,
         }
@@ -203,8 +207,10 @@ impl Engine {
         } else {
             radius
         };
+        let mut player = Player::new(config.spawn);
+        player.yaw = config.spawn_yaw;
         Self {
-            player: Player::new(config.spawn),
+            player,
             policy: StreamingPolicy {
                 chunk_size: config.chunk_size,
                 radius,

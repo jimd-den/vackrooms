@@ -85,6 +85,19 @@ fn v_edge_portal_z(seed: u32, ex: i64, rz: i64) -> f32 {
     snap((rz as f32 + f) * REGION_SIZE)
 }
 
+/// World spawn: a point *on the main corridor centerline* of region (0, 0),
+/// a few units east of its west portal. The first thing the player sees is
+/// therefore the region's dominant circulation route — walls running away in
+/// both directions — rather than unplanned fabric. Both the generator core
+/// and the browser composition root derive spawn from this single function,
+/// so the player and the voxelizer can never disagree about where "here" is.
+pub fn spawn_point(seed: u32) -> Position {
+    // The main spine's west leg always runs from (0, west_z) to at least
+    // x = 0.35 * REGION_SIZE, so a few units in we are guaranteed to stand
+    // on a straight, readable stretch of corridor.
+    Position::new(6.0, v_edge_portal_z(seed, 0, 0))
+}
+
 // ---------------------------------------------------------------------------
 // Genomes.
 // ---------------------------------------------------------------------------
@@ -735,6 +748,18 @@ fn corrupt(
     if dominant.renovation_history != RenovationStyle::Untouched {
         let k = pick_index(h(8), assemblies.len());
         assemblies[k].corruption.renovation_overlay = true;
+    }
+
+    // 4. Rarely, one occupied room's fixtures all burn red. The lighting is
+    // the anomaly, and it belongs to a whole architectural space — never a
+    // lone fixture, never red masonry. Applied last so it respects whatever
+    // the earlier corruption passes decided (an abandoned shell stays dark).
+    if h(10) < 0.22 {
+        let k = pick_index(h(11), assemblies.len());
+        let a = &mut assemblies[k];
+        if !a.corruption.abandoned {
+            a.corruption.red_room = true;
+        }
     }
 }
 

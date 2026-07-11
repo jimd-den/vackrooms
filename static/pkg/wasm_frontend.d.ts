@@ -25,6 +25,12 @@ export function get_chunk_blueprint_svg(seed: number, chunk_x: number, chunk_z: 
 export function get_chunk_voxel_blueprint_svg(seed: number, chunk_x: number, chunk_z: number, voxel_scale: number, pixels_per_voxel: number, show_grid: boolean, show_semantics: boolean, show_ceiling: boolean): string;
 
 /**
+ * Debug payload for one generated chunk: a compact material slice plus the
+ * plan objects that explain why those voxels were placed.
+ */
+export function get_debug_chunk_json(seed: number, chunk_x: number, chunk_z: number, voxel_scale: number): string;
+
+/**
  * Compact geometry feed for the canvas debug map. This deliberately returns
  * planning primitives rather than SVG so the page can redraw cheaply while
  * panning, zooming, or changing overlays.
@@ -87,14 +93,10 @@ export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembl
 
 export interface InitOutput {
     readonly memory: WebAssembly.Memory;
-    readonly start: () => void;
-    readonly set_face_weights: (a: number, b: number, c: number, d: number) => void;
-    readonly set_fov: (a: number) => void;
-    readonly worker_generate: (a: number, b: number, c: number, d: number) => [number, number];
-    readonly worker_init: (a: number, b: number, c: number) => void;
     readonly get_blueprint_svg: (a: number, b: number, c: number, d: number, e: number) => [number, number];
     readonly get_chunk_blueprint_svg: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number];
     readonly get_chunk_voxel_blueprint_svg: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number];
+    readonly get_debug_chunk_json: (a: number, b: number, c: number, d: number) => [number, number];
     readonly get_debug_region_json: (a: number, b: number, c: number) => [number, number];
     readonly get_large_voxel_blueprint_svg: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number];
     readonly set_doom_controls: (a: number) => void;
@@ -106,6 +108,11 @@ export interface InitOutput {
     readonly set_mouse_sensitivity: (a: number) => void;
     readonly set_render_scale: (a: number) => void;
     readonly set_cpu_shadows: (a: number) => void;
+    readonly start: () => void;
+    readonly worker_generate: (a: number, b: number, c: number, d: number) => [number, number];
+    readonly worker_init: (a: number, b: number, c: number) => void;
+    readonly set_face_weights: (a: number, b: number, c: number, d: number) => void;
+    readonly set_fov: (a: number) => void;
     readonly wasm_bindgen__convert__closures_____invoke__h4a98415c8f04dfea: (a: number, b: number, c: number) => void;
     readonly wasm_bindgen__convert__closures_____invoke__h00d81ef20398ee11: (a: number, b: number, c: any) => void;
     readonly wasm_bindgen__convert__closures_____invoke__h00d81ef20398ee11_2: (a: number, b: number, c: any) => void;
