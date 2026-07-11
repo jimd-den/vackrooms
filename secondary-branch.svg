@@ -1,0 +1,92 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 800" width="800" height="800">
+  <style>
+    .bg { fill: #0b0f19; }
+    .grid { stroke: #1e293b; stroke-width: 0.5; }
+    .chunk-grid { stroke: #f43f5e; stroke-width: 1.0; stroke-dasharray: 4,4; fill: none; }
+    .chunk-label { fill: #f43f5e; font-family: monospace; font-size: 10px; font-weight: bold; }
+    .assembly { fill: #1e293b; fill-opacity: 0.2; stroke: #475569; stroke-width: 1.0; }
+    .assembly-corrupt { fill: #a21caf; fill-opacity: 0.15; stroke: #d946ef; stroke-width: 1.0; }
+    .assembly-label { fill: #94a3b8; font-family: monospace; font-size: 9px; font-weight: bold; }
+    .corridor-main { stroke: #38bdf8; stroke-linecap: round; stroke-linejoin: round; fill: none; }
+    .corridor-secondary { stroke: #818cf8; stroke-linecap: round; stroke-linejoin: round; fill: none; }
+    .entrance { stroke: #10b981; stroke-width: 2; stroke-linecap: square; }
+    .entrance-node { fill: #10b981; }
+    .fixture-lit { fill: #fbbf24; stroke: #d97706; stroke-width: 0.5; }
+    .fixture-unlit { fill: #475569; stroke: #334155; stroke-width: 0.5; }
+    .column { fill: #64748b; stroke: #475569; stroke-width: 0.5; }
+    .title-bg { fill: #0f172a; fill-opacity: 0.9; stroke: #475569; stroke-width: 1.5; }
+    .title-text { fill: #f8fafc; font-family: monospace; font-size: 11px; font-weight: bold; }
+    .title-sub { fill: #94a3b8; font-family: monospace; font-size: 9px; }
+  </style>
+  <rect class="bg" width="800" height="800" />
+  <line class="grid" x1="0" y1="50" x2="800" y2="50" />
+  <line class="grid" x1="50" y1="0" x2="50" y2="800" />
+  <line class="grid" x1="0" y1="100" x2="800" y2="100" />
+  <line class="grid" x1="100" y1="0" x2="100" y2="800" />
+  <line class="grid" x1="0" y1="150" x2="800" y2="150" />
+  <line class="grid" x1="150" y1="0" x2="150" y2="800" />
+  <line class="grid" x1="0" y1="200" x2="800" y2="200" />
+  <line class="grid" x1="200" y1="0" x2="200" y2="800" />
+  <line class="grid" x1="0" y1="250" x2="800" y2="250" />
+  <line class="grid" x1="250" y1="0" x2="250" y2="800" />
+  <line class="grid" x1="0" y1="300" x2="800" y2="300" />
+  <line class="grid" x1="300" y1="0" x2="300" y2="800" />
+  <line class="grid" x1="0" y1="350" x2="800" y2="350" />
+  <line class="grid" x1="350" y1="0" x2="350" y2="800" />
+  <line class="grid" x1="0" y1="400" x2="800" y2="400" />
+  <line class="grid" x1="400" y1="0" x2="400" y2="800" />
+  <line class="grid" x1="0" y1="450" x2="800" y2="450" />
+  <line class="grid" x1="450" y1="0" x2="450" y2="800" />
+  <line class="grid" x1="0" y1="500" x2="800" y2="500" />
+  <line class="grid" x1="500" y1="0" x2="500" y2="800" />
+  <line class="grid" x1="0" y1="550" x2="800" y2="550" />
+  <line class="grid" x1="550" y1="0" x2="550" y2="800" />
+  <line class="grid" x1="0" y1="600" x2="800" y2="600" />
+  <line class="grid" x1="600" y1="0" x2="600" y2="800" />
+  <line class="grid" x1="0" y1="650" x2="800" y2="650" />
+  <line class="grid" x1="650" y1="0" x2="650" y2="800" />
+  <line class="grid" x1="0" y1="700" x2="800" y2="700" />
+  <line class="grid" x1="700" y1="0" x2="700" y2="800" />
+  <line class="grid" x1="0" y1="750" x2="800" y2="750" />
+  <line class="grid" x1="750" y1="0" x2="750" y2="800" />
+  <polyline class="corridor-main" points="0,488 296,488 296,308 800,308 " stroke-width="48" />
+  <polyline class="corridor-secondary" points="628,308 628,468 " stroke-width="40" />
+  <polygon class="assembly" points="132,460 336,460 336,332 132,332 " />
+  <polygon class="assembly" points="464,436 624,436 624,336 464,336 " />
+  <line class="entrance" x1="200" y1="460" x2="248" y2="460" />
+  <circle class="entrance-node" cx="224" cy="460" r="3.5" />
+  <text x="224" y="454" fill="#10b981" font-family="monospace" font-size="8px" font-weight="bold" text-anchor="middle">4.8m</text>
+  <line class="entrance" x1="558" y1="336" x2="594" y2="336" />
+  <circle class="entrance-node" cx="576" cy="336" r="3.5" />
+  <text x="576" y="330" fill="#10b981" font-family="monospace" font-size="8px" font-weight="bold" text-anchor="middle">3.6m</text>
+  <rect class="fixture-lit" x="253" y="389" width="6" height="6" rx="1" />
+  <rect class="fixture-lit" x="225.00002" y="369" width="6" height="6" rx="1" />
+  <rect class="fixture-lit" x="525" y="380.99997" width="6" height="6" rx="1" />
+  <rect class="column" x="144" y="436" width="4" height="4" />
+  <rect class="column" x="200" y="436" width="4" height="4" />
+  <rect class="column" x="256" y="436" width="4" height="4" />
+  <rect class="column" x="312" y="436" width="4" height="4" />
+  <rect class="column" x="144" y="379.99997" width="4" height="4" />
+  <rect class="column" x="200" y="379.99997" width="4" height="4" />
+  <rect class="column" x="256" y="379.99997" width="4" height="4" />
+  <rect class="column" x="312" y="379.99997" width="4" height="4" />
+  <rect class="column" x="492" y="391.99997" width="4" height="4" />
+  <rect class="column" x="540.00006" y="391.99997" width="4" height="4" />
+  <rect class="column" x="588" y="391.99997" width="4" height="4" />
+  <rect class="column" x="492" y="343.99997" width="4" height="4" />
+  <rect class="column" x="540.00006" y="343.99997" width="4" height="4" />
+  <rect class="column" x="588" y="343.99997" width="4" height="4" />
+  <text class="assembly-label" x="233.99997" y="396" text-anchor="middle" dominant-baseline="middle">#1 · ServerRoom</text>
+  <text class="assembly-label" x="544" y="386" text-anchor="middle" dominant-baseline="middle">#3 · OpenOffice</text>
+  <rect class="chunk-grid" x="100" y="700" width="100" height="100" />
+  <text class="chunk-label" x="106" y="706" text-anchor="start" dominant-baseline="hanging">secondary-branch</text>
+  <g transform="translate(570, 660)">
+    <rect class="title-bg" width="215" height="125" rx="6" />
+    <text class="title-text" x="15" y="25">VACKROOMS ARCHITECTURE</text>
+    <text class="title-sub" x="15" y="45">Seed: 42 | Level: 0</text>
+    <text class="title-sub" x="15" y="60">Region: (0, 0)</text>
+    <text class="title-sub" x="15" y="75">Region Size: 80.0m x 80.0m</text>
+    <text class="title-sub" x="15" y="90">Voxel Scale: 0.2m</text>
+    <text class="title-sub" x="15" y="105">Scale: 1 unit = 10px</text>
+  </g>
+</svg>

@@ -29,21 +29,335 @@
 
 use crate::application::ports::{ChunkDraw, FrameParams, RendererPort};
 
-/// Half field of view tangent; identical to the GPU shader's `0.767`
-/// (tan of 75 deg FOV / 2).
-const HALF_FOV_TAN: f32 = 0.767;
-/// Interior nodes projecting smaller than this many pixels (radius) are
-/// drawn as one MIP splat instead of being descended into.
-const LOD_CUTOFF_PX: f32 = 1.0;
-/// Solid leaves are virtually subdivided until their projected half-extent
-/// is at most this many pixels.
-const MAX_SPLAT_HALF_PX: f32 = 12.0;
-/// Don't subdivide below this world size (guards runaway recursion).
-const MIN_SPLIT_SIZE: f32 = 0.02;
-/// Ignore MIP splats of nodes that are mostly air.
-const MIN_SPLAT_OCCUPANCY: f32 = 0.25;
-/// Same fog density as the GPU shader.
-const FOG_DENSITY: f32 = 0.015;
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CpuShadowMode {
+    Off,
+    Hero,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct CpuRenderSettings {
+    pub internal_scale: f32,      // e.g. 0.25 .. 1.0
+    pub lod_cutoff_px: f32,      // e.g. 0.25 .. 2.0
+    pub max_splat_half_px: f32,  // e.g. 2.0 .. 16.0
+    pub max_virtual_depth: u8,   // e.g. 3 .. 8
+    pub min_split_size: f32,     // world-space lower bound
+    pub fog_density: f32,        // 0.003 .. 0.03
+    pub fog_start: f32,
+    pub max_draw_distance: f32,  // chunk/node rejection
+    pub min_mip_occupancy: f32,  // preserve distant sparse detail
+    pub shadows: CpuShadowMode,  // Off, Hero
+    pub fov_tan: f32,            // vertical fov tangent
+}
+
+impl Default for CpuRenderSettings {
+    fn default() -> Self {
+        Self {
+            internal_scale: 1.0,
+            lod_cutoff_px: 1.0,
+            max_splat_half_px: 12.0,
+            max_virtual_depth: 5,
+            min_split_size: 0.02,
+            fog_density: 0.015,
+            fog_start: 0.0,
+            max_draw_distance: 96.0,
+            min_mip_occupancy: 0.25,
+            shadows: CpuShadowMode::Off,
+            fov_tan: 0.767, // default 75 deg FOV
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct RayHit {
+    pub t: f32,
+    pub voxel_type: u32,
+}
+
+struct DecodedNode {
+    is_leaf: bool,
+    child_base: usize,
+    child_mask: u32,
+    voxel_type: u32,
+}
+
+fn decode_node(atlas: &[u32], node_idx: usize) -> Option<DecodedNode> {
+    let t = node_idx * 4;
+    if t + 3 >= atlas.len() {
+        return None;
+    }
+    let is_leaf = atlas[t] == 1;
+    if is_leaf {
+        Some(DecodedNode {
+            is_leaf: true,
+            child_base: 0,
+            child_mask: 0,
+            voxel_type: atlas[t + 1],
+        })
+    } else {
+        Some(DecodedNode {
+            is_leaf: false,
+            child_base: atlas[t + 1] as usize,
+            child_mask: atlas[t + 2],
+            voxel_type: 0,
+        })
+    }
+}
+
+fn raymarch_svo_single(
+    atlas: &[u32],
+    ro: [f32; 3],
+    rd: [f32; 3],
+    chunk_root_idx: usize,
+    t_entry: f32,
+    t_exit: f32,
+    world_size: f32,
+) -> Option<RayHit> {
+    let mut t = t_entry;
+    let mut p = [
+        ro[0] + t * rd[0],
+        ro[1] + t * rd[1],
+        ro[2] + t * rd[2],
+    ];
+
+    #[derive(Clone, Copy)]
+    struct StackFrame {
+        node_idx: usize,
+        b_min: [f32; 3],
+        b_max: [f32; 3],
+    }
+
+    let mut stack = [StackFrame { node_idx: 0, b_min: [0.0; 3], b_max: [0.0; 3] }; 9];
+    let mut stack_ptr = 0;
+
+    let mut current_node = chunk_root_idx;
+    let mut current_min = [0.0, 0.0, 0.0];
+    let mut current_max = [world_size, world_size, world_size];
+
+    let mut steps = 0;
+    const MAX_STEPS: i32 = 160;
+
+    while steps < MAX_STEPS {
+        steps += 1;
+
+        let node = decode_node(atlas, current_node)?;
+
+        if node.is_leaf {
+            if node.voxel_type != 0 {
+                return Some(RayHit {
+                    t,
+                    voxel_type: node.voxel_type,
+                });
+            } else {
+                // Empty-space skip: jump straight to this leaf's exit plane.
+                let t_max_planes = [
+                    ((if rd[0] > 0.0 { current_max[0] } else { current_min[0] }) - ro[0]) / rd[0],
+                    ((if rd[1] > 0.0 { current_max[1] } else { current_min[1] }) - ro[1]) / rd[1],
+                    ((if rd[2] > 0.0 { current_max[2] } else { current_min[2] }) - ro[2]) / rd[2],
+                ];
+
+                let t_exit_box = t_max_planes[0].min(t_max_planes[1]).min(t_max_planes[2]);
+                t = t_exit_box;
+                p = [
+                    ro[0] + t * rd[0],
+                    ro[1] + t * rd[1],
+                    ro[2] + t * rd[2],
+                ];
+
+                if (t_exit_box - t_max_planes[0]).abs() < 0.0001 {
+                    p[0] = (if rd[0] > 0.0 { current_max[0] } else { current_min[0] }) + (if rd[0] > 0.0 { 0.001 } else { -0.001 });
+                }
+                if (t_exit_box - t_max_planes[1]).abs() < 0.0001 {
+                    p[1] = (if rd[1] > 0.0 { current_max[1] } else { current_min[1] }) + (if rd[1] > 0.0 { 0.001 } else { -0.001 });
+                }
+                if (t_exit_box - t_max_planes[2]).abs() < 0.0001 {
+                    p[2] = (if rd[2] > 0.0 { current_max[2] } else { current_min[2] }) + (if rd[2] > 0.0 { 0.001 } else { -0.001 });
+                }
+
+                while p[0] < current_min[0] || p[0] > current_max[0] ||
+                       p[1] < current_min[1] || p[1] > current_max[1] ||
+                       p[2] < current_min[2] || p[2] > current_max[2] {
+
+                    if stack_ptr == 0 {
+                        return None;
+                    }
+                    stack_ptr -= 1;
+                    current_node = stack[stack_ptr].node_idx;
+                    current_min = stack[stack_ptr].b_min;
+                    current_max = stack[stack_ptr].b_max;
+                }
+            }
+        } else {
+            let center = [
+                (current_min[0] + current_max[0]) * 0.5,
+                (current_min[1] + current_max[1]) * 0.5,
+                (current_min[2] + current_max[2]) * 0.5,
+            ];
+            let ox = if p[0] >= center[0] { 1 } else { 0 };
+            let oy = if p[1] >= center[1] { 1 } else { 0 };
+            let oz = if p[2] >= center[2] { 1 } else { 0 };
+            let child_idx = (oz << 2) | (oy << 1) | ox;
+
+            if (node.child_mask & (1 << child_idx)) != 0 {
+                if stack_ptr < 8 {
+                    stack[stack_ptr] = StackFrame {
+                        node_idx: current_node,
+                        b_min: current_min,
+                        b_max: current_max,
+                    };
+                    stack_ptr += 1;
+                }
+                current_min[0] = if ox == 1 { center[0] } else { current_min[0] };
+                current_max[0] = if ox == 1 { current_max[0] } else { center[0] };
+                current_min[1] = if oy == 1 { center[1] } else { current_min[1] };
+                current_max[1] = if oy == 1 { current_max[1] } else { center[1] };
+                current_min[2] = if oz == 1 { center[2] } else { current_min[2] };
+                current_max[2] = if oz == 1 { current_max[2] } else { center[2] };
+                current_node = node.child_base + child_idx;
+            } else {
+                let oct_max = [
+                    if ox == 1 { current_max[0] } else { center[0] },
+                    if oy == 1 { current_max[1] } else { center[1] },
+                    if oz == 1 { current_max[2] } else { center[2] },
+                ];
+                let oct_min = [
+                    if ox == 1 { center[0] } else { current_min[0] },
+                    if oy == 1 { center[1] } else { center[1] },
+                    if oz == 1 { center[2] } else { current_min[2] },
+                ];
+                let t_max_planes = [
+                    ((if rd[0] > 0.0 { oct_max[0] } else { oct_min[0] }) - ro[0]) / rd[0],
+                    ((if rd[1] > 0.0 { oct_max[1] } else { oct_min[1] }) - ro[1]) / rd[1],
+                    ((if rd[2] > 0.0 { oct_max[2] } else { oct_min[2] }) - ro[2]) / rd[2],
+                ];
+
+                let t_exit_oct = t_max_planes[0].min(t_max_planes[1]).min(t_max_planes[2]);
+                t = t_exit_oct;
+                p = [
+                    ro[0] + t * rd[0],
+                    ro[1] + t * rd[1],
+                    ro[2] + t * rd[2],
+                ];
+                if (t_exit_oct - t_max_planes[0]).abs() < 0.0001 {
+                    p[0] = (if rd[0] > 0.0 { oct_max[0] } else { oct_min[0] }) + (if rd[0] > 0.0 { 0.001 } else { -0.001 });
+                }
+                if (t_exit_oct - t_max_planes[1]).abs() < 0.0001 {
+                    p[1] = (if rd[1] > 0.0 { oct_max[1] } else { oct_min[1] }) + (if rd[1] > 0.0 { 0.001 } else { -0.001 });
+                }
+                if (t_exit_oct - t_max_planes[2]).abs() < 0.0001 {
+                    p[2] = (if rd[2] > 0.0 { oct_max[2] } else { oct_min[2] }) + (if rd[2] > 0.0 { 0.001 } else { -0.001 });
+                }
+
+                while p[0] < current_min[0] || p[0] > current_max[0] ||
+                       p[1] < current_min[1] || p[1] > current_max[1] ||
+                       p[2] < current_min[2] || p[2] > current_max[2] {
+
+                    if stack_ptr == 0 {
+                        return None;
+                    }
+                    stack_ptr -= 1;
+                    current_node = stack[stack_ptr].node_idx;
+                    current_min = stack[stack_ptr].b_min;
+                    current_max = stack[stack_ptr].b_max;
+                }
+            }
+        }
+    }
+    None
+}
+
+pub fn trace_svo(
+    atlas: &[u32],
+    chunks: &[ChunkDraw],
+    origin: [f32; 3],
+    direction: [f32; 3],
+    max_t: f32,
+) -> Option<RayHit> {
+    struct ChunkHit {
+        idx: usize,
+        t_min: f32,
+        t_max: f32,
+    }
+
+    let mut hits = Vec::with_capacity(chunks.len());
+
+    let safe_rd = [
+        if direction[0].abs() < 1e-4 { direction[0].signum() * 1e-4 } else { direction[0] },
+        if direction[1].abs() < 1e-4 { direction[1].signum() * 1e-4 } else { direction[1] },
+        if direction[2].abs() < 1e-4 { direction[2].signum() * 1e-4 } else { direction[2] },
+    ];
+    let inv_rd = [1.0 / safe_rd[0], 1.0 / safe_rd[1], 1.0 / safe_rd[2]];
+
+    for (i, chunk) in chunks.iter().enumerate() {
+        let local_ro = [
+            origin[0] - chunk.origin[0],
+            origin[1] - chunk.origin[1],
+            origin[2] - chunk.origin[2],
+        ];
+
+        let box_min = [0.0, 0.0, 0.0];
+        let box_max = [chunk.world_size, chunk.world_size, chunk.world_size];
+
+        let t1 = [
+            (box_min[0] - local_ro[0]) * inv_rd[0],
+            (box_min[1] - local_ro[1]) * inv_rd[1],
+            (box_min[2] - local_ro[2]) * inv_rd[2],
+        ];
+        let t2 = [
+            (box_max[0] - local_ro[0]) * inv_rd[0],
+            (box_max[1] - local_ro[1]) * inv_rd[1],
+            (box_max[2] - local_ro[2]) * inv_rd[2],
+        ];
+
+        let t_min_p = [
+            t1[0].min(t2[0]),
+            t1[1].min(t2[1]),
+            t1[2].min(t2[2]),
+        ];
+        let t_max_p = [
+            t1[0].max(t2[0]),
+            t1[1].max(t2[1]),
+            t1[2].max(t2[2]),
+        ];
+
+        let t_entry = t_min_p[0].max(t_min_p[1]).max(t_min_p[2]);
+        let t_exit = t_max_p[0].min(t_max_p[1]).min(t_max_p[2]);
+
+        if t_entry < t_exit && t_exit > 0.0 && t_entry < max_t {
+            let real_entry = t_entry.max(0.0);
+            hits.push(ChunkHit {
+                idx: i,
+                t_min: real_entry,
+                t_max: t_exit.min(max_t),
+            });
+        }
+    }
+
+    hits.sort_by(|a, b| a.t_min.total_cmp(&b.t_min));
+
+    for hit in hits {
+        let chunk = &chunks[hit.idx];
+        let local_ro = [
+            origin[0] - chunk.origin[0],
+            origin[1] - chunk.origin[1],
+            origin[2] - chunk.origin[2],
+        ];
+
+        if let Some(ray_hit) = raymarch_svo_single(
+            atlas,
+            local_ro,
+            safe_rd,
+            chunk.root_index as usize,
+            hit.t_min,
+            hit.t_max,
+            chunk.world_size,
+        ) {
+            return Some(ray_hit);
+        }
+    }
+
+    None
+}
 
 const VOXEL_AIR: u32 = 0;
 const VOXEL_LIGHT: u32 = 4;
@@ -73,7 +387,7 @@ struct Camera {
 }
 
 impl Camera {
-    fn new(frame: &FrameParams, width: usize, height: usize) -> Self {
+    fn new(frame: &FrameParams, width: usize, height: usize, settings: &CpuRenderSettings) -> Self {
         let (sy, cy) = frame.yaw.sin_cos();
         let (sp, cp) = frame.pitch.sin_cos();
         Self {
@@ -81,7 +395,7 @@ impl Camera {
             right: [cy, 0.0, -sy],
             up: [sp * sy, cp, sp * cy],
             forward: [-cp * sy, sp, -cp * cy],
-            focal_px: height as f32 / (2.0 * HALF_FOV_TAN),
+            focal_px: height as f32 / (2.0 * settings.fov_tan),
             half_w: width as f32 / 2.0,
             half_h: height as f32 / 2.0,
             flashlight: frame.flashlight,
@@ -118,6 +432,11 @@ pub struct SoftwareRasterizer {
     pub max_virtual_depth_reached: usize,
     pub splat_count: usize,
     pub pixel_writes: usize,
+
+    // Configurable settings, shadow cache, and frame state
+    pub settings: CpuRenderSettings,
+    shadow_cache: Vec<f32>,
+    frame_index: usize,
 }
 
 impl SoftwareRasterizer {
@@ -134,6 +453,9 @@ impl SoftwareRasterizer {
             max_virtual_depth_reached: 0,
             splat_count: 0,
             pixel_writes: 0,
+            settings: CpuRenderSettings::default(),
+            shadow_cache: vec![1.0; 65536],
+            frame_index: 0,
         };
         r.resize(width, height);
         r
@@ -203,17 +525,6 @@ impl SoftwareRasterizer {
     }
 
     /// Shades and splats one solid box (leaf, virtual sub-leaf, or MIP node).
-    ///
-    /// Literate Documentation:
-    /// This function applies directional shading, contact ambient occlusion,
-    /// player torchlight falloff, and distance fog.
-    /// To resolve the visual checkerboard popping artifacts and moving bands
-    /// on floor/ceiling surfaces, we use a continuous face shading interpolation.
-    /// Instead of checking which coordinate axis is strictly dominant and applying
-    /// a hard step in face brightness (e.g. 0.55 vs 0.7 vs 0.8), we compute a
-    /// weighted combination of the cardinal face values based on the normalized
-    /// viewing vector squared. This ensures the shading coefficient varies
-    /// smoothly with camera position, eliminating sharp seams and popping.
     #[allow(clippy::too_many_arguments)]
     fn shade_and_splat(
         &mut self,
@@ -227,6 +538,7 @@ impl SoftwareRasterizer {
         light_level: f32,
         is_emissive: bool,
         crowded_siblings: u32,
+        shadow_factor: f32,
     ) {
         let to_cam = [
             center[0] - cam.pos[0],
@@ -263,7 +575,7 @@ impl SoftwareRasterizer {
         let raw_ao = 1.0 - 0.04 * crowded_siblings.saturating_sub(1) as f32;
         let ao = (raw_ao * 1.3).clamp(0.22, 1.0);
 
-        let light_norm = light_level / 15.0;
+        let light_norm = (light_level / 15.0) * shadow_factor;
 
         // Fluorescent yellow-green ambient top vs dark olive ambient bottom mix
         let n_y = if sum > 1e-6 {
@@ -320,7 +632,7 @@ impl SoftwareRasterizer {
         };
 
         // Exponential fog blending
-        let fog = (-FOG_DENSITY * dist).exp();
+        let fog = (-self.settings.fog_density * (dist - self.settings.fog_start).max(0.0)).exp();
 
         // Blend with the background sickly-brown clear color: (0.15, 0.125, 0.055)
         let clear_color = [0.15 * 255.0, 0.125 * 255.0, 0.055 * 255.0];
@@ -341,14 +653,63 @@ impl SoftwareRasterizer {
         }
     }
 
+    fn get_shadow_factor(&mut self, chunks: &[ChunkDraw], center: [f32; 3], is_emissive: bool, dist: f32) -> f32 {
+        if self.settings.shadows == CpuShadowMode::Hero && !is_emissive && dist <= 24.0 && self.pixel_writes < 1_500_000 {
+            let ix = (center[0] * 100.0) as i32;
+            let iy = (center[1] * 100.0) as i32;
+            let iz = (center[2] * 100.0) as i32;
+            let hash_key = (ix.wrapping_mul(73856093) ^ iy.wrapping_mul(19349663) ^ iz.wrapping_mul(83492791)) as usize;
+            let cache_idx = hash_key % self.shadow_cache.len();
+
+            let should_trace = (hash_key + self.frame_index) % 4 == 0;
+            if should_trace || self.shadow_cache[cache_idx] == 0.0 {
+                let light_pos = [
+                    (center[0] / 3.0).floor() * 3.0 + 1.5,
+                    3.6,
+                    (center[2] / 3.0).floor() * 3.0 + 1.5,
+                ];
+                let mut shadow_dir = [
+                    light_pos[0] - center[0],
+                    light_pos[1] - center[1],
+                    light_pos[2] - center[2],
+                ];
+                let dist_to_light = (shadow_dir[0]*shadow_dir[0] + shadow_dir[1]*shadow_dir[1] + shadow_dir[2]*shadow_dir[2]).sqrt();
+                let shadow_factor = if dist_to_light > 0.001 {
+                    let inv_dist = 1.0 / dist_to_light;
+                    let shadow_dir_norm = [
+                        shadow_dir[0] * inv_dist,
+                        shadow_dir[1] * inv_dist,
+                        shadow_dir[2] * inv_dist,
+                    ];
+                    let ray_origin = [
+                        center[0] + shadow_dir_norm[0] * 0.05,
+                        center[1] + shadow_dir_norm[1] * 0.05,
+                        center[2] + shadow_dir_norm[2] * 0.05,
+                    ];
+                    if let Some(_hit) = trace_svo(&self.atlas, chunks, ray_origin, shadow_dir_norm, dist_to_light - 0.05) {
+                        0.25
+                    } else {
+                        1.0
+                    }
+                } else {
+                    1.0
+                };
+                self.shadow_cache[cache_idx] = shadow_factor;
+                shadow_factor
+            } else {
+                self.shadow_cache[cache_idx]
+            }
+        } else {
+            1.0
+        }
+    }
+
     /// Recursive front-to-back node renderer.
-    ///
-    /// `node_idx == usize::MAX` marks a *virtual* node: a subdivision of a
-    /// large collapsed leaf, which reuses `leaf_attrs` instead of the atlas.
     #[allow(clippy::too_many_arguments)]
     fn render_node(
         &mut self,
         cam: &Camera,
+        chunks: &[ChunkDraw],
         node_idx: usize,
         min: [f32; 3],
         size: f32,
@@ -428,6 +789,7 @@ impl SoftwareRasterizer {
             if is_leaf {
                 let (voxel_type, color, light) = payload;
                 if voxel_type != VOXEL_AIR {
+                    let shadow_factor = self.get_shadow_factor(chunks, center, voxel_type == VOXEL_LIGHT, z);
                     self.shade_and_splat(
                         cam,
                         center,
@@ -439,11 +801,13 @@ impl SoftwareRasterizer {
                         light,
                         voxel_type == VOXEL_LIGHT,
                         crowded_siblings,
+                        shadow_factor,
                     );
                 }
             } else {
                 let mip = self.mips.get(node_idx).copied().unwrap_or_default();
-                if mip.occupancy >= MIN_SPLAT_OCCUPANCY {
+                if mip.occupancy >= self.settings.min_mip_occupancy {
+                    let shadow_factor = self.get_shadow_factor(chunks, center, false, z);
                     self.shade_and_splat(
                         cam,
                         center,
@@ -455,6 +819,7 @@ impl SoftwareRasterizer {
                         mip.light,
                         false,
                         crowded_siblings,
+                        shadow_factor,
                     );
                 }
             }
@@ -472,11 +837,10 @@ impl SoftwareRasterizer {
             }
 
             // Large collapsed leaf: virtually subdivide until splats are small.
-            // Do not subdivide if we are inside the node bounding sphere (to avoid infinite loops),
-            // or if we have reached the virtual subdivision depth limit (5).
-            if proj_half > MAX_SPLAT_HALF_PX && size > MIN_SPLIT_SIZE && virtual_depth < 5 && !inside {
+            if proj_half > self.settings.max_splat_half_px && size > self.settings.min_split_size && virtual_depth < self.settings.max_virtual_depth as usize && !inside {
                 self.recurse_children_front_to_back(
                     cam,
+                    chunks,
                     usize::MAX,
                     min,
                     half_size,
@@ -486,10 +850,7 @@ impl SoftwareRasterizer {
                     virtual_depth,
                 );
             } else {
-                // Inflate the splat size slightly (scale by 1.15, clamp to min 0.85 pixels)
-                // to create a tiny overlap between adjacent splats under perspective projection.
-                // This closes sub-pixel/pixel gaps (black lines) that occur where squares fail
-                // to tile perfectly due to depth differences and pixel-grid rounding.
+                let shadow_factor = self.get_shadow_factor(chunks, center, voxel_type == VOXEL_LIGHT, z);
                 self.shade_and_splat(
                     cam,
                     center,
@@ -501,6 +862,7 @@ impl SoftwareRasterizer {
                     light,
                     voxel_type == VOXEL_LIGHT,
                     crowded_siblings,
+                    shadow_factor,
                 );
             }
             return;
@@ -512,9 +874,10 @@ impl SoftwareRasterizer {
         let child_mask = self.atlas[t + 2];
 
         // LOD cutoff: subtree fits in ~a pixel -> one MIP splat.
-        if proj_radius < LOD_CUTOFF_PX {
+        if proj_radius < self.settings.lod_cutoff_px {
             let mip = self.mips.get(node_idx).copied().unwrap_or_default();
-            if mip.occupancy >= MIN_SPLAT_OCCUPANCY {
+            if mip.occupancy >= self.settings.min_mip_occupancy {
+                let shadow_factor = self.get_shadow_factor(chunks, center, false, z);
                 self.shade_and_splat(
                     cam,
                     center,
@@ -526,6 +889,7 @@ impl SoftwareRasterizer {
                     mip.light,
                     false,
                     crowded_siblings,
+                    shadow_factor,
                 );
             }
             return;
@@ -533,6 +897,7 @@ impl SoftwareRasterizer {
 
         self.recurse_children_front_to_back(
             cam,
+            chunks,
             child_base,
             min,
             half_size,
@@ -549,6 +914,7 @@ impl SoftwareRasterizer {
     fn recurse_children_front_to_back(
         &mut self,
         cam: &Camera,
+        chunks: &[ChunkDraw],
         child_base: usize, // usize::MAX -> virtual subdivision
         min: [f32; 3],
         half_size: f32,
@@ -583,6 +949,7 @@ impl SoftwareRasterizer {
             };
             self.render_node(
                 cam,
+                chunks,
                 child_idx,
                 child_min,
                 half_size,
@@ -666,6 +1033,51 @@ fn compute_mip(atlas: &[u32], i: usize, mips: &mut [MipNode], done: &mut [bool])
     }
 }
 
+fn chunk_visible(chunk: &ChunkDraw, cam: &Camera, width: usize, height: usize, max_draw_dist: f32) -> bool {
+    let half_size = chunk.world_size * 0.5;
+    let center = [
+        chunk.origin[0] + half_size,
+        chunk.origin[1] + half_size,
+        chunk.origin[2] + half_size,
+    ];
+    let radius = chunk.world_size * 0.866;
+
+    let rel = [
+        center[0] - cam.pos[0],
+        center[1] - cam.pos[1],
+        center[2] - cam.pos[2],
+    ];
+    
+    // Distance check (3D distance to bounding sphere)
+    let dist = (rel[0]*rel[0] + rel[1]*rel[1] + rel[2]*rel[2]).sqrt();
+    if dist - radius > max_draw_dist {
+        return false;
+    }
+
+    let z = dot(rel, cam.forward);
+    // Entirely behind the camera.
+    if z + radius <= 0.01 {
+        return false;
+    }
+
+    let inside = z - radius <= 0.0;
+    if !inside {
+        let inv_z = 1.0 / z;
+        let px = cam.half_w + dot(rel, cam.right) * inv_z * cam.focal_px;
+        let py = cam.half_h - dot(rel, cam.up) * inv_z * cam.focal_px;
+        let proj_radius = radius * cam.focal_px / (z - radius).max(0.001);
+        // Conservative screen-bounds cull.
+        if px + proj_radius < 0.0
+            || px - proj_radius >= width as f32
+            || py + proj_radius < 0.0
+            || py - proj_radius >= height as f32
+        {
+            return false;
+        }
+    }
+    true
+}
+
 impl RendererPort for SoftwareRasterizer {
     fn upload_atlas(&mut self, texels: &[u32]) {
         self.atlas = texels.to_vec();
@@ -683,7 +1095,7 @@ impl RendererPort for SoftwareRasterizer {
         if self.atlas.is_empty() {
             return;
         }
-        let cam = Camera::new(frame, self.width, self.height);
+        let cam = Camera::new(frame, self.width, self.height, &self.settings);
 
         // Nearest chunk first: maximizes early z-rejection across chunks.
         let mut order: Vec<&ChunkDraw> = chunks.iter().collect();
@@ -694,8 +1106,13 @@ impl RendererPort for SoftwareRasterizer {
         });
 
         for chunk in order {
+            if !chunk_visible(chunk, &cam, self.width, self.height, self.settings.max_draw_distance) {
+                continue;
+            }
+
             self.render_node(
                 &cam,
+                chunks,
                 chunk.root_index as usize,
                 chunk.origin,
                 chunk.world_size,
@@ -704,6 +1121,8 @@ impl RendererPort for SoftwareRasterizer {
                 0,
             );
         }
+
+        self.frame_index = self.frame_index.wrapping_add(1);
     }
 }
 
@@ -889,7 +1308,7 @@ mod tests {
             pitch: 0.0,
             flashlight: false,
         };
-        let cam_a = Camera::new(&frame_a, 16, 16);
+        let cam_a = Camera::new(&frame_a, 16, 16, &CpuRenderSettings::default());
 
         // Case B: Camera Y is 0.99 (below Case A, X-dominant)
         let frame_b = FrameParams {
@@ -898,7 +1317,7 @@ mod tests {
             pitch: 0.0,
             flashlight: false,
         };
-        let cam_b = Camera::new(&frame_b, 16, 16);
+        let cam_b = Camera::new(&frame_b, 16, 16, &CpuRenderSettings::default());
 
         // Clear rasterizer
         r.clear();
@@ -914,6 +1333,7 @@ mod tests {
             15.0,                  // light level
             false,                 // is_emissive
             1,                     // crowded siblings
+            1.0,                   // shadow factor
         );
         let color_a = center_pixel(&r);
 
@@ -931,6 +1351,7 @@ mod tests {
             15.0,                  // light level
             false,                 // is_emissive
             1,                     // crowded siblings
+            1.0,                   // shadow factor
         );
         let color_b = center_pixel(&r);
 
@@ -958,7 +1379,7 @@ mod tests {
             pitch: 0.0,
             flashlight: false,
         };
-        let cam = Camera::new(&frame, 16, 16);
+        let cam = Camera::new(&frame, 16, 16, &CpuRenderSettings::default());
 
         // Voxel 1 center: [0.5, 0.0, 0.5]
         // dist = sqrt(0.5^2 + 5.0^2 + 0.5^2) = sqrt(25.5) = 5.0497
@@ -974,6 +1395,7 @@ mod tests {
             15.0,
             false,
             1,
+            1.0,
         );
         let color_1 = center_pixel(&r);
 
@@ -991,6 +1413,7 @@ mod tests {
             15.0,
             false,
             1,
+            1.0,
         );
         let color_2 = center_pixel(&r);
 
@@ -1013,7 +1436,7 @@ mod tests {
             pitch: 0.0,
             flashlight: false,
         };
-        let cam = Camera::new(&frame, 16, 16);
+        let cam = Camera::new(&frame, 16, 16, &CpuRenderSettings::default());
 
         // Draw a single large splat (half_px = 4.0) centered at [8.0, 8.0]
         r.clear();
@@ -1028,6 +1451,7 @@ mod tests {
             15.0,
             false,
             1,
+            1.0,
         );
 
         // Read pixels at different parts of the splat (left inside vs right inside)
@@ -1072,5 +1496,57 @@ mod tests {
         // with small node count (e.g., visited_nodes <= 10, not 150,000 budget exhausted).
         assert!(!stats.budget_exhausted);
         assert!(stats.visited_nodes < 50, "Visited nodes was {}, expected very low", stats.visited_nodes);
+    }
+
+    #[test]
+    fn test_cpu_render_settings_default() {
+        let settings = CpuRenderSettings::default();
+        assert_eq!(settings.max_virtual_depth, 5);
+        assert_eq!(settings.shadows, CpuShadowMode::Off);
+    }
+
+    #[test]
+    fn test_trace_svo_basic_intersect() {
+        let (atlas, root) = one_voxel_atlas(0xFFFFFF, 15);
+        let chunks = [ChunkDraw {
+            origin: [0.0, 0.0, 0.0],
+            root_index: root as i32,
+            world_size: 4.0,
+        }];
+
+        // Ray passing through the center of the voxel (1.5, 1.5, 1.5):
+        // Origin [1.5, 1.5, -1.0], direction [0.0, 0.0, 1.0], max_t = 10.0
+        let hit = trace_svo(&atlas, &chunks, [1.5, 1.5, -1.0], [0.0, 0.0, 1.0], 10.0);
+        assert!(hit.is_some());
+        let hit_val = hit.unwrap();
+        assert_eq!(hit_val.voxel_type, 1); // VOXEL_WALL
+        assert!((hit_val.t - 2.0).abs() < 1e-4); // voxel starts at z=1.0
+
+        // Ray missing the voxel:
+        // Origin [0.5, 0.5, -1.0], direction [0.0, 0.0, 1.0]
+        let miss = trace_svo(&atlas, &chunks, [0.5, 0.5, -1.0], [0.0, 0.0, 1.0], 10.0);
+        assert!(miss.is_none());
+    }
+
+    #[test]
+    fn test_draw_distance_culling() {
+        let (atlas, root) = one_voxel_atlas(0xFFFFFF, 15);
+        let mut r = SoftwareRasterizer::new(16, 16);
+        r.upload_atlas(&atlas);
+        let chunks = [ChunkDraw {
+            origin: [0.0, 0.0, 0.0],
+            root_index: root as i32,
+            world_size: 4.0,
+        }];
+        // Draw with large draw distance
+        r.settings.max_draw_distance = 100.0;
+        let frame = frame_at([1.5, 1.5, -2.0], std::f32::consts::PI);
+        r.draw(&frame, &chunks);
+        assert!(r.telemetry().visited_nodes > 0);
+
+        // Draw with tiny draw distance (should cull the chunk)
+        r.settings.max_draw_distance = 0.1;
+        r.draw(&frame, &chunks);
+        assert_eq!(r.telemetry().visited_nodes, 0);
     }
 }

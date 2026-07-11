@@ -14,6 +14,7 @@ use crate::application::ports::{ChunkDraw, FrameParams, RendererPort};
 pub struct CpuCanvasRenderer {
     rasterizer: SoftwareRasterizer,
     ctx: CanvasRenderingContext2d,
+    settings: crate::adapters::cpu_splatter::CpuRenderSettings,
 }
 
 impl CpuCanvasRenderer {
@@ -22,9 +23,11 @@ impl CpuCanvasRenderer {
             .get_context("2d")?
             .ok_or_else(|| JsValue::from_str("no 2d context available"))?
             .dyn_into::<CanvasRenderingContext2d>()?;
+        let settings = crate::get_cpu_settings();
         Ok(Self {
             rasterizer: SoftwareRasterizer::new(canvas.width() as usize, canvas.height() as usize),
             ctx,
+            settings,
         })
     }
 
@@ -32,7 +35,7 @@ impl CpuCanvasRenderer {
         // Impose a low CPU backing resolution cap (480x270 max), keeping aspect ratio
         let max_w = 480.0;
         let max_h = 270.0;
-        let scale = (max_w / width as f32).min(max_h / height as f32).min(1.0);
+        let scale = (max_w / width as f32).min(max_h / height as f32).min(1.0) * self.settings.internal_scale;
         let w = ((width as f32 * scale).round() as usize).max(1);
         let h = ((height as f32 * scale).round() as usize).max(1);
 
@@ -62,6 +65,15 @@ impl RendererPort for CpuCanvasRenderer {
     }
 
     fn draw(&mut self, frame: &FrameParams, chunks: &[ChunkDraw]) {
+        let old_scale = self.settings.internal_scale;
+        self.settings = crate::get_cpu_settings();
+        self.settings.fov_tan = crate::drivers::webgl::fov_tan();
+        if self.settings.internal_scale != old_scale {
+            if let Some(canvas) = self.ctx.canvas() {
+                self.resize(canvas.width(), canvas.height());
+            }
+        }
+        self.rasterizer.settings = self.settings;
         self.rasterizer.draw(frame, chunks);
         let width = self.rasterizer.width() as u32;
         let height = self.rasterizer.height() as u32;

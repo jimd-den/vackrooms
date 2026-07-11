@@ -645,6 +645,20 @@ impl Engine {
         &self.player
     }
 
+    pub fn teleport_player(&mut self, position: [f32; 3], yaw: f32, pitch: f32) {
+        self.player.position = position;
+        self.player.yaw = yaw;
+        self.player.pitch = pitch;
+    }
+
+    pub fn chunk_size(&self) -> f32 {
+        self.config.chunk_size
+    }
+
+    pub fn is_chunk_resident(&self, key: (i64, i64)) -> bool {
+        self.store.contains(key)
+    }
+
     pub fn collision_world(&self) -> &CollisionWorld {
         &self.world
     }

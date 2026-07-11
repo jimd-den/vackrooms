@@ -95,45 +95,125 @@
         #settings-btn {
             padding: 10px 20px; background: transparent; border: 1px solid #9a916c;
             color: #d8cf9f; cursor: pointer; font-family: inherit; font-size: 14px;
-            transition: all 0.2s; min-height: 44px;
+            transition: all 0.2s; min-height: 44px; border-radius: 6px;
         }
         #settings-btn:hover { background: #4a4433; color: #fff3c4; }
 
-        /* Settings menu: a complete, scrollable panel. */
+        /* Redesigned Settings menu */
         #settings-menu {
             display: none; position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
-            background: #111; border: 1px solid #4a4433; padding: 20px 24px;
-            width: min(400px, calc(100vw - 48px));
-            max-height: min(80vh, 640px);
+            background: rgba(18, 18, 18, 0.95); border: 1px solid rgba(216, 207, 159, 0.25); padding: 24px;
+            width: min(440px, calc(100vw - 32px));
+            max-height: min(90vh, 640px);
             overflow-y: auto;
-            z-index: 20; color: #d8cf9f; box-shadow: 0 4px 16px rgba(0,0,0,0.8);
+            border-radius: 12px;
+            backdrop-filter: blur(12px);
+            z-index: 20; color: #d8cf9f; box-shadow: 0 10px 30px rgba(0,0,0,0.8);
             text-align: left; cursor: default;
             touch-action: pan-y;   /* the menu itself may scroll */
         }
-        #settings-menu h2 { margin-top: 0; color: #fff3c4; font-size: 18px; letter-spacing: 2px; }
-        #settings-menu h3 {
-            color: #fff3c4; font-size: 13px; letter-spacing: 2px;
-            border-bottom: 1px solid #4a4433; padding-bottom: 4px; margin: 20px 0 12px;
+        #settings-menu h2 { margin-top: 0; color: #fff3c4; font-size: 20px; letter-spacing: 4px; border-bottom: 1px solid rgba(216, 207, 159, 0.15); padding-bottom: 10px; margin-bottom: 15px; text-align: center; }
+
+        .tabs-bar {
+            display: flex;
+            border-bottom: 1px solid rgba(216, 207, 159, 0.15);
+            margin-bottom: 16px;
+            gap: 4px;
+            overflow-x: auto;
+            -webkit-overflow-scrolling: touch;
         }
-        .setting-row { margin-bottom: 14px; }
-        .setting-row label { display: block; margin-bottom: 6px; font-size: 13px; }
-        .setting-row .value { color: #fff3c4; float: right; }
+        .tab-btn {
+            flex: 1;
+            padding: 8px 4px;
+            background: transparent;
+            border: none;
+            color: #9a916c;
+            font-family: inherit;
+            font-weight: bold;
+            cursor: pointer;
+            font-size: 11px;
+            letter-spacing: 1px;
+            text-align: center;
+            transition: all 0.2s;
+            border-bottom: 2px solid transparent;
+            min-width: 70px;
+        }
+        .tab-btn.active {
+            color: #fff3c4;
+            border-bottom: 2px solid #fff3c4;
+        }
+
+        .setting-row { margin-bottom: 16px; }
+        .setting-row label { display: block; margin-bottom: 6px; font-size: 13px; color: #bcae7e; }
+        .setting-row .value { color: #fff3c4; float: right; font-weight: bold; }
         .setting-row select, .setting-row input[type="text"], .setting-row input[type="number"] {
-            width: 100%; padding: 8px; background: #000; border: 1px solid #4a4433;
-            color: #d8cf9f; font-family: inherit; box-sizing: border-box; font-size: 14px;
+            width: 100%; padding: 10px; background: rgba(0, 0, 0, 0.6); border: 1px solid rgba(216, 207, 159, 0.2);
+            color: #d8cf9f; font-family: inherit; box-sizing: border-box; font-size: 14px; border-radius: 6px;
+            outline: none;
         }
-        .setting-row input[type="range"] { width: 100%; accent-color: #9a916c; height: 28px; }
-        .setting-row input[type="checkbox"] { width: 20px; height: 20px; accent-color: #9a916c; vertical-align: middle; }
-        .setting-row.inline label { display: inline; margin-left: 8px; }
-        .knob-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px 12px; }
-        .hint { font-size: 11px; color: #6f6851; margin: 4px 0 0; }
-        .settings-actions { display: flex; gap: 8px; margin-top: 20px; }
+        .setting-row select:focus, .setting-row input[type="text"]:focus {
+            border-color: #fff3c4;
+        }
+        .setting-row input[type="range"] { 
+            width: 100%; 
+            accent-color: #d8cf9f; 
+            height: 28px; 
+            background: transparent;
+            cursor: pointer;
+        }
+
+        /* Switch styling for checkboxes */
+        .setting-row.inline-switch {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 16px;
+        }
+        .setting-row.inline-switch label {
+            display: inline;
+            margin-bottom: 0;
+        }
+        .setting-row.inline-switch input[type="checkbox"] {
+            width: 44px;
+            height: 22px;
+            appearance: none;
+            background: rgba(0, 0, 0, 0.6);
+            border: 1px solid rgba(216, 207, 159, 0.2);
+            border-radius: 11px;
+            position: relative;
+            outline: none;
+            cursor: pointer;
+            transition: background 0.2s;
+        }
+        .setting-row.inline-switch input[type="checkbox"]:checked {
+            background: #4a4433;
+        }
+        .setting-row.inline-switch input[type="checkbox"]::before {
+            content: '';
+            position: absolute;
+            width: 16px;
+            height: 16px;
+            border-radius: 50%;
+            top: 2px;
+            left: 2px;
+            background: #9a916c;
+            transition: transform 0.2s, background 0.2s;
+        }
+        .setting-row.inline-switch input[type="checkbox"]:checked::before {
+            transform: translateX(22px);
+            background: #fff3c4;
+        }
+
+        .hint { font-size: 11px; color: #8e8363; margin: 12px 0; line-height: 1.4; text-align: center; }
+
+        .settings-actions { display: flex; gap: 8px; margin-top: 16px; }
         .settings-actions button {
-            flex: 1; padding: 12px 8px; background: #222; border: 1px solid #4a4433;
-            color: #fff3c4; cursor: pointer; font-family: inherit; min-height: 44px; font-size: 13px;
+            flex: 1; padding: 12px 8px; background: rgba(50, 45, 35, 0.4); border: 1px solid rgba(216, 207, 159, 0.3);
+            color: #fff3c4; cursor: pointer; font-family: inherit; min-height: 44px; font-size: 13px; border-radius: 6px;
+            transition: all 0.2s;
         }
-        .settings-actions button:hover { background: #4a4433; }
-        #apply-settings-btn { background: #4a4433; }
+        .settings-actions button:hover { background: rgba(74, 68, 51, 0.6); }
+        #apply-settings-btn { background: #4a4433; border-color: #9a916c; }
         #apply-settings-btn:hover { background: #6b634b; }
 
         /* Touch play chrome: shown by the engine while a touch session is
@@ -188,77 +268,116 @@
     <div id="settings-menu">
         <h2>SETTINGS</h2>
 
-        <h3>CONTROLS</h3>
-        <div class="setting-row">
-            <label for="control-scheme">Control scheme</label>
-            <select id="control-scheme">
-                <option value="modern">Modern (WASD move, mouse look)</option>
-                <option value="doom">Doom (AD rotate, QE strafe)</option>
-            </select>
-        </div>
-        <div class="setting-row">
-            <label for="setting-sensitivity">Look sensitivity <span class="value" id="sensitivity-value">1.0</span></label>
-            <input type="range" id="setting-sensitivity" min="0.2" max="3.0" step="0.1" value="1.0">
-        </div>
-        <div class="setting-row inline">
-            <input type="checkbox" id="setting-invert-y">
-            <label for="setting-invert-y">Invert Y axis</label>
+        <div class="tabs-bar">
+            <button class="tab-btn active" data-tab="tab-controls">CONTROLS</button>
+            <button class="tab-btn" data-tab="tab-graphics">GRAPHICS</button>
+            <button class="tab-btn" data-tab="tab-world">WORLD</button>
+            <button class="tab-btn" data-tab="tab-cpu">CPU RENDER</button>
         </div>
 
-        <h3>GRAPHICS</h3>
-        <div class="setting-row">
-            <label for="setting-quality">World detail <span class="value">reload</span></label>
-            <select id="setting-quality">
-                <option value="low">Standard (0.2u voxels, 3&times;3 chunks)</option>
-                <option value="high">High (0.1u voxels, 5&times;5 chunks)</option>
-            </select>
-        </div>
-        <div class="setting-row">
-            <label for="setting-renderer">Renderer <span class="value">reload</span></label>
-            <select id="setting-renderer">
-                <option value="gpu">GPU raymarcher (WebGL2)</option>
-                <option value="cpu">CPU splatter (no GPU needed)</option>
-            </select>
-        </div>
-        <div class="setting-row">
-            <label for="setting-scale">Render scale</label>
-            <select id="setting-scale">
-                <option value="0">Auto (adaptive)</option>
-                <option value="0.5">50% — fastest</option>
-                <option value="0.65">65%</option>
-                <option value="0.8">80%</option>
-                <option value="1">100% — sharpest</option>
-            </select>
-        </div>
-        <div class="setting-row">
-            <label for="setting-fov">Field of view <span class="value" id="fov-value">75&deg;</span></label>
-            <input type="range" id="setting-fov" min="55" max="100" step="1" value="75">
+        <!-- Controls Tab -->
+        <div id="tab-controls" class="tab-content">
+            <div class="setting-row">
+                <label for="control-scheme">Control scheme</label>
+                <select id="control-scheme">
+                    <option value="modern">Modern (WASD move, mouse look)</option>
+                    <option value="doom">Doom (AD rotate, QE strafe)</option>
+                </select>
+            </div>
+            <div class="setting-row">
+                <label for="setting-sensitivity">Look sensitivity <span class="value" id="sensitivity-value">1.0</span></label>
+                <input type="range" id="setting-sensitivity" min="0.2" max="3.0" step="0.1" value="1.0">
+            </div>
+            <div class="setting-row inline-switch">
+                <label for="setting-invert-y">Invert Y axis</label>
+                <input type="checkbox" id="setting-invert-y">
+            </div>
         </div>
 
-        <h3>WORLD <span style="color:#6f6851">(Apply &amp; Reload)</span></h3>
-        <div class="setting-row">
-            <label for="setting-seed">Seed (text or number)</label>
-            <input type="text" id="setting-seed" placeholder="42">
+        <!-- Graphics Tab -->
+        <div id="tab-graphics" class="tab-content" style="display: none;">
+            <div class="setting-row">
+                <label for="setting-quality">World detail <span class="value">reload</span></label>
+                <select id="setting-quality">
+                    <option value="low">Standard (0.2u voxels, 3&times;3 chunks)</option>
+                    <option value="high">High (0.1u voxels, 5&times;5 chunks)</option>
+                </select>
+            </div>
+            <div class="setting-row">
+                <label for="setting-renderer">Renderer <span class="value">reload</span></label>
+                <select id="setting-renderer">
+                    <option value="gpu">GPU raymarcher (WebGL2)</option>
+                    <option value="cpu">CPU splatter (no GPU needed)</option>
+                </select>
+            </div>
+            <div class="setting-row">
+                <label for="setting-scale">Render scale</label>
+                <select id="setting-scale">
+                    <option value="0">Auto (adaptive)</option>
+                    <option value="0.5">50% — fastest</option>
+                    <option value="0.65">65%</option>
+                    <option value="0.8">80%</option>
+                    <option value="1">100% — sharpest</option>
+                </select>
+            </div>
+            <div class="setting-row">
+                <label for="setting-fov">Field of view <span class="value" id="fov-value">75&deg;</span></label>
+                <input type="range" id="setting-fov" min="55" max="100" step="1" value="75">
+            </div>
         </div>
-        <div class="knob-grid">
+
+        <!-- World Tab -->
+        <div id="tab-world" class="tab-content" style="display: none;">
             <div class="setting-row">
-                <label for="setting-pillars">Pillars &times;</label>
-                <input type="number" id="setting-pillars" step="0.1" min="0" max="4" value="1.0">
+                <label for="setting-seed">Seed (text or number)</label>
+                <input type="text" id="setting-seed" placeholder="42">
             </div>
             <div class="setting-row">
-                <label for="setting-walls">Walls &times;</label>
-                <input type="number" id="setting-walls" step="0.1" min="0" max="4" value="1.0">
+                <label for="setting-pillars">Pillars &times; <span class="value" id="pillars-value">1.0</span></label>
+                <input type="range" id="setting-pillars" min="0.0" max="4.0" step="0.1" value="1.0">
             </div>
             <div class="setting-row">
-                <label for="setting-atria">Atria &times;</label>
-                <input type="number" id="setting-atria" step="0.1" min="0" max="4" value="1.0">
+                <label for="setting-walls">Walls &times; <span class="value" id="walls-value">1.0</span></label>
+                <input type="range" id="setting-walls" min="0.0" max="4.0" step="0.1" value="1.0">
             </div>
             <div class="setting-row">
-                <label for="setting-lights">Lights &times;</label>
-                <input type="number" id="setting-lights" step="0.1" min="0" max="4" value="1.0">
+                <label for="setting-atria">Atria &times; <span class="value" id="atria-value">1.0</span></label>
+                <input type="range" id="setting-atria" min="0.0" max="4.0" step="0.1" value="1.0">
+            </div>
+            <div class="setting-row">
+                <label for="setting-lights">Lights &times; <span class="value" id="lights-value">1.0</span></label>
+                <input type="range" id="setting-lights" min="0.0" max="4.0" step="0.1" value="1.0">
             </div>
         </div>
-        <p class="hint">Controls &amp; graphics apply instantly and persist on this device. World changes need Apply &amp; Reload.</p>
+
+        <!-- CPU Renderer Tab -->
+        <div id="tab-cpu" class="tab-content" style="display: none;">
+            <div class="setting-row">
+                <label for="setting-cpu-scale">CPU Resolution Scale <span class="value" id="cpu-scale-value">100%</span></label>
+                <input type="range" id="setting-cpu-scale" min="0.25" max="1.0" step="0.05" value="1.0">
+            </div>
+            <div class="setting-row">
+                <label for="setting-cpu-lod">LOD Cutoff (px) <span class="value" id="cpu-lod-value">1.00</span></label>
+                <input type="range" id="setting-cpu-lod" min="0.25" max="2.0" step="0.05" value="1.00">
+            </div>
+            <div class="setting-row">
+                <label for="setting-cpu-splat">Max Splat Size (px) <span class="value" id="cpu-splat-value">12.0</span></label>
+                <input type="range" id="setting-cpu-splat" min="2.0" max="16.0" step="0.5" value="12.0">
+            </div>
+            <div class="setting-row">
+                <label for="setting-cpu-dist">Draw Distance (m) <span class="value" id="cpu-dist-value">96</span></label>
+                <input type="range" id="setting-cpu-dist" min="16" max="256" step="8" value="96">
+            </div>
+            <div class="setting-row">
+                <label for="setting-cpu-shadows">Shadows</label>
+                <select id="setting-cpu-shadows">
+                    <option value="off">Off (Fastest)</option>
+                    <option value="hero">Hero shadow ray (Beautiful)</option>
+                </select>
+            </div>
+        </div>
+
+        <p class="hint">Controls, Graphics &amp; CPU Render settings apply instantly. World changes need Apply &amp; Reload.</p>
 
         <div class="settings-actions">
             <button id="fullscreen-btn">Fullscreen</button>
@@ -274,6 +393,11 @@
             set_invert_y,
             set_render_scale,
             set_fov,
+            set_cpu_scale,
+            set_cpu_lod_cutoff,
+            set_cpu_max_splat_half,
+            set_cpu_max_draw_distance,
+            set_cpu_shadows,
         } from './pkg/wasm_frontend.js';
 
         const $ = (id) => document.getElementById(id);
@@ -283,7 +407,18 @@
         // ---- Persistence -------------------------------------------------
         // Live preferences (applied instantly, saved per device).
         const PREFS_KEY = 'vackrooms_prefs';
-        const defaults = { scheme: 'modern', sensitivity: 1.0, invertY: false, scale: 0, fov: 75 };
+        const defaults = {
+            scheme: 'modern',
+            sensitivity: 1.0,
+            invertY: false,
+            scale: 0,
+            fov: 75,
+            cpuScale: 1.0,
+            cpuLod: 1.0,
+            cpuSplat: 12.0,
+            cpuDist: 96.0,
+            cpuShadows: 'off'
+        };
         let prefs = { ...defaults };
         try { prefs = { ...defaults, ...JSON.parse(localStorage.getItem(PREFS_KEY) || '{}') }; } catch (_) {}
         // Migrate the old single-key scheme store.
@@ -305,11 +440,46 @@
         $('setting-fov').value = prefs.fov;
         $('fov-value').textContent = `${prefs.fov}°`;
 
+        // CPU settings
+        $('setting-cpu-scale').value = prefs.cpuScale;
+        $('cpu-scale-value').textContent = `${Math.round(prefs.cpuScale * 100)}%`;
+        $('setting-cpu-lod').value = prefs.cpuLod;
+        $('cpu-lod-value').textContent = Number(prefs.cpuLod).toFixed(2);
+        $('setting-cpu-splat').value = prefs.cpuSplat;
+        $('cpu-splat-value').textContent = Number(prefs.cpuSplat).toFixed(1);
+        $('setting-cpu-dist').value = prefs.cpuDist;
+        $('cpu-dist-value').textContent = prefs.cpuDist;
+        $('setting-cpu-shadows').value = prefs.cpuShadows;
+
+        // URL parameters overrides (link sharing)
         $('setting-quality').value = urlParams.get('spec') === 'high' ? 'high' : 'low';
         $('setting-renderer').value = urlParams.get('renderer') === 'cpu' ? 'cpu' : 'gpu';
         if (urlParams.has('seed')) $('setting-seed').value = urlParams.get('seed');
         for (const knob of ['pillars', 'walls', 'atria', 'lights']) {
-            if (urlParams.has(knob)) $(`setting-${knob}`).value = urlParams.get(knob);
+            if (urlParams.has(knob)) {
+                const val = urlParams.get(knob);
+                $(`setting-${knob}`).value = val;
+                $(`${knob}-value`).textContent = Number(val).toFixed(1);
+            }
+        }
+        if (urlParams.has('cpuScale')) {
+            prefs.cpuScale = Number(urlParams.get('cpuScale'));
+            $('setting-cpu-scale').value = prefs.cpuScale;
+            $('cpu-scale-value').textContent = `${Math.round(prefs.cpuScale * 100)}%`;
+        }
+        if (urlParams.has('cpuSplatPx')) {
+            prefs.cpuSplat = Number(urlParams.get('cpuSplatPx'));
+            $('setting-cpu-splat').value = prefs.cpuSplat;
+            $('cpu-splat-value').textContent = Number(prefs.cpuSplat).toFixed(1);
+        }
+        if (urlParams.has('cpuRange')) {
+            prefs.cpuDist = Number(urlParams.get('cpuRange'));
+            $('setting-cpu-dist').value = prefs.cpuDist;
+            $('cpu-dist-value').textContent = prefs.cpuDist;
+        }
+        if (urlParams.has('cpuShadows')) {
+            prefs.cpuShadows = urlParams.get('cpuShadows') === 'hero' ? 'hero' : 'off';
+            $('setting-cpu-shadows').value = prefs.cpuShadows;
         }
 
         // ---- Apply live preferences to the engine --------------------------
@@ -319,8 +489,16 @@
             set_invert_y(!!prefs.invertY);
             set_render_scale(Number(prefs.scale));
             set_fov(Number(prefs.fov));
+
+            // CPU Renderer configurations
+            set_cpu_scale(Number(prefs.cpuScale));
+            set_cpu_lod_cutoff(Number(prefs.cpuLod));
+            set_cpu_max_splat_half(Number(prefs.cpuSplat));
+            set_cpu_max_draw_distance(Number(prefs.cpuDist));
+            set_cpu_shadows(prefs.cpuShadows === 'hero' ? 1 : 0);
         };
 
+        // Live preferences event listeners
         $('control-scheme').addEventListener('change', (e) => {
             prefs.scheme = e.target.value; savePrefs();
             set_doom_controls(prefs.scheme === 'doom');
@@ -342,6 +520,54 @@
             prefs.fov = Number(e.target.value); savePrefs();
             $('fov-value').textContent = `${prefs.fov}°`;
             set_fov(prefs.fov);
+        });
+
+        // CPU settings event listeners
+        $('setting-cpu-scale').addEventListener('input', (e) => {
+            prefs.cpuScale = Number(e.target.value); savePrefs();
+            $('cpu-scale-value').textContent = `${Math.round(prefs.cpuScale * 100)}%`;
+            set_cpu_scale(prefs.cpuScale);
+        });
+        $('setting-cpu-lod').addEventListener('input', (e) => {
+            prefs.cpuLod = Number(e.target.value); savePrefs();
+            $('cpu-lod-value').textContent = Number(prefs.cpuLod).toFixed(2);
+            set_cpu_lod_cutoff(prefs.cpuLod);
+        });
+        $('setting-cpu-splat').addEventListener('input', (e) => {
+            prefs.cpuSplat = Number(e.target.value); savePrefs();
+            $('cpu-splat-value').textContent = Number(prefs.cpuSplat).toFixed(1);
+            set_cpu_max_splat_half(prefs.cpuSplat);
+        });
+        $('setting-cpu-dist').addEventListener('input', (e) => {
+            prefs.cpuDist = Number(e.target.value); savePrefs();
+            $('cpu-dist-value').textContent = prefs.cpuDist;
+            set_cpu_max_draw_distance(prefs.cpuDist);
+        });
+        $('setting-cpu-shadows').addEventListener('change', (e) => {
+            prefs.cpuShadows = e.target.value; savePrefs();
+            set_cpu_shadows(prefs.cpuShadows === 'hero' ? 1 : 0);
+        });
+
+        // World tuning sliders live display
+        for (const knob of ['pillars', 'walls', 'atria', 'lights']) {
+            $(`setting-${knob}`).addEventListener('input', (e) => {
+                $(`${knob}-value`).textContent = Number(e.target.value).toFixed(1);
+            });
+        }
+
+        // Tab Switching Logic
+        const tabButtons = document.querySelectorAll('.tab-btn');
+        const tabContents = document.querySelectorAll('.tab-content');
+
+        tabButtons.forEach(btn => {
+            btn.addEventListener('click', () => {
+                tabButtons.forEach(b => b.classList.remove('active'));
+                tabContents.forEach(c => c.style.display = 'none');
+
+                btn.classList.add('active');
+                const activeTabId = btn.getAttribute('data-tab');
+                $(activeTabId).style.display = 'block';
+            });
         });
 
         // ---- Menu open/close/apply ----------------------------------------
@@ -376,6 +602,13 @@
             }
             if ($('setting-quality').value === 'high') params.set('spec', 'high');
             if ($('setting-renderer').value === 'cpu') params.set('renderer', 'cpu');
+
+            // Persist CPU configurations on link
+            if (Number(prefs.cpuScale) !== 1.0) params.set('cpuScale', prefs.cpuScale);
+            if (Number(prefs.cpuSplat) !== 12.0) params.set('cpuSplatPx', prefs.cpuSplat);
+            if (Number(prefs.cpuDist) !== 96.0) params.set('cpuRange', prefs.cpuDist);
+            if (prefs.cpuShadows !== 'off') params.set('cpuShadows', prefs.cpuShadows);
+
             window.location.search = params.toString();
         });
 

@@ -13,8 +13,8 @@ use vackrooms::use_cases::generate_chunk::GenerateChunkArchitectureUseCase;
 /// A minimalist, zero-dependency HTTP server that connects our
 /// Clean Architecture engine to the Browser Voxel Renderer.
 fn main() {
-    let port = 8080;
-    let listener = TcpListener::bind(format!("127.0.0.1:{}", port)).unwrap();
+    let port = 3000;
+    let listener = TcpListener::bind(format!("0.0.0.0:{}", port)).unwrap();
     println!("--- Backrooms Engine Running ---");
     println!("Server listening on http://localhost:{}", port);
     println!("Open the above URL in your browser to view the Voxel Rendering.");

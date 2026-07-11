@@ -250,7 +250,8 @@ pub fn boot() -> Result<(), JsValue> {
         .document()
         .ok_or_else(|| JsValue::from_str("no document"))?;
 
-    let canvas: HtmlCanvasElement = element(&document, "view")?;
+    let canvas: HtmlCanvasElement = element(&document, "view")
+        .or_else(|_| element(&document, "game-canvas"))?;
     let minimap: HtmlCanvasElement = element(&document, "minimap")?;
     let overlay: HtmlElement = element(&document, "overlay")?;
     let status_msg: HtmlElement = element(&document, "status-msg")?;
@@ -261,6 +262,7 @@ pub fn boot() -> Result<(), JsValue> {
     // Generation controls: ?seed=… (number or any text) plus the density
     // knobs ?pillars= ?walls= ?atria= ?lights= (multipliers, default 1).
     let query = window.location().search().unwrap_or_default();
+    web_sys::console::log_1(&format!("BOOTING ENGINE: query={}", query).into());
     let gen_params = parse_generation_params(&query, WORLD_SEED);
     let high_spec = query.contains("spec=high");
     let (generator_config, engine_config) = if high_spec {
@@ -332,8 +334,42 @@ pub fn boot() -> Result<(), JsValue> {
     let input = Rc::new(RefCell::new(InputCollector::new()));
     let touch = Rc::new(RefCell::new(TouchState::default()));
 
-    attach_input_listeners(&document, &canvas, &overlay, &input, &touch)?;
-    attach_touch_listeners(&document, &canvas, &overlay, &input, &touch)?;
+    let is_capture = query.contains("capture=1");
+    if is_capture {
+        let mut cam_pos = [5.0, 1.7, 5.0];
+        if let Some(pos_idx) = query.find("camera=") {
+            let s = &query[pos_idx + 7..];
+            let end = s.find('&').unwrap_or(s.len());
+            let parts: Vec<&str> = s[..end].split(',').collect();
+            if parts.len() == 3 {
+                if let (Ok(x), Ok(y), Ok(z)) = (parts[0].parse::<f32>(), parts[1].parse::<f32>(), parts[2].parse::<f32>()) {
+                    cam_pos = [x, y, z];
+                }
+            }
+        }
+        let mut yaw_val = 1.5708f32;
+        if let Some(yaw_idx) = query.find("yaw=") {
+            let s = &query[yaw_idx + 4..];
+            let end = s.find('&').unwrap_or(s.len());
+            if let Ok(y) = s[..end].parse::<f32>() {
+                yaw_val = y;
+            }
+        }
+        let mut pitch_val = -0.05f32;
+        if let Some(pitch_idx) = query.find("pitch=") {
+            let s = &query[pitch_idx + 6..];
+            let end = s.find('&').unwrap_or(s.len());
+            if let Ok(p) = s[..end].parse::<f32>() {
+                pitch_val = p;
+            }
+        }
+        engine.borrow_mut().teleport_player(cam_pos, yaw_val, pitch_val);
+    }
+
+    if !is_capture {
+        attach_input_listeners(&document, &canvas, &overlay, &input, &touch)?;
+        attach_touch_listeners(&document, &canvas, &overlay, &input, &touch)?;
+    }
     run_frame_loop(
         window, document, canvas, minimap, overlay, status_msg, play_msg, renderer, engine, input,
     )
@@ -602,6 +638,10 @@ fn run_frame_loop(
     let hud_scale: HtmlElement = element(window.document().as_ref().unwrap(), "hud-scale")?;
     let hud_gpu: HtmlElement = element(window.document().as_ref().unwrap(), "hud-gpu")?;
 
+    let query = window.location().search().unwrap_or_default();
+    let is_capture = query.contains("capture=1");
+    let capture_frame_counter = Rc::new(Cell::new(0u32));
+
     let last_time = Rc::new(Cell::new(0.0f64));
     let frame_count = Rc::new(Cell::new(0u32));
     let hud_window_start = Rc::new(Cell::new(0.0f64));
@@ -613,7 +653,9 @@ fn run_frame_loop(
 
     let loop_window = window.clone();
     *raf_handle.borrow_mut() = Some(Closure::new(move |time_ms: f64| {
-        let dt = if last_time.get() > 0.0 {
+        let dt = if is_capture {
+            0.0
+        } else if last_time.get() > 0.0 {
             ((time_ms - last_time.get()) / 1000.0) as f32
         } else {
             1.0 / 60.0
@@ -704,6 +746,44 @@ fn run_frame_loop(
                     &gpu.map(|ms| format!("{ms:.1} ms"))
                         .unwrap_or_else(|| "n/a".to_string()),
                 ));
+            }
+        }
+
+        // If in capture mode, wait until the camera chunk is loaded, then wait 15 frames
+        if is_capture {
+            let engine_ref = engine.borrow();
+            let pos = engine_ref.player().position;
+            let cs = engine_ref.chunk_size();
+            let cam_chunk = crate::application::streaming::chunk_key(
+                (pos[0] / cs).floor() * cs,
+                (pos[2] / cs).floor() * cs,
+            );
+            if frame_count.get() % 30 == 0 {
+                web_sys::console::log_1(
+                    &format!(
+                        "[DEBUG CAPTURE] player pos: {:?}, cs: {}, cam_chunk: {:?}, resident: {}, ready: {}",
+                        pos,
+                        cs,
+                        cam_chunk,
+                        engine_ref.is_chunk_resident(cam_chunk),
+                        engine_ref.stats().ready
+                    )
+                    .into(),
+                );
+            }
+            if engine_ref.is_chunk_resident(cam_chunk) {
+                let frames = capture_frame_counter.get();
+                if frames < 15 {
+                    capture_frame_counter.set(frames + 1);
+                } else {
+                    if let Some(w) = web_sys::window() {
+                        let _ = js_sys::Reflect::set(
+                            &w,
+                            &JsValue::from_str("__sceneReady"),
+                            &JsValue::from_bool(true),
+                        );
+                    }
+                }
             }
         }
 

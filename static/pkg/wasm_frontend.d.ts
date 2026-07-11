@@ -1,6 +1,48 @@
 /* tslint:disable */
 /* eslint-disable */
 
+export function get_blueprint_svg(seed: number, rx: number, rz: number, voxel_scale: number, size_world: number): string;
+
+export function get_chunk_blueprint_svg(seed: number, chunk_x: number, chunk_z: number, voxel_scale: number, layer: string): string;
+
+/**
+ * Fast single-chunk voxel blueprint with semantic overlays.
+ *
+ * Why fast? This renders only one 50×50 (or 200×200 for high-spec) voxel
+ * grid instead of stitching N×N chunks, so it completes in < 5 ms inside
+ * WASM.  The browser can call this on every keypress without delay.
+ *
+ * Arguments (all passed from JavaScript):
+ * * `seed`          – World seed.
+ * * `chunk_x`       – Chunk origin X in world units (chunk_index * chunk_size).
+ * * `chunk_z`       – Chunk origin Z in world units.
+ * * `voxel_scale`   – Metres per voxel (0.2 default, 0.1 high-spec).
+ * * `pixels_per_voxel` – SVG pixels per cell (8–12 is comfortable).
+ * * `show_grid`     – Draw hairline grid lines.
+ * * `show_semantics`– Draw corridor / room / door overlays.
+ * * `show_ceiling`  – Include ceiling and light voxels.
+ */
+export function get_chunk_voxel_blueprint_svg(seed: number, chunk_x: number, chunk_z: number, voxel_scale: number, pixels_per_voxel: number, show_grid: boolean, show_semantics: boolean, show_ceiling: boolean): string;
+
+/**
+ * Compact geometry feed for the canvas debug map. This deliberately returns
+ * planning primitives rather than SVG so the page can redraw cheaply while
+ * panning, zooming, or changing overlays.
+ */
+export function get_debug_region_json(seed: number, region_x: number, region_z: number): string;
+
+export function get_large_voxel_blueprint_svg(seed: number, rx_val: number, rz_val: number, voxel_scale: number, size_world: number, layer: string): string;
+
+export function set_cpu_lod_cutoff(cutoff: number): void;
+
+export function set_cpu_max_draw_distance(dist: number): void;
+
+export function set_cpu_max_splat_half(half: number): void;
+
+export function set_cpu_scale(scale: number): void;
+
+export function set_cpu_shadows(mode: number): void;
+
 export function set_doom_controls(enabled: boolean): void;
 
 export function set_face_weights(top: number, bottom: number, x: number, z: number): void;
@@ -45,15 +87,25 @@ export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembl
 
 export interface InitOutput {
     readonly memory: WebAssembly.Memory;
-    readonly set_doom_controls: (a: number) => void;
-    readonly set_invert_y: (a: number) => void;
-    readonly set_mouse_sensitivity: (a: number) => void;
-    readonly set_render_scale: (a: number) => void;
     readonly start: () => void;
     readonly set_face_weights: (a: number, b: number, c: number, d: number) => void;
     readonly set_fov: (a: number) => void;
     readonly worker_generate: (a: number, b: number, c: number, d: number) => [number, number];
     readonly worker_init: (a: number, b: number, c: number) => void;
+    readonly get_blueprint_svg: (a: number, b: number, c: number, d: number, e: number) => [number, number];
+    readonly get_chunk_blueprint_svg: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number];
+    readonly get_chunk_voxel_blueprint_svg: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number];
+    readonly get_debug_region_json: (a: number, b: number, c: number) => [number, number];
+    readonly get_large_voxel_blueprint_svg: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number];
+    readonly set_doom_controls: (a: number) => void;
+    readonly set_invert_y: (a: number) => void;
+    readonly set_cpu_lod_cutoff: (a: number) => void;
+    readonly set_cpu_max_draw_distance: (a: number) => void;
+    readonly set_cpu_max_splat_half: (a: number) => void;
+    readonly set_cpu_scale: (a: number) => void;
+    readonly set_mouse_sensitivity: (a: number) => void;
+    readonly set_render_scale: (a: number) => void;
+    readonly set_cpu_shadows: (a: number) => void;
     readonly wasm_bindgen__convert__closures_____invoke__h4a98415c8f04dfea: (a: number, b: number, c: number) => void;
     readonly wasm_bindgen__convert__closures_____invoke__h00d81ef20398ee11: (a: number, b: number, c: any) => void;
     readonly wasm_bindgen__convert__closures_____invoke__h00d81ef20398ee11_2: (a: number, b: number, c: any) => void;

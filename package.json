@@ -1,0 +1,12 @@
+{
+  "name": "vackrooms-visual-tests",
+  "version": "1.0.0",
+  "description": "Visual regression tests for Vackrooms",
+  "main": "index.js",
+  "scripts": {
+    "test:visual": "playwright test"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.40.0"
+  }
+}
