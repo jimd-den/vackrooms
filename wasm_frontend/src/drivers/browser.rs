@@ -20,6 +20,7 @@ use vackrooms::use_cases::generate_chunk::GeneratorConfig;
 use crate::adapters::input::InputCollector;
 use crate::adapters::local_chunk_source::LocalChunkSource;
 use crate::adapters::query_config::parse_generation_params;
+use crate::adapters::section_locator::SectionLocator;
 use crate::application::engine::{Engine, EngineConfig};
 use crate::application::ports::{
     ChunkDraw, FrameParams, RendererPort, SurfaceChunk, SurfaceChunkKey,
@@ -267,6 +268,14 @@ pub fn boot() -> Result<(), JsValue> {
     let spawn_at = vackrooms::use_cases::region_plan::spawn_point(gen_params.seed);
     let spawn = [spawn_at.x, 1.7, spawn_at.z];
     let spawn_yaw = -std::f32::consts::FRAC_PI_2; // face +X
+    // ?level=34 boots straight into the grassland (debugging any level in
+    // any renderer without waiting on a noclip roll).
+    let initial_level = query
+        .trim_start_matches('?')
+        .split('&')
+        .find_map(|pair| pair.strip_prefix("level="))
+        .and_then(|v| v.parse::<u32>().ok())
+        .unwrap_or(0);
     let (generator_config, engine_config) = if high_spec {
         (
             GeneratorConfig::high_spec()
@@ -281,6 +290,7 @@ pub fn boot() -> Result<(), JsValue> {
                 // 5x5 footprint: the outer ring (>= 20 units away) stays at
                 // the coarse LOD, so high spec pays for ~9 fine chunks, not 25.
                 fine_distance: 25.0,
+                initial_level,
                 ..EngineConfig::default()
             },
         )
@@ -293,6 +303,7 @@ pub fn boot() -> Result<(), JsValue> {
                 seed: gen_params.seed,
                 spawn,
                 spawn_yaw,
+                initial_level,
                 ..EngineConfig::default()
             },
         )
@@ -302,6 +313,12 @@ pub fn boot() -> Result<(), JsValue> {
     if let Ok(hud_renderer) = element::<HtmlElement>(&document, "hud-renderer") {
         hud_renderer.set_text_content(Some(renderer.borrow().label()));
     }
+    // Names the section the player is standing in (top-right HUD). The
+    // locator re-derives the deterministic region plan, cached per region.
+    let locator = Rc::new(RefCell::new(SectionLocator::new(
+        gen_params.seed,
+        generator_config,
+    )));
     // Chunk generation runs on a Web Worker pool so crossing a streaming
     // boundary never stalls the frame loop. `?workers=0` forces the old
     // synchronous in-thread source (also the fallback if workers fail).
@@ -388,7 +405,7 @@ pub fn boot() -> Result<(), JsValue> {
         attach_touch_listeners(&document, &canvas, &overlay, &input, &touch)?;
     }
     run_frame_loop(
-        window, document, canvas, overlay, status_msg, play_msg, renderer, engine, input,
+        window, document, canvas, overlay, status_msg, play_msg, renderer, engine, input, locator,
     )
 }
 
@@ -411,6 +428,16 @@ fn attach_input_listeners(
     for (event, pressed) in [("keydown", true), ("keyup", false)] {
         let input = input.clone();
         let closure = Closure::<dyn FnMut(KeyboardEvent)>::new(move |e: KeyboardEvent| {
+            // F3 toggles the anomaly debug overlay (and never reaches the
+            // browser's own F3 find shortcut).
+            if pressed && e.code() == "F3" {
+                e.prevent_default();
+                if !e.repeat() {
+                    let on = crate::ANOMALY_DEBUG.load(std::sync::atomic::Ordering::Relaxed);
+                    crate::ANOMALY_DEBUG.store(!on, std::sync::atomic::Ordering::Relaxed);
+                }
+                return;
+            }
             if !e.repeat() {
                 input.borrow_mut().key_event(&e.code(), pressed);
             }
@@ -653,6 +680,7 @@ fn run_frame_loop(
     renderer: Rc<RefCell<DriverRenderer>>,
     engine: Rc<RefCell<Engine>>,
     input: Rc<RefCell<InputCollector>>,
+    locator: Rc<RefCell<SectionLocator>>,
 ) -> Result<(), JsValue> {
     let hud_fps: HtmlElement = element(window.document().as_ref().unwrap(), "hud-fps")?;
     let hud_chunks: HtmlElement = element(window.document().as_ref().unwrap(), "hud-chunks")?;
@@ -662,6 +690,14 @@ fn run_frame_loop(
     let hud_dist: Option<HtmlElement> =
         element(window.document().as_ref().unwrap(), "hud-dist").ok();
     let last_dist_text = Rc::new(RefCell::new(String::new()));
+    // Top-right section readout and the anomaly debug overlay; both are
+    // optional page elements so older/embedded shells keep working.
+    let hud_section: Option<HtmlElement> =
+        element(window.document().as_ref().unwrap(), "hud-section").ok();
+    let last_section_text = Rc::new(RefCell::new(String::new()));
+    let debug_overlay: Option<HtmlElement> =
+        element(window.document().as_ref().unwrap(), "debug-overlay").ok();
+    let debug_overlay_visible = Rc::new(Cell::new(false));
 
     let query = window.location().search().unwrap_or_default();
     let is_capture = query.contains("capture=1");
@@ -775,6 +811,36 @@ fn run_frame_loop(
                     &gpu.map(|ms| format!("{ms:.1} ms"))
                         .unwrap_or_else(|| "n/a".to_string()),
                 ));
+            }
+
+            // Top-right section readout ("LEVEL 0 · MAIN CORRIDOR · ...").
+            // The locator caches its region plan, so this is cheap except on
+            // a region crossing; only touch the DOM when the text changes.
+            if let Some(hud_section) = &hud_section {
+                let (level, pos) = {
+                    let engine_ref = engine.borrow();
+                    (engine_ref.level(), engine_ref.player().position)
+                };
+                let text = locator.borrow_mut().describe(level, pos[0], pos[2]);
+                let mut last = last_section_text.borrow_mut();
+                if *last != text {
+                    hud_section.set_text_content(Some(&text));
+                    *last = text;
+                }
+            }
+
+            // Anomaly debug overlay (F3 or the settings switch).
+            if let Some(overlay_el) = &debug_overlay {
+                let on = crate::ANOMALY_DEBUG.load(std::sync::atomic::Ordering::Relaxed);
+                if on {
+                    overlay_el.set_text_content(Some(&engine.borrow().anomaly_debug_text()));
+                }
+                if on != debug_overlay_visible.get() {
+                    debug_overlay_visible.set(on);
+                    let _ = overlay_el
+                        .style()
+                        .set_property("display", if on { "block" } else { "none" });
+                }
             }
         }
 

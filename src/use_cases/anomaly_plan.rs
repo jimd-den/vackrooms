@@ -281,15 +281,33 @@ pub fn plan_anomalies_for_region(
     protected_point: Position,
     config: &GeneratorConfig,
 ) -> Vec<AnomalyInstance> {
-    if config.anomalies.frequency <= 0.0 {
-        return Vec::new();
-    }
     let query = WorldBounds::new(
         region_origin.x,
         region_origin.z,
         region_origin.x + region_size,
         region_origin.z + region_size,
     );
+
+    // Debug override: one guaranteed instance on the spawn's macro cell so
+    // the engine's anomaly handling can be observed on demand. It uses the
+    // exact deterministic construction as organic candidates (same id, same
+    // geometry), so every region query and every worker agrees on it.
+    let forced = config.anomalies.forced_kind.and_then(|kind| {
+        if kind == AnomalyKind::RedRoom {
+            // Red rooms derive from assemblies, not the macro lattice.
+            return None;
+        }
+        let ax = (protected_point.x / MACRO_CELL).floor() as i64;
+        let az = (protected_point.z / MACRO_CELL).floor() as i64;
+        let instance = macro_instance(seed, ax, az, kind, config);
+        instance.footprint.bounds().intersects(query).then_some(instance)
+    });
+
+    if config.anomalies.frequency <= 0.0 {
+        let mut out: Vec<AnomalyInstance> = forced.into_iter().collect();
+        out.sort_by_key(|a| a.id);
+        return out;
+    }
     let expanded = query.expanded(MAX_QUERY_MARGIN);
     let ax0 = (expanded.min_x / MACRO_CELL).floor() as i64;
     let ax1 = (expanded.max_x / MACRO_CELL).floor() as i64;
@@ -297,6 +315,7 @@ pub fn plan_anomalies_for_region(
     let az1 = (expanded.max_z / MACRO_CELL).floor() as i64;
     let chance = (0.20 * config.anomalies.frequency.clamp(0.0, 4.0)).min(0.75);
     let mut out = Vec::new();
+    out.extend(forced);
     for az in az0..=az1 {
         for ax in ax0..=ax1 {
             let candidate = hash(seed, 0xCAAD_1DA7, ax, az);
@@ -392,6 +411,47 @@ mod tests {
             )
             .is_empty()
         );
+    }
+
+    #[test]
+    fn forced_kind_spawns_an_instance_on_the_protected_cell() {
+        let mut c = GeneratorConfig::low_spec();
+        c.anomalies.forced_kind = Some(AnomalyKind::PillarExpanse);
+        let spawn = Position::new(6.0, 40.0);
+        let plans = plan_anomalies_for_region(
+            42,
+            Position::new(0.0, 0.0),
+            80.0,
+            &[],
+            spawn,
+            &c,
+        );
+        let forced = plans
+            .iter()
+            .find(|a| a.kind == AnomalyKind::PillarExpanse)
+            .expect("forced pillar expanse must exist near spawn");
+        // The instance is anchored to the spawn's macro cell, so its
+        // footprint must at least reach the region that contains the spawn.
+        assert!(
+            forced
+                .footprint
+                .bounds()
+                .intersects(WorldBounds::new(0.0, 0.0, 80.0, 80.0))
+        );
+
+        // Forcing must work even with organic anomalies disabled entirely.
+        c.anomalies.frequency = 0.0;
+        let plans = plan_anomalies_for_region(
+            42,
+            Position::new(0.0, 0.0),
+            80.0,
+            &[],
+            spawn,
+            &c,
+        );
+        assert_eq!(plans.len(), 1);
+        assert_eq!(plans[0].kind, AnomalyKind::PillarExpanse);
+        assert_eq!(plans[0].id, forced.id, "identity must be deterministic");
     }
 
     #[test]

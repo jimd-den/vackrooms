@@ -89,6 +89,9 @@ struct Uniforms {
     light_view_proj: Option<WebGlUniformLocation>,
     shadowed_light_index: Option<WebGlUniformLocation>,
     shadow_taps: Option<WebGlUniformLocation>,
+    outdoor: Option<WebGlUniformLocation>,
+    fog_color: Option<WebGlUniformLocation>,
+    ambient_scale: Option<WebGlUniformLocation>,
 }
 
 struct ShadowUniforms {
@@ -186,6 +189,9 @@ impl SplatRenderer {
             light_view_proj: gl.get_uniform_location(&program, "uLightViewProjection"),
             shadowed_light_index: gl.get_uniform_location(&program, "uShadowedLightIndex"),
             shadow_taps: gl.get_uniform_location(&program, "uShadowTaps"),
+            outdoor: gl.get_uniform_location(&program, "uOutdoor"),
+            fog_color: gl.get_uniform_location(&program, "uFogColor"),
+            ambient_scale: gl.get_uniform_location(&program, "uAmbientScale"),
         };
         let lookup = |name: &str| -> Result<u32, JsValue> {
             let location = gl.get_attrib_location(&program, name);
@@ -557,8 +563,14 @@ impl RendererPort for SplatRenderer {
             gl.viewport(0, 0, self.width, self.height);
             // Unloaded space is literal black; the splat shader reaches the
             // same black before the draw limit so missing chunks have no
-            // colored rectangle or visible render-distance wall.
-            gl.clear_color(0.0, 0.0, 0.0, 1.0);
+            // colored rectangle or visible render-distance wall. Outdoor
+            // levels clear to the environment's bright sky instead.
+            let env = frame.environment;
+            if env.outdoor {
+                gl.clear_color(env.sky_color[0], env.sky_color[1], env.sky_color[2], 1.0);
+            } else {
+                gl.clear_color(0.0, 0.0, 0.0, 1.0);
+            }
             gl.clear_depth(1.0);
             gl.clear(Gl::COLOR_BUFFER_BIT | Gl::DEPTH_BUFFER_BIT);
             gl.enable(Gl::DEPTH_TEST);
@@ -715,6 +727,14 @@ impl RendererPort for SplatRenderer {
             );
             gl.uniform1i(self.uniforms.light_count.as_ref(), global_light_count as i32);
             gl.uniform1i(self.uniforms.shadow_taps.as_ref(), self.profile.shadow_taps);
+            gl.uniform1i(self.uniforms.outdoor.as_ref(), if env.outdoor { 1 } else { 0 });
+            gl.uniform3f(
+                self.uniforms.fog_color.as_ref(),
+                env.fog_color[0],
+                env.fog_color[1],
+                env.fog_color[2],
+            );
+            gl.uniform1f(self.uniforms.ambient_scale.as_ref(), env.ambient_scale);
 
             // Flare cores: independent of the merged light slots so a flare
             // culled from the 4 shading lights still shows its ember.
@@ -731,18 +751,22 @@ impl RendererPort for SplatRenderer {
                 gl.uniform4fv_with_f32_array(self.uniforms.cores.as_ref(), &core_vec);
                 gl.uniform3fv_with_f32_array(self.uniforms.core_colors.as_ref(), &core_col);
             }
+            // Always point the shadow sampler at unit 1 — left unset it
+            // defaults to unit 0 and collides with the 3D light volume,
+            // which voids every draw when no fixture lights are resident
+            // (the grassland has none).
+            gl.active_texture(Gl::TEXTURE1);
+            gl.bind_texture(Gl::TEXTURE_2D, Some(&self.shadow_texture));
+            gl.uniform1i(self.uniforms.shadow_map.as_ref(), 1);
+            gl.uniform_matrix4fv_with_f32_array(
+                self.uniforms.light_view_proj.as_ref(),
+                false,
+                &light_view_proj,
+            );
             if global_light_count > 0 {
                 gl.uniform3fv_with_f32_array(self.uniforms.light_positions.as_ref(), &light_positions);
                 gl.uniform3fv_with_f32_array(self.uniforms.light_colors.as_ref(), &light_colors);
                 gl.uniform4fv_with_f32_array(self.uniforms.light_params.as_ref(), &light_params);
-                gl.active_texture(Gl::TEXTURE1);
-                gl.bind_texture(Gl::TEXTURE_2D, Some(&self.shadow_texture));
-                gl.uniform1i(self.uniforms.shadow_map.as_ref(), 1);
-                gl.uniform_matrix4fv_with_f32_array(
-                    self.uniforms.light_view_proj.as_ref(),
-                    false,
-                    &light_view_proj,
-                );
             }
             gl.uniform1i(self.uniforms.shadowed_light_index.as_ref(), shadowed_light_index);
 

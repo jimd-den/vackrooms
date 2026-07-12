@@ -168,6 +168,52 @@ pub struct DynamicLight {
     pub intensity: f32,
 }
 
+/// Per-level atmosphere handed to every renderer with the frame, so a level
+/// switch (noclip) changes the sky/fog/ambient identically in the surface,
+/// splat, raymarch, and CPU paths. `outdoor == false` means "keep your
+/// interior Backrooms look" — the colors below are only consulted outdoors,
+/// which keeps the four hand-tuned indoor palettes byte-identical.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Environment {
+    /// True on open-sky levels (the grassland). Renderers clear to
+    /// `sky_color`, fog toward `fog_color`, and scale ambient response.
+    pub outdoor: bool,
+    /// Clear color behind all geometry.
+    pub sky_color: [f32; 3],
+    /// Distance-fog blend target (slightly hazier than the sky).
+    pub fog_color: [f32; 3],
+    /// Multiplier on the ambient/indirect lighting response (>1 = daylight).
+    pub ambient_scale: f32,
+}
+
+impl Environment {
+    /// Level 0 and every other interior: renderers use their own palettes.
+    pub fn interior() -> Self {
+        Self {
+            outdoor: false,
+            sky_color: [0.0, 0.0, 0.0],
+            fog_color: [0.15, 0.125, 0.055],
+            ambient_scale: 1.0,
+        }
+    }
+
+    /// Level 34 grassland: a bright daylight sky.
+    pub fn daylight() -> Self {
+        Self {
+            outdoor: true,
+            sky_color: [0.53, 0.72, 0.92],
+            fog_color: [0.66, 0.78, 0.92],
+            ambient_scale: 2.2,
+        }
+    }
+}
+
+impl Default for Environment {
+    fn default() -> Self {
+        Self::interior()
+    }
+}
+
 /// Camera state for one frame, in world space.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct FrameParams {
@@ -179,6 +225,8 @@ pub struct FrameParams {
     /// `dynamic_light_count` entries are meaningful.
     pub dynamic_lights: [DynamicLight; MAX_DYNAMIC_LIGHTS],
     pub dynamic_light_count: u8,
+    /// Level atmosphere (sky, fog, ambient scale).
+    pub environment: Environment,
 }
 
 impl FrameParams {
@@ -196,6 +244,7 @@ impl Default for FrameParams {
             flashlight: false,
             dynamic_lights: [DynamicLight::default(); MAX_DYNAMIC_LIGHTS],
             dynamic_light_count: 0,
+            environment: Environment::default(),
         }
     }
 }

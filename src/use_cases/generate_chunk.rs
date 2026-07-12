@@ -1,4 +1,4 @@
-use crate::domain::entities::anomaly::RealitySnapshot;
+use crate::domain::entities::anomaly::{AnomalyKind, RealitySnapshot};
 use crate::domain::entities::grid::Grid;
 use crate::domain::entities::voxel_grid::{
     VOXEL_AIR, VOXEL_CEILING, VOXEL_FLOOR, VOXEL_LIGHT, VOXEL_RED_WALL, VOXEL_WALL, VoxelGrid,
@@ -70,6 +70,12 @@ pub struct AnomalyTuning {
     /// recovery skeleton. Clamped to at most half so following cues stays a
     /// meaningful strategy.
     pub blackout_decoys: f32,
+    /// Debug: force one anomaly of this family onto the macro cell that
+    /// contains the spawn/protected point, bypassing the candidate roll and
+    /// the spawn keep-out. `None` (the default) changes nothing. Because it
+    /// travels inside the generator config it reaches every worker, so the
+    /// forced world stays deterministic across threads.
+    pub forced_kind: Option<AnomalyKind>,
 }
 
 impl Default for AnomalyTuning {
@@ -87,6 +93,7 @@ impl Default for AnomalyTuning {
             red_escape_bias: 0.12,
             archways: 1.0,
             blackout_decoys: 0.25,
+            forced_kind: None,
         }
     }
 }
