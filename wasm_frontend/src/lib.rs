@@ -345,8 +345,9 @@ pub fn get_debug_chunk_json(seed: u32, chunk_x: f32, chunk_z: f32, voxel_scale: 
     use std::fmt::Write;
     use vackrooms::domain::entities::architecture::SpaceProgram;
     use vackrooms::domain::entities::voxel_grid::{
-        VOXEL_CEILING, VOXEL_FLOOR, VOXEL_GRASS, VOXEL_LIGHT, VOXEL_RED_LIGHT, VOXEL_RED_WALL,
-        VOXEL_TREE, VOXEL_WALL, VOXEL_WATER,
+        VOXEL_CEILING, VOXEL_DAMAGED_WALL, VOXEL_DEEP_CARPET, VOXEL_DRY_CARPET, VOXEL_FLOOR,
+        VOXEL_FLUID, VOXEL_GLIMMER, VOXEL_GRASS, VOXEL_LIGHT, VOXEL_PALE_WALL, VOXEL_RED_LIGHT,
+        VOXEL_RED_WALL, VOXEL_STICKY_CARPET, VOXEL_TREE, VOXEL_WALL, VOXEL_WATER,
     };
 
     let noise = vackrooms::frameworks_drivers::simple_noise::SimpleNoiseProvider::new();
@@ -389,8 +390,11 @@ pub fn get_debug_chunk_json(seed: u32, chunk_x: f32, chunk_z: f32, voxel_scale: 
                 material = match grid.get(x + 1, y, z + 1) {
                     VOXEL_RED_LIGHT => b'R',
                     VOXEL_LIGHT => b'L',
+                    VOXEL_GLIMMER => b'g',
                     VOXEL_RED_WALL => b'X',
                     VOXEL_WALL | VOXEL_TREE => b'#',
+                    VOXEL_PALE_WALL => b'P',
+                    VOXEL_DAMAGED_WALL => b'D',
                     VOXEL_CEILING => {
                         if material == b'.' {
                             b'^'
@@ -401,6 +405,27 @@ pub fn get_debug_chunk_json(seed: u32, chunk_x: f32, chunk_z: f32, voxel_scale: 
                     VOXEL_FLOOR | VOXEL_GRASS | VOXEL_WATER => {
                         if material == b'.' {
                             b'_'
+                        } else {
+                            material
+                        }
+                    }
+                    VOXEL_DRY_CARPET => {
+                        if material == b'.' {
+                            b','
+                        } else {
+                            material
+                        }
+                    }
+                    VOXEL_DEEP_CARPET | VOXEL_STICKY_CARPET => {
+                        if material == b'.' {
+                            b'~'
+                        } else {
+                            material
+                        }
+                    }
+                    VOXEL_FLUID => {
+                        if material == b'.' {
+                            b'w'
                         } else {
                             material
                         }
@@ -504,8 +529,45 @@ pub fn get_debug_chunk_json(seed: u32, chunk_x: f32, chunk_z: f32, voxel_scale: 
             vackrooms::domain::entities::anomaly::AnomalyKind::BlackoutExpanse => "BLACKOUT",
             vackrooms::domain::entities::anomaly::AnomalyKind::PitLattice => "PIT LATTICE",
             vackrooms::domain::entities::anomaly::AnomalyKind::RedRoom => "RED LOOP",
+            vackrooms::domain::entities::anomaly::AnomalyKind::ArchwayRoom => "ARCH ANCHOR",
         };
         box_out("anomaly", label, (b.min_x, b.min_z, b.max_x, b.max_z), 1);
+        // Anomaly-aware developer visibility: gates (threshold planes) and
+        // the immutable skeleton lane, keyed by instance id in the label.
+        for gate in anomaly.traversal_gates() {
+            let gb = match gate.axis {
+                vackrooms::domain::entities::anomaly::Axis2::X => {
+                    (gate.plane - 0.1, gate.span_min, gate.plane + 0.1, gate.span_max)
+                }
+                vackrooms::domain::entities::anomaly::Axis2::Z => {
+                    (gate.span_min, gate.plane - 0.1, gate.span_max, gate.plane + 0.1)
+                }
+            };
+            let glabel = format!(
+                "{} {:08X}",
+                match gate.kind {
+                    vackrooms::domain::entities::anomaly::TraversalGateKind::Remap => "GATE",
+                    vackrooms::domain::entities::anomaly::TraversalGateKind::RedThreshold =>
+                        "THRESHOLD",
+                },
+                (gate.instance_id & 0xFFFF_FFFF) as u32
+            );
+            box_out("gate", &glabel, gb, 1);
+        }
+        if anomaly.kind != vackrooms::domain::entities::anomaly::AnomalyKind::RedRoom
+            && anomaly.kind != vackrooms::domain::entities::anomaly::AnomalyKind::ArchwayRoom
+        {
+            let lane_a = anomaly.world_coords(-anomaly.footprint.half_x, 0.0);
+            let lane_b = anomaly.world_coords(anomaly.footprint.half_x, 0.0);
+            let hw = anomaly.skeleton_half_width;
+            let lane = (
+                lane_a.x.min(lane_b.x) - hw,
+                lane_a.z.min(lane_b.z) - hw,
+                lane_a.x.max(lane_b.x) + hw,
+                lane_a.z.max(lane_b.z) + hw,
+            );
+            box_out("skeleton", "PROTECTED ROUTE", lane, 1);
+        }
     }
     out.push_str("],\"fixtures\":[");
     first = true;

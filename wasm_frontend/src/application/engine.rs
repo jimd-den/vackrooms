@@ -12,7 +12,8 @@ use crate::application::atlas::{AtlasPool, MAX_CHUNKS, payload_rows};
 use crate::application::collision::{CollisionWorld, player_aabb};
 use crate::application::player::{MoveIntent, Player};
 use crate::application::ports::{
-    ChunkDraw, ChunkRequest, ChunkSourcePort, FrameParams, RendererPort, SurfaceChunk,
+    ChunkDraw, ChunkRequest, ChunkSourcePort, DynamicLight, FrameParams, MAX_DYNAMIC_LIGHTS,
+    RendererPort, SurfaceChunk,
 };
 use crate::application::streaming::{
     ChunkKey, ChunkStore, LoadedChunk, StreamingPolicy, chunk_key,
@@ -70,6 +71,8 @@ pub struct InputFrame {
     /// Whether pointer lock is engaged; movement is frozen otherwise.
     pub locked: bool,
     pub flashlight: bool,
+    /// Edge-triggered flare drop for this frame (G key / touch button).
+    pub drop_flare: bool,
 }
 
 /// Snapshot for the HUD presenter.
@@ -83,6 +86,9 @@ pub struct HudStats {
     pub resolution_scale: f32,
     /// True once the spawn chunk is resident (drives the loading overlay).
     pub ready: bool,
+    /// Session pedometer: resolved horizontal movement in world units
+    /// (= meters), collision already applied, relocations excluded.
+    pub distance_m: f32,
 }
 
 /// Adaptive internal-resolution governor. Low-spec machines get fewer rays
@@ -174,6 +180,34 @@ const NOCLIP_CHANCE: f32 = 0.2;
 /// One coarse wall voxel around a red-room footprint joins the same rebuild.
 const PLAN_TRANSITION_MARGIN: f32 = 0.4;
 
+/// Flare lifetime in seconds (fade begins in the final tenth).
+const FLARE_LIFETIME_S: f32 = 90.0;
+/// Global active-flare cap; dropping past it silently retires the oldest.
+const FLARE_CAP: usize = 12;
+/// Flares farther than this from the camera contribute no dynamic light.
+const FLARE_CULL_DISTANCE: f32 = 40.0;
+/// Local warm glow radius of one flare.
+const FLARE_LIGHT_RADIUS: f32 = 9.0;
+/// Flare flame height above the floor slab.
+const FLARE_HEIGHT: f32 = 0.3;
+
+/// One dropped flare: pure runtime world-space state. Never serialized into
+/// chunks, never part of the reality snapshot, and preserved untouched by
+/// ordinary chunk streaming.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Flare {
+    pub position: [f32; 3],
+    pub age_seconds: f32,
+    /// Monotonic drop order; doubles as the deterministic flicker phase.
+    pub sequence: u64,
+}
+
+impl Flare {
+    pub fn remaining_seconds(&self) -> f32 {
+        (FLARE_LIFETIME_S - self.age_seconds).max(0.0)
+    }
+}
+
 pub struct Engine {
     config: EngineConfig,
     player: Player,
@@ -213,6 +247,14 @@ pub struct Engine {
     noclip_cooldown: f32,
     /// xorshift state for the noclip dice.
     rng: u64,
+    /// Active dropped flares, oldest first.
+    flares: Vec<Flare>,
+    /// Monotonic flare drop counter.
+    flare_sequence: u64,
+    /// Session pedometer: resolved horizontal movement (world units).
+    distance_m: f64,
+    /// Engine-time seconds, used only for flare flicker phase.
+    time_seconds: f64,
 }
 
 impl Engine {
@@ -256,6 +298,10 @@ impl Engine {
             push_seconds: 0.0,
             noclip_cooldown: 0.0,
             rng: (config.seed as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1,
+            flares: Vec::new(),
+            flare_sequence: 0,
+            distance_m: 0.0,
+            time_seconds: 0.0,
             config,
         }
     }
@@ -313,6 +359,8 @@ impl Engine {
         self.world.rebuild([].iter());
         self.draws.clear();
         self.push_seconds = 0.0;
+        // Flares are world objects of the level they were lit in.
+        self.flares.clear();
         // Into the grassland you phase in place; the way back drops you at
         // the spawn clearing so you can't rematerialize inside a wall.
         if self.level == LEVEL_BACKROOMS {
@@ -338,12 +386,28 @@ impl Engine {
         // Clamp dt so a background-tab hitch can't teleport the player.
         let dt = dt_seconds.clamp(0.0, 0.1);
         self.governor.update(dt_seconds * 1000.0);
+        self.time_seconds += dt as f64;
 
         let old_pos = self.player.position;
         if input.locked {
             self.player.apply_look(input.look_dx, input.look_dy);
             self.player.step(dt, &input.intent, &self.world);
+
+            // Pedometer: measured here — immediately after the one
+            // collision-resolved integration step — so relocations that
+            // happen later in the tick (pit recovery, noclip, red-loop
+            // handling) and out-of-band teleports can never inflate it.
+            // Look input contributes nothing: only position deltas count.
+            let dx = self.player.position[0] - old_pos[0];
+            let dz = self.player.position[2] - old_pos[2];
+            let step = (dx * dx + dz * dz).sqrt();
+            // Anything faster than sprint speed in one frame is a
+            // discontinuity, not walking.
+            if step < 1.0 {
+                self.distance_m += step as f64;
+            }
         }
+        self.update_flares(dt, input);
         self.update_anomalies(old_pos);
         self.update_noclip(dt, input, old_pos);
 
@@ -369,8 +433,124 @@ impl Engine {
             yaw: self.player.yaw,
             pitch: self.player.pitch,
             flashlight: input.flashlight,
+            dynamic_lights: self.flare_lights(),
+            dynamic_light_count: self.flare_light_count(),
         };
         self.renderer.draw(&frame, &self.draws);
+    }
+
+    /// Ages, caps, and drops flares. Placement prefers a spot slightly ahead
+    /// of the player's feet but never inside solid geometry; the fallback is
+    /// the player's own (guaranteed valid) position.
+    fn update_flares(&mut self, dt: f32, input: &InputFrame) {
+        for flare in &mut self.flares {
+            flare.age_seconds += dt;
+        }
+        self.flares
+            .retain(|flare| flare.age_seconds < FLARE_LIFETIME_S);
+
+        if !(input.drop_flare && input.locked) {
+            return;
+        }
+        let fwd = self.player.forward();
+        let eye = self.player.position;
+        let ahead = [eye[0] + fwd[0] * 0.9, eye[1], eye[2] + fwd[2] * 0.9];
+        let spot = if self.world.collides(ahead) { eye } else { ahead };
+        if self.flares.len() >= FLARE_CAP {
+            // Oldest first by construction; no count UI, no modal — the
+            // oldest flare simply retires.
+            self.flares.remove(0);
+        }
+        self.flare_sequence += 1;
+        self.flares.push(Flare {
+            position: [spot[0], FLARE_HEIGHT, spot[2]],
+            age_seconds: 0.0,
+            sequence: self.flare_sequence,
+        });
+    }
+
+    /// A regenerated chunk may lawfully differ (wake remaps beyond the
+    /// eviction ring). A flare standing where new geometry now stands would
+    /// desynchronize render and collision, so the deterministic policy is:
+    /// remaps never move a flare through a wall — a buried flare is
+    /// extinguished the moment the world around it becomes solid.
+    fn extinguish_buried_flares(&mut self) {
+        if self.flares.is_empty() {
+            return;
+        }
+        let world = &self.world;
+        self.flares.retain(|flare| {
+            let probe = [flare.position[0], flare.position[1] + 0.2, flare.position[2]];
+            !world
+                .boxes()
+                .iter()
+                .any(|b| Self::point_in_aabb(probe, b))
+        });
+    }
+
+    fn point_in_aabb(p: [f32; 3], b: &crate::application::collision::Aabb) -> bool {
+        p[0] >= b.min[0]
+            && p[0] <= b.max[0]
+            && p[1] >= b.min[1]
+            && p[1] <= b.max[1]
+            && p[2] >= b.min[2]
+            && p[2] <= b.max[2]
+    }
+
+    /// The nearest active flares as per-frame dynamic lights, distance
+    /// culled, with CPU-side flicker and end-of-life fade baked into the
+    /// intensity so renderers stay clockless.
+    fn flare_lights(&self) -> [DynamicLight; MAX_DYNAMIC_LIGHTS] {
+        let mut out = [DynamicLight::default(); MAX_DYNAMIC_LIGHTS];
+        for (slot, flare) in self.nearest_flares().into_iter().enumerate() {
+            let fade = (flare.remaining_seconds() / (FLARE_LIFETIME_S * 0.1)).clamp(0.0, 1.0);
+            let phase = self.time_seconds as f32 * 13.0 + flare.sequence as f32 * 1.7;
+            let flicker = 0.85 + 0.15 * phase.sin() * (phase * 0.37).cos();
+            out[slot] = DynamicLight {
+                position: flare.position,
+                color: [1.0, 0.45, 0.18],
+                radius: FLARE_LIGHT_RADIUS,
+                intensity: 1.6 * fade * flicker,
+            };
+        }
+        out
+    }
+
+    fn flare_light_count(&self) -> u8 {
+        self.nearest_flares().len() as u8
+    }
+
+    fn nearest_flares(&self) -> Vec<&Flare> {
+        let cam = self.player.position;
+        let mut near: Vec<&Flare> = self
+            .flares
+            .iter()
+            .filter(|f| {
+                let dx = f.position[0] - cam[0];
+                let dz = f.position[2] - cam[2];
+                dx * dx + dz * dz < FLARE_CULL_DISTANCE * FLARE_CULL_DISTANCE
+            })
+            .collect();
+        near.sort_by(|a, b| {
+            let d2 = |f: &Flare| {
+                let dx = f.position[0] - cam[0];
+                let dz = f.position[2] - cam[2];
+                dx * dx + dz * dz
+            };
+            d2(a).total_cmp(&d2(b))
+        });
+        near.truncate(MAX_DYNAMIC_LIGHTS);
+        near
+    }
+
+    /// Active flares (world-space runtime state), oldest first.
+    pub fn flares(&self) -> &[Flare] {
+        &self.flares
+    }
+
+    /// Session pedometer reading in meters.
+    pub fn distance_m(&self) -> f32 {
+        self.distance_m as f32
     }
 
     /// Squared distance from the player to the nearest point of a chunk's
@@ -793,6 +973,7 @@ impl Engine {
                 .sum();
             let boxes: Vec<_> = self.store.all_collision_boxes().copied().collect();
             self.world.rebuild(boxes.iter());
+            self.extinguish_buried_flares();
             return;
         }
 
@@ -860,6 +1041,7 @@ impl Engine {
 
         let boxes: Vec<_> = self.store.all_collision_boxes().copied().collect();
         self.world.rebuild(boxes.iter());
+        self.extinguish_buried_flares();
     }
 
     pub fn player(&self) -> &Player {
@@ -896,6 +1078,7 @@ impl Engine {
             collision_boxes: self.world.len(),
             resolution_scale: self.governor.scale(),
             ready: self.store.contains(spawn_key),
+            distance_m: self.distance_m as f32,
         }
     }
 }

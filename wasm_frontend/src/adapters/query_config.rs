@@ -70,7 +70,14 @@ pub fn parse_generation_params(query: &str, default_seed: u32) -> GenerationPara
             "remap_intensity" => knob(&mut params.anomalies.remap_intensity),
             "remap_distance" => ranged(&mut params.anomalies.remap_distance, 4.0, 64.0),
             "anomaly_safe_radius" => ranged(&mut params.anomalies.safe_radius, 4.0, 32.0),
+            // Gameplay tuning: the probability per closed-loop epoch that a
+            // red room hashes a single far-side escape breach. 0 seals every
+            // loop, 1 guarantees a breach; it is never the entrance.
             "red_escape_bias" => ranged(&mut params.anomalies.red_escape_bias, 0.0, 1.0),
+            "archways" => knob(&mut params.anomalies.archways),
+            // Bounded deception: the fraction of blackout glimmers placed one
+            // segment off the recovery skeleton (never more than half).
+            "blackout_decoys" => ranged(&mut params.anomalies.blackout_decoys, 0.0, 0.5),
             _ => {}
         }
     }

@@ -33,6 +33,74 @@ pub const VOXEL_WATER: u8 = 7;
 /// Tree trunk (grassland). Solid: blocks the player like WALL.
 pub const VOXEL_TREE: u8 = 8;
 pub const VOXEL_RED_LIGHT: u8 = 9;
+/// Pale bone-tinted arch-room wall. Solid like WALL.
+pub const VOXEL_PALE_WALL: u8 = 10;
+/// Rough, damaged blackout-expanse wall. Solid like WALL.
+pub const VOXEL_DAMAGED_WALL: u8 = 11;
+/// Shallow, dry, desaturated pillar-expanse carpet. Walkable, like FLOOR.
+pub const VOXEL_DRY_CARPET: u8 = 12;
+/// Deep, wet arch-room carpet. Walkable, like FLOOR.
+pub const VOXEL_DEEP_CARPET: u8 = 13;
+/// Thick, sticky, discolored red-room carpet. Walkable, like FLOOR.
+pub const VOXEL_STICKY_CARPET: u8 = 14;
+/// Recessed basin holding dark ankle-deep fluid. Walkable, like FLOOR.
+pub const VOXEL_FLUID: u8 = 15;
+/// Tiny cool emergency glimmer fixture (blackout recovery skeleton).
+/// Emissive like LIGHT, far dimmer and colder.
+pub const VOXEL_GLIMMER: u8 = 16;
+
+/// Number of voxel material ids (the palette table length).
+pub const VOXEL_MATERIAL_COUNT: usize = 17;
+
+/// The one authoritative material palette, `0xRRGGBB` per voxel id. Every
+/// consumer — octree bake, greedy-mesh debug colors, CPU splatter, and the
+/// generated GLSL tables — derives from this table so a new material can
+/// never render differently across paths.
+pub const MATERIAL_COLORS: [u32; VOXEL_MATERIAL_COUNT] = [
+    0x000000, // 0 air (never drawn)
+    0xDDCC66, // 1 yellow wallpaper wall
+    0x998811, // 2 office carpet floor
+    0xCCCCCC, // 3 dropped ceiling
+    0xFFF8D6, // 4 fluorescent panel
+    0x880000, // 5 crimson / peeled red wall
+    0x4F9A3D, // 6 grass
+    0x3A6FB8, // 7 water
+    0x6B4A2F, // 8 tree / dark pillar
+    0xFF4433, // 9 red light
+    0xD8D2C0, // 10 pale arch wall
+    0x8A7F5C, // 11 rough damaged wall
+    0xC2B76B, // 12 dry shallow carpet
+    0x6B5E22, // 13 deep wet carpet
+    0x7A4A26, // 14 sticky red-room carpet
+    0x2E2A22, // 15 dark pooled fluid
+    0x9FC4E8, // 16 cool emergency glimmer
+];
+
+/// Palette lookup as normalized linear-ish RGB for shader tables.
+pub fn material_color_f32(voxel: u8) -> [f32; 3] {
+    let c = MATERIAL_COLORS
+        .get(voxel as usize)
+        .copied()
+        .unwrap_or(0x000000);
+    [
+        ((c >> 16) & 0xFF) as f32 / 255.0,
+        ((c >> 8) & 0xFF) as f32 / 255.0,
+        (c & 0xFF) as f32 / 255.0,
+    ]
+}
+
+/// Materials that block the player and produce collision boxes. Everything
+/// else is walkable or decorative.
+pub const SOLID_MATERIALS: [u8; 5] = [
+    VOXEL_WALL,
+    VOXEL_TREE,
+    VOXEL_RED_WALL,
+    VOXEL_PALE_WALL,
+    VOXEL_DAMAGED_WALL,
+];
+
+/// Materials that emit light in the baked flood fill and render emissive.
+pub const EMISSIVE_MATERIALS: [u8; 3] = [VOXEL_LIGHT, VOXEL_RED_LIGHT, VOXEL_GLIMMER];
 
 impl VoxelGrid {
     pub fn new(width: usize, height: usize, depth: usize) -> Self {

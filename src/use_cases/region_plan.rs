@@ -818,6 +818,7 @@ pub fn debug_region_ascii(plan: &RegionPlan, step: f32) -> String {
                         AnomalyKind::BlackoutExpanse => 'B',
                         AnomalyKind::PitLattice => 'H',
                         AnomalyKind::RedRoom => 'R',
+                        AnomalyKind::ArchwayRoom => 'M',
                     };
                 }
             }

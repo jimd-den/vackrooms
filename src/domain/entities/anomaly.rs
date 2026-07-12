@@ -18,6 +18,9 @@ pub enum AnomalyKind {
     BlackoutExpanse = 1,
     PitLattice = 2,
     RedRoom = 3,
+    /// Stable pale arch-room anchor. Never carries gates, epochs, or wake
+    /// mutation: the fixed landmark the mutable world is measured against.
+    ArchwayRoom = 4,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -201,6 +204,30 @@ impl PillarLattice {
     }
 }
 
+/// The two authored arch-room layouts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum ArchLayout {
+    /// Circulation-to-anomaly airlock: arch rhythm on both long walls.
+    Transition = 0,
+    /// Dead-end composition: one entrance arch, an alcove band at the far
+    /// end, blind arcade rhythm along the long walls.
+    DeadEnd = 1,
+}
+
+/// Arch-room composition parameters, all snapped to the 0.4u plan lattice.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ArchProfile {
+    pub layout: ArchLayout,
+    /// Center-to-center rhythm of arch openings along the long (local X) walls.
+    pub bay: f32,
+    /// Clear width of one arch opening.
+    pub opening: f32,
+    /// Every `blind_every`-th arch is blind (a shelter niche reads as a
+    /// skipped opening in the same rhythm).
+    pub blind_every: u8,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PitLattice {
     pub spacing_x: f32,
@@ -367,6 +394,7 @@ pub struct AnomalyInstance {
     pub macro_anchor: (i64, i64),
     pub pillar_lattice: Option<PillarLattice>,
     pub pit_lattice: Option<PitLattice>,
+    pub arch: Option<ArchProfile>,
     pub gates: Vec<TraversalGate>,
     /// Epoch-invariant internal route half-width.
     pub skeleton_half_width: f32,
@@ -658,6 +686,7 @@ fn decode_kind(v: u32) -> Option<AnomalyKind> {
         1 => Some(AnomalyKind::BlackoutExpanse),
         2 => Some(AnomalyKind::PitLattice),
         3 => Some(AnomalyKind::RedRoom),
+        4 => Some(AnomalyKind::ArchwayRoom),
         _ => None,
     }
 }

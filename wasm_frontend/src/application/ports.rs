@@ -153,6 +153,21 @@ pub struct ChunkDraw {
     pub world_size: f32,
 }
 
+/// Upper bound on per-frame dynamic lights handed to renderers (flares).
+pub const MAX_DYNAMIC_LIGHTS: usize = 4;
+
+/// A short-lived runtime light (dropped flare). World-space state owned by
+/// the engine — never part of chunk payloads, baked light volumes, or the
+/// reality snapshot. Renderers treat it as one more point light; intensity
+/// already includes CPU-side flicker and fade so no shader needs a clock.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct DynamicLight {
+    pub position: [f32; 3],
+    pub color: [f32; 3],
+    pub radius: f32,
+    pub intensity: f32,
+}
+
 /// Camera state for one frame, in world space.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct FrameParams {
@@ -160,6 +175,29 @@ pub struct FrameParams {
     pub yaw: f32,
     pub pitch: f32,
     pub flashlight: bool,
+    /// Nearest active flares, distance-culled; only the first
+    /// `dynamic_light_count` entries are meaningful.
+    pub dynamic_lights: [DynamicLight; MAX_DYNAMIC_LIGHTS],
+    pub dynamic_light_count: u8,
+}
+
+impl FrameParams {
+    pub fn active_dynamic_lights(&self) -> &[DynamicLight] {
+        &self.dynamic_lights[..self.dynamic_light_count as usize]
+    }
+}
+
+impl Default for FrameParams {
+    fn default() -> Self {
+        Self {
+            camera_pos: [0.0; 3],
+            yaw: 0.0,
+            pitch: 0.0,
+            flashlight: false,
+            dynamic_lights: [DynamicLight::default(); MAX_DYNAMIC_LIGHTS],
+            dynamic_light_count: 0,
+        }
+    }
 }
 
 /// Abstraction over the actual rasterizer back end.

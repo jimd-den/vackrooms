@@ -1,8 +1,5 @@
 use crate::domain::entities::sparse_voxel_octree::{SparseVoxelOctree, SvoNode};
-use crate::domain::entities::voxel_grid::{
-    VOXEL_AIR, VOXEL_CEILING, VOXEL_FLOOR, VOXEL_GRASS, VOXEL_LIGHT, VOXEL_RED_LIGHT,
-    VOXEL_RED_WALL, VOXEL_TREE, VOXEL_WALL, VOXEL_WATER, VoxelGrid,
-};
+use crate::domain::entities::voxel_grid::{MATERIAL_COLORS, VOXEL_AIR, VoxelGrid};
 
 /// Use Case to convert a dense VoxelGrid into a collapsed Sparse Voxel Octree.
 pub struct BuildOctreeUseCase;
@@ -148,18 +145,10 @@ impl BuildOctreeUseCase {
 
         let ll = grid.get_light_rgb(x as usize, y as usize, z as usize);
         let fo = grid.get_face_occlusion(x as usize, y as usize, z as usize);
-        let base_color = match v_id {
-            VOXEL_WALL => 0xddcc66,
-            VOXEL_FLOOR => 0x998811,
-            VOXEL_CEILING => 0xcccccc,
-            VOXEL_LIGHT => 0xffffff,
-            VOXEL_RED_LIGHT => 0xff4444,
-            VOXEL_RED_WALL => 0x880000,
-            VOXEL_GRASS => 0x4f9a3d,
-            VOXEL_WATER => 0x3a6fb8,
-            VOXEL_TREE => 0x6b4a2f,
-            _ => 0x000000,
-        };
+        let base_color = MATERIAL_COLORS
+            .get(v_id as usize)
+            .copied()
+            .unwrap_or(0x000000);
 
         (v_id, base_color, ll, fo)
     }
@@ -168,6 +157,7 @@ impl BuildOctreeUseCase {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::entities::voxel_grid::VOXEL_WALL;
 
     #[test]
     fn test_empty_grid_collapses_to_single_root_leaf() {

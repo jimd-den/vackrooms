@@ -22,14 +22,11 @@ use crate::adapters::surface_mesh::build_surface_mesh;
 use crate::application::collision::Aabb;
 use crate::application::ports::{ChunkPayload, ChunkSourcePort};
 
-/// Voxel types that block the player. FLOOR/CEILING/LIGHT/GRASS/WATER are
-/// visual-only: including them would make the player collide with the floor
-/// they stand on.
-const SOLID_TYPES: [u8; 3] = [
-    vackrooms::domain::entities::voxel_grid::VOXEL_WALL,
-    vackrooms::domain::entities::voxel_grid::VOXEL_RED_WALL,
-    vackrooms::domain::entities::voxel_grid::VOXEL_TREE,
-];
+/// Voxel types that block the player. FLOOR/CEILING/LIGHT/GRASS/WATER and
+/// the carpet/fluid classes are visual-only: including them would make the
+/// player collide with the floor they stand on. Shared with the core so a
+/// new wall class can never render solid but collide hollow.
+const SOLID_TYPES: [u8; 5] = vackrooms::domain::entities::voxel_grid::SOLID_MATERIALS;
 
 pub struct LocalChunkSource<N: NoiseProvider> {
     noise: N,

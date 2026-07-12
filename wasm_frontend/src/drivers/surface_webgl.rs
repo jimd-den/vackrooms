@@ -34,6 +34,9 @@ struct Uniforms {
     light_positions: Option<WebGlUniformLocation>,
     light_colors: Option<WebGlUniformLocation>,
     light_params: Option<WebGlUniformLocation>,
+    core_count: Option<WebGlUniformLocation>,
+    cores: Option<WebGlUniformLocation>,
+    core_colors: Option<WebGlUniformLocation>,
     shadow_map: Option<WebGlUniformLocation>,
     light_view_proj: Option<WebGlUniformLocation>,
     shadowed_light_index: Option<WebGlUniformLocation>,
@@ -103,6 +106,9 @@ impl SurfaceRenderer {
             light_positions: gl.get_uniform_location(&program, "uLightPositions"),
             light_colors: gl.get_uniform_location(&program, "uLightColors"),
             light_params: gl.get_uniform_location(&program, "uLightParams"),
+            core_count: gl.get_uniform_location(&program, "uCoreCount"),
+            cores: gl.get_uniform_location(&program, "uCores"),
+            core_colors: gl.get_uniform_location(&program, "uCoreColors"),
             shadow_map: gl.get_uniform_location(&program, "uShadowMap"),
             light_view_proj: gl.get_uniform_location(&program, "uLightViewProjection"),
             shadowed_light_index: gl.get_uniform_location(&program, "uShadowedLightIndex"),
@@ -418,10 +424,34 @@ impl RendererPort for SurfaceRenderer {
                 }
             }
 
+            // 2b. Per-frame dynamic lights (flares). They shade like fixture
+            // lights but are excluded from hero-shadow selection: a light at
+            // ankle height would degenerate the top-down shadow projection.
+            let dynamic_sources: Vec<crate::application::ports::LightSource> = frame
+                .active_dynamic_lights()
+                .iter()
+                .enumerate()
+                .map(|(i, d)| crate::application::ports::LightSource {
+                    id: u64::MAX - i as u64,
+                    position: d.position,
+                    half_size: [0.25, 0.25],
+                    color: d.color,
+                    radius: d.radius,
+                    intensity: d.intensity,
+                    flicker_mode: 0,
+                    enabled: true,
+                })
+                .collect();
+            let is_dynamic = |light: &crate::application::ports::LightSource| {
+                light.id > u64::MAX - 16
+            };
+
             // 3. Sort lights by importance near the player (radius / (distance^2 + 0.1))
             let mut lights_with_importance: Vec<(&crate::application::ports::LightSource, f32)> = unique_lights
                 .values()
-                .map(|&light| {
+                .copied()
+                .chain(dynamic_sources.iter())
+                .map(|light| {
                     let dx = light.position[0] - frame.camera_pos[0];
                     let dy = light.position[1] - frame.camera_pos[1];
                     let dz = light.position[2] - frame.camera_pos[2];
@@ -455,10 +485,13 @@ impl RendererPort for SurfaceRenderer {
             let mut shadowed_light_index = -1;
             let mut light_view_proj = [0.0; 16];
 
-            if global_light_count > 0 {
-                // The top light is the hero light
-                shadowed_light_index = 0;
-                let hero_light = lights_with_importance[0].0;
+            let hero_slot = lights_with_importance[..global_light_count]
+                .iter()
+                .position(|(light, _)| !is_dynamic(light));
+            if let Some(hero_slot) = hero_slot {
+                // The top non-dynamic light is the hero light.
+                shadowed_light_index = hero_slot as i32;
+                let hero_light = lights_with_importance[hero_slot].0;
                 let lx = hero_light.position[0];
                 let ly = hero_light.position[1];
                 let lz = hero_light.position[2];
@@ -511,6 +544,22 @@ impl RendererPort for SurfaceRenderer {
 
             // Upload global lights (done once per frame)
             gl.uniform1i(self.uniforms.light_count.as_ref(), global_light_count as i32);
+
+            // Flare cores: independent of the merged light slots so a flare
+            // culled from the 4 shading lights still shows its ember.
+            {
+                let cores = frame.active_dynamic_lights();
+                let mut core_vec = [0.0f32; 16];
+                let mut core_col = [0.0f32; 12];
+                for (i, c) in cores.iter().enumerate() {
+                    core_vec[i * 4..i * 4 + 3].copy_from_slice(&c.position);
+                    core_vec[i * 4 + 3] = c.intensity;
+                    core_col[i * 3..i * 3 + 3].copy_from_slice(&c.color);
+                }
+                gl.uniform1i(self.uniforms.core_count.as_ref(), cores.len() as i32);
+                gl.uniform4fv_with_f32_array(self.uniforms.cores.as_ref(), &core_vec);
+                gl.uniform3fv_with_f32_array(self.uniforms.core_colors.as_ref(), &core_col);
+            }
             if global_light_count > 0 {
                 gl.uniform3fv_with_f32_array(self.uniforms.light_positions.as_ref(), &global_light_positions);
                 gl.uniform3fv_with_f32_array(self.uniforms.light_colors.as_ref(), &global_light_colors);

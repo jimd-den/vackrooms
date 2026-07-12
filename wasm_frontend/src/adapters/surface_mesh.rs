@@ -4,8 +4,9 @@
 
 use vackrooms::adapters::voxel_mapper::{FaceDirection, MergedQuad, VoxelMapper, VoxelType};
 use vackrooms::domain::entities::voxel_grid::{
-    VOXEL_CEILING, VOXEL_FLOOR, VOXEL_GRASS, VOXEL_LIGHT, VOXEL_RED_LIGHT, VOXEL_RED_WALL,
-    VOXEL_TREE, VOXEL_WALL, VOXEL_WATER, VoxelGrid,
+    VOXEL_CEILING, VOXEL_DAMAGED_WALL, VOXEL_DEEP_CARPET, VOXEL_DRY_CARPET, VOXEL_FLOOR,
+    VOXEL_FLUID, VOXEL_GLIMMER, VOXEL_GRASS, VOXEL_LIGHT, VOXEL_PALE_WALL, VOXEL_RED_LIGHT,
+    VOXEL_RED_WALL, VOXEL_STICKY_CARPET, VOXEL_TREE, VOXEL_WALL, VOXEL_WATER, VoxelGrid,
 };
 
 use crate::application::collision::Aabb;
@@ -171,6 +172,13 @@ pub(crate) fn material_id(v_type: VoxelType) -> u8 {
         VoxelType::Water => VOXEL_WATER,
         VoxelType::Tree => VOXEL_TREE,
         VoxelType::RedLight => VOXEL_RED_LIGHT,
+        VoxelType::PaleWall => VOXEL_PALE_WALL,
+        VoxelType::DamagedWall => VOXEL_DAMAGED_WALL,
+        VoxelType::DryCarpet => VOXEL_DRY_CARPET,
+        VoxelType::DeepCarpet => VOXEL_DEEP_CARPET,
+        VoxelType::StickyCarpet => VOXEL_STICKY_CARPET,
+        VoxelType::Fluid => VOXEL_FLUID,
+        VoxelType::Glimmer => VOXEL_GLIMMER,
     }
 }
 

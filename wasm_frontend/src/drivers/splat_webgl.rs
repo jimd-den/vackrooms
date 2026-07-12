@@ -80,6 +80,9 @@ struct Uniforms {
     light_volume: Option<WebGlUniformLocation>,
     light_count: Option<WebGlUniformLocation>,
     light_positions: Option<WebGlUniformLocation>,
+    core_count: Option<WebGlUniformLocation>,
+    cores: Option<WebGlUniformLocation>,
+    core_colors: Option<WebGlUniformLocation>,
     light_colors: Option<WebGlUniformLocation>,
     light_params: Option<WebGlUniformLocation>,
     shadow_map: Option<WebGlUniformLocation>,
@@ -176,6 +179,9 @@ impl SplatRenderer {
             light_positions: gl.get_uniform_location(&program, "uLightPositions"),
             light_colors: gl.get_uniform_location(&program, "uLightColors"),
             light_params: gl.get_uniform_location(&program, "uLightParams"),
+            core_count: gl.get_uniform_location(&program, "uCoreCount"),
+            cores: gl.get_uniform_location(&program, "uCores"),
+            core_colors: gl.get_uniform_location(&program, "uCoreColors"),
             shadow_map: gl.get_uniform_location(&program, "uShadowMap"),
             light_view_proj: gl.get_uniform_location(&program, "uLightViewProjection"),
             shadowed_light_index: gl.get_uniform_location(&program, "uShadowedLightIndex"),
@@ -592,9 +598,30 @@ impl RendererPort for SplatRenderer {
                     }
                 }
             }
+            // Per-frame dynamic lights (flares) join the same selection but
+            // never own the hero shadow: an ankle-height projector collapses
+            // the top-down shadow frustum.
+            let dynamic_sources: Vec<LightSource> = frame
+                .active_dynamic_lights()
+                .iter()
+                .enumerate()
+                .map(|(i, d)| LightSource {
+                    id: u64::MAX - i as u64,
+                    position: d.position,
+                    half_size: [0.25, 0.25],
+                    color: d.color,
+                    radius: d.radius,
+                    intensity: d.intensity,
+                    flicker_mode: 0,
+                    enabled: true,
+                })
+                .collect();
+            let is_dynamic = |light: &LightSource| light.id > u64::MAX - 16;
             let mut lights_with_importance: Vec<(&LightSource, f32)> = unique_lights
                 .values()
-                .map(|&light| {
+                .copied()
+                .chain(dynamic_sources.iter())
+                .map(|light| {
                     let dx = light.position[0] - frame.camera_pos[0];
                     let dy = light.position[1] - frame.camera_pos[1];
                     let dz = light.position[2] - frame.camera_pos[2];
@@ -623,9 +650,12 @@ impl RendererPort for SplatRenderer {
             // from the same grids, so caster and receiver always agree.
             let mut shadowed_light_index = -1;
             let mut light_view_proj = [0.0f32; 16];
-            if global_light_count > 0 {
-                shadowed_light_index = 0;
-                let hero = lights_with_importance[0].0;
+            let hero_slot = lights_with_importance[..global_light_count]
+                .iter()
+                .position(|(light, _)| !is_dynamic(light));
+            if let Some(hero_slot) = hero_slot {
+                shadowed_light_index = hero_slot as i32;
+                let hero = lights_with_importance[hero_slot].0;
                 let range = hero.radius;
                 // Keep the hero map focused enough for columns and partitions
                 // to cast readable shadows at 128px on the Pi profile.
@@ -685,6 +715,22 @@ impl RendererPort for SplatRenderer {
             );
             gl.uniform1i(self.uniforms.light_count.as_ref(), global_light_count as i32);
             gl.uniform1i(self.uniforms.shadow_taps.as_ref(), self.profile.shadow_taps);
+
+            // Flare cores: independent of the merged light slots so a flare
+            // culled from the 4 shading lights still shows its ember.
+            {
+                let cores = frame.active_dynamic_lights();
+                let mut core_vec = [0.0f32; 16];
+                let mut core_col = [0.0f32; 12];
+                for (i, c) in cores.iter().enumerate() {
+                    core_vec[i * 4..i * 4 + 3].copy_from_slice(&c.position);
+                    core_vec[i * 4 + 3] = c.intensity;
+                    core_col[i * 3..i * 3 + 3].copy_from_slice(&c.color);
+                }
+                gl.uniform1i(self.uniforms.core_count.as_ref(), cores.len() as i32);
+                gl.uniform4fv_with_f32_array(self.uniforms.cores.as_ref(), &core_vec);
+                gl.uniform3fv_with_f32_array(self.uniforms.core_colors.as_ref(), &core_col);
+            }
             if global_light_count > 0 {
                 gl.uniform3fv_with_f32_array(self.uniforms.light_positions.as_ref(), &light_positions);
                 gl.uniform3fv_with_f32_array(self.uniforms.light_colors.as_ref(), &light_colors);

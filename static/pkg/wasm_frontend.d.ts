@@ -82,7 +82,7 @@ export function set_render_scale(scale: number): void;
  */
 export function start(): void;
 
-export function worker_generate(origin_x: number, origin_z: number, level: number, lod: number): Uint8Array;
+export function worker_generate(_request_id: number, origin_x: number, origin_z: number, level: number, lod: number, reality_words: Uint32Array): Uint8Array;
 
 /**
  * `default_seed` must match the main thread's `WORLD_SEED`.
@@ -108,9 +108,9 @@ export interface InitOutput {
     readonly set_mouse_sensitivity: (a: number) => void;
     readonly set_render_scale: (a: number) => void;
     readonly set_cpu_shadows: (a: number) => void;
-    readonly start: () => void;
-    readonly worker_generate: (a: number, b: number, c: number, d: number) => [number, number];
+    readonly worker_generate: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number];
     readonly worker_init: (a: number, b: number, c: number) => void;
+    readonly start: () => void;
     readonly set_face_weights: (a: number, b: number, c: number, d: number) => void;
     readonly set_fov: (a: number) => void;
     readonly wasm_bindgen__convert__closures_____invoke__h4a98415c8f04dfea: (a: number, b: number, c: number) => void;

@@ -59,8 +59,17 @@ pub struct AnomalyTuning {
     pub remap_distance: f32,
     /// Radius around the player protected from any resident transition.
     pub safe_radius: f32,
-    /// Chance that a closed red-room loop exposes its authored escape branch.
+    /// Chance that a closed red-room loop exposes its authored escape branch
+    /// this epoch. The escape is deterministic per (instance, epoch), opens
+    /// only after full entry, and never restores the remembered entrance:
+    /// 0 seals every loop, 1 guarantees a breach each epoch. Default 0.12.
     pub red_escape_bias: f32,
+    /// Stable archway anchor-room frequency multiplier.
+    pub archways: f32,
+    /// Fraction of blackout glimmers that are decoys one segment off the
+    /// recovery skeleton. Clamped to at most half so following cues stays a
+    /// meaningful strategy.
+    pub blackout_decoys: f32,
 }
 
 impl Default for AnomalyTuning {
@@ -76,6 +85,8 @@ impl Default for AnomalyTuning {
             remap_distance: 12.0,
             safe_radius: 8.0,
             red_escape_bias: 0.12,
+            archways: 1.0,
+            blackout_decoys: 0.25,
         }
     }
 }

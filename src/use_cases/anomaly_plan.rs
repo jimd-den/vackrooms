@@ -146,6 +146,14 @@ fn macro_instance(
             6.0,
             1.8,
         ),
+        // Compact 8-14u stable rooms; entry band/skeleton are meaningless
+        // for an anchor that never remaps.
+        AnomalyKind::ArchwayRoom => (
+            snap(4.0 + 3.0 * unit(h(0xD7))),
+            snap(5.0 + 3.0 * unit(h(0xD8))),
+            0.0,
+            0.0,
+        ),
         AnomalyKind::RedRoom => unreachable!("red rooms derive from assemblies"),
     };
     let footprint = OrientedFootprint {
@@ -171,6 +179,16 @@ fn macro_instance(
         side: snap(0.8 + 0.2 * unit(h(0xF5))),
         depth: 2.4,
     });
+    let arch = (kind == AnomalyKind::ArchwayRoom).then(|| ArchProfile {
+        layout: if h(0xA0) & 1 == 0 {
+            ArchLayout::Transition
+        } else {
+            ArchLayout::DeadEnd
+        },
+        bay: snap(2.4 + 0.8 * unit(h(0xA1))),
+        opening: snap(1.6 + 0.4 * unit(h(0xA2))),
+        blind_every: 3 + (h(0xA3) % 2) as u8,
+    });
     let mut instance = AnomalyInstance {
         id,
         kind,
@@ -179,6 +197,7 @@ fn macro_instance(
         macro_anchor: (ax, az),
         pillar_lattice,
         pit_lattice,
+        arch,
         gates: Vec::new(),
         skeleton_half_width,
         entry_band,
@@ -246,6 +265,7 @@ fn red_room_instance(
         macro_anchor: (rx, rz),
         pillar_lattice: None,
         pit_lattice: None,
+        arch: None,
         gates: vec![gate],
         skeleton_half_width: 1.0,
         entry_band: 2.8,
@@ -300,6 +320,42 @@ pub fn plan_anomalies_for_region(
                 continue;
             }
             out.push(instance);
+        }
+    }
+
+    // Archway anchors ride an independent candidate stream on the same
+    // stable macro lattice. They are deliberately more common than hostile
+    // expanses: recurring fixed landmarks.
+    if config.anomalies.archways > 0.0 {
+        let arch_chance =
+            (0.35 * config.anomalies.frequency.clamp(0.0, 4.0) * config.anomalies.archways)
+                .min(0.85);
+        for az in az0..=az1 {
+            for ax in ax0..=ax1 {
+                let candidate = hash(seed, 0xAC11_0A7E, ax, az);
+                if unit(candidate) >= arch_chance {
+                    continue;
+                }
+                let instance = macro_instance(seed, ax, az, AnomalyKind::ArchwayRoom, config);
+                if !instance.footprint.bounds().intersects(query) {
+                    continue;
+                }
+                // Anchors never overlap hostile territory: where they would,
+                // the anchor wins by omission of the hostile candidate's
+                // interior — but a cheap planner-level exclusion keeps the
+                // contrast architecturally readable.
+                if out.iter().any(|other| {
+                    other.kind != AnomalyKind::ArchwayRoom
+                        && other
+                            .footprint
+                            .bounds()
+                            .expanded(3.2)
+                            .intersects(instance.footprint.bounds())
+                }) {
+                    continue;
+                }
+                out.push(instance);
+            }
         }
     }
 
