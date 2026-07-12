@@ -11,6 +11,7 @@
 //! All types are small, plain data. Determinism comes from how they are
 //! *derived* (seed + region coordinate), not from anything stored here.
 
+use crate::domain::entities::anomaly::AnomalyInstance;
 use crate::entities::models::Position;
 
 // ---------------------------------------------------------------------------
@@ -367,6 +368,10 @@ pub struct RegionPlan {
     pub architects: Vec<ArchitectGenome>,
     pub assemblies: Vec<AssemblyInstance>,
     pub corridors: Vec<CirculationSpine>,
+    /// Region-overlapping anomaly instances. Macro instances deliberately
+    /// repeat in every intersected region with the same stable identity;
+    /// consumers deduplicate them by [`AnomalyInstance::id`].
+    pub anomalies: Vec<AnomalyInstance>,
 }
 
 #[cfg(test)]

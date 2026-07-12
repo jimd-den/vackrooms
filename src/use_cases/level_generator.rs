@@ -13,6 +13,7 @@
 //! * Lighting is NOT the generator's job: place `VOXEL_LIGHT` sources and the
 //!   orchestrating use case runs the BFS lighting pass afterwards.
 
+use crate::domain::entities::anomaly::RealitySnapshot;
 use crate::domain::entities::voxel_grid::VoxelGrid;
 use crate::entities::models::Position;
 use crate::use_cases::generate_chunk::GeneratorConfig;
@@ -32,4 +33,22 @@ pub trait LevelGenerator {
         config: GeneratorConfig,
         noise: &dyn NoiseProvider,
     ) -> VoxelGrid;
+
+    /// Fills one chunk under a deterministic encounter-state snapshot.
+    ///
+    /// Most levels are entirely immutable and inherit this implementation.
+    /// Level 0 overrides it so anomaly infill/topology can be a pure function
+    /// of the same snapshot that keyed the chunk request. Keeping the legacy
+    /// `generate` entry point makes stateless tools and tests explicit users
+    /// of epoch zero.
+    fn generate_with_reality(
+        &self,
+        chunk_pos: Position,
+        seed: u32,
+        config: GeneratorConfig,
+        noise: &dyn NoiseProvider,
+        _reality: &RealitySnapshot,
+    ) -> VoxelGrid {
+        self.generate(chunk_pos, seed, config, noise)
+    }
 }

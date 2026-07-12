@@ -68,9 +68,9 @@ impl DriverRenderer {
     /// lets CSS upscale with `image-rendering: pixelated`.
     fn resolution_factor(&self) -> f64 {
         match self {
-            DriverRenderer::Surface(_)
-            | DriverRenderer::Splat(_)
-            | DriverRenderer::Raymarch(_) => 1.0,
+            DriverRenderer::Surface(_) | DriverRenderer::Splat(_) | DriverRenderer::Raymarch(_) => {
+                1.0
+            }
             DriverRenderer::Cpu(_) => 0.25,
         }
     }
@@ -250,8 +250,8 @@ pub fn boot() -> Result<(), JsValue> {
         .document()
         .ok_or_else(|| JsValue::from_str("no document"))?;
 
-    let canvas: HtmlCanvasElement = element(&document, "view")
-        .or_else(|_| element(&document, "game-canvas"))?;
+    let canvas: HtmlCanvasElement =
+        element(&document, "view").or_else(|_| element(&document, "game-canvas"))?;
     let minimap: HtmlCanvasElement = element(&document, "minimap")?;
     let overlay: HtmlElement = element(&document, "overlay")?;
     let status_msg: HtmlElement = element(&document, "status-msg")?;
@@ -273,7 +273,9 @@ pub fn boot() -> Result<(), JsValue> {
     let spawn_yaw = -std::f32::consts::FRAC_PI_2; // face +X
     let (generator_config, engine_config) = if high_spec {
         (
-            GeneratorConfig::high_spec().with_tuning(gen_params.tuning),
+            GeneratorConfig::high_spec()
+                .with_tuning(gen_params.tuning)
+                .with_anomalies(gen_params.anomalies),
             EngineConfig {
                 chunk_size: 20.0,
                 chunk_radius: 2,
@@ -288,7 +290,9 @@ pub fn boot() -> Result<(), JsValue> {
         )
     } else {
         (
-            GeneratorConfig::low_spec().with_tuning(gen_params.tuning),
+            GeneratorConfig::low_spec()
+                .with_tuning(gen_params.tuning)
+                .with_anomalies(gen_params.anomalies),
             EngineConfig {
                 seed: gen_params.seed,
                 spawn,
@@ -305,7 +309,8 @@ pub fn boot() -> Result<(), JsValue> {
     // Chunk generation runs on a Web Worker pool so crossing a streaming
     // boundary never stalls the frame loop. `?workers=0` forces the old
     // synchronous in-thread source (also the fallback if workers fail).
-    let source: Box<dyn crate::application::ports::ChunkSourcePort> = if query.contains("workers=0") {
+    let source: Box<dyn crate::application::ports::ChunkSourcePort> = if query.contains("workers=0")
+    {
         Box::new(LocalChunkSource::with_telemetry(
             SimpleNoiseProvider::new(),
             gen_params.seed,
@@ -352,7 +357,11 @@ pub fn boot() -> Result<(), JsValue> {
             let end = s.find('&').unwrap_or(s.len());
             let parts: Vec<&str> = s[..end].split(',').collect();
             if parts.len() == 3 {
-                if let (Ok(x), Ok(y), Ok(z)) = (parts[0].parse::<f32>(), parts[1].parse::<f32>(), parts[2].parse::<f32>()) {
+                if let (Ok(x), Ok(y), Ok(z)) = (
+                    parts[0].parse::<f32>(),
+                    parts[1].parse::<f32>(),
+                    parts[2].parse::<f32>(),
+                ) {
                     cam_pos = [x, y, z];
                 }
             }
@@ -373,7 +382,9 @@ pub fn boot() -> Result<(), JsValue> {
                 pitch_val = p;
             }
         }
-        engine.borrow_mut().teleport_player(cam_pos, yaw_val, pitch_val);
+        engine
+            .borrow_mut()
+            .teleport_player(cam_pos, yaw_val, pitch_val);
     }
 
     if !is_capture {
@@ -702,7 +713,9 @@ fn run_frame_loop(
             if matches!(*renderer.borrow(), DriverRenderer::Cpu(_)) {
                 let max_w = 480.0;
                 let max_h = 270.0;
-                let cap_scale = (max_w / target_w as f32).min(max_h as f32 / target_h as f32).min(1.0);
+                let cap_scale = (max_w / target_w as f32)
+                    .min(max_h as f32 / target_h as f32)
+                    .min(1.0);
                 target_w = (target_w as f32 * cap_scale).round() as u32;
                 target_h = (target_h as f32 * cap_scale).round() as u32;
             }

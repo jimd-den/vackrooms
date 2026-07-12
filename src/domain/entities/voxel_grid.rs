@@ -11,6 +11,12 @@ pub struct VoxelGrid {
     /// Colored flood-fill light, 0-15 per channel.
     light_rgb: Vec<[u8; 3]>,
     pub runtime_lights: Vec<crate::domain::entities::architecture::RuntimeLight>,
+    /// Semantic threshold planes emitted by the same architectural pass as
+    /// geometry. The application consumes them to advance deterministic
+    /// anomaly epochs; render/collision never invent a separate reality.
+    pub traversal_gates: Vec<crate::domain::entities::anomaly::TraversalGate>,
+    /// Real floor openings that relocate the player when entered.
+    pub pit_hazards: Vec<crate::domain::entities::anomaly::PitHazard>,
     face_occlusion: Vec<u8>,
 }
 
@@ -39,6 +45,8 @@ impl VoxelGrid {
             light_data: vec![0; size],
             light_rgb: vec![[0; 3]; size],
             runtime_lights: Vec::new(),
+            traversal_gates: Vec::new(),
+            pit_hazards: Vec::new(),
             face_occlusion: vec![0; size],
         }
     }

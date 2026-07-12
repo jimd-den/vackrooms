@@ -1,3 +1,4 @@
+use crate::domain::entities::anomaly::RealitySnapshot;
 use crate::domain::entities::grid::Grid;
 use crate::domain::entities::voxel_grid::{
     VOXEL_AIR, VOXEL_CEILING, VOXEL_FLOOR, VOXEL_LIGHT, VOXEL_RED_WALL, VOXEL_WALL, VoxelGrid,
@@ -39,6 +40,46 @@ impl Default for LevelTuning {
     }
 }
 
+/// Level 0 anomaly controls, kept separate from the ordinary office-fabric
+/// tuning so increasing wall density never silently makes anomalies common.
+/// Multipliers are centered on 1.0; distances remain world units.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AnomalyTuning {
+    /// Overall candidate frequency (0 disables every anomaly family).
+    pub frequency: f32,
+    /// Macro-footprint scale for region-spanning instances.
+    pub size: f32,
+    pub pillar_expanses: f32,
+    pub blackouts: f32,
+    pub red_rooms: f32,
+    pub pit_lattices: f32,
+    /// Strength/probability of epoch-dependent mutable infill.
+    pub remap_intensity: f32,
+    /// Minimum distance behind a crossed threshold before infill may differ.
+    pub remap_distance: f32,
+    /// Radius around the player protected from any resident transition.
+    pub safe_radius: f32,
+    /// Chance that a closed red-room loop exposes its authored escape branch.
+    pub red_escape_bias: f32,
+}
+
+impl Default for AnomalyTuning {
+    fn default() -> Self {
+        Self {
+            frequency: 1.0,
+            size: 1.0,
+            pillar_expanses: 1.0,
+            blackouts: 1.0,
+            red_rooms: 1.0,
+            pit_lattices: 1.0,
+            remap_intensity: 1.0,
+            remap_distance: 12.0,
+            safe_radius: 8.0,
+            red_escape_bias: 0.12,
+        }
+    }
+}
+
 /// Dynamic config configuration profile to scale SVO dimensions and voxel grid.
 #[derive(Debug, Clone, Copy)]
 pub struct GeneratorConfig {
@@ -49,6 +90,8 @@ pub struct GeneratorConfig {
     pub level: u32,
     /// User-facing generation knobs (URL query params in the browser).
     pub tuning: LevelTuning,
+    /// Stateful Level 0 phenomena. Outdoor/legacy levels ignore this group.
+    pub anomalies: AnomalyTuning,
 }
 
 impl GeneratorConfig {
@@ -58,6 +101,7 @@ impl GeneratorConfig {
             voxel_scale: 0.1,
             level: 0,
             tuning: LevelTuning::default(),
+            anomalies: AnomalyTuning::default(),
         }
     }
 
@@ -67,6 +111,7 @@ impl GeneratorConfig {
             voxel_scale: 0.2,
             level: 0,
             tuning: LevelTuning::default(),
+            anomalies: AnomalyTuning::default(),
         }
     }
 
@@ -77,6 +122,11 @@ impl GeneratorConfig {
 
     pub fn with_tuning(mut self, tuning: LevelTuning) -> Self {
         self.tuning = tuning;
+        self
+    }
+
+    pub fn with_anomalies(mut self, anomalies: AnomalyTuning) -> Self {
+        self.anomalies = anomalies;
         self
     }
 
@@ -288,6 +338,19 @@ impl<'a> GenerateChunkArchitectureUseCase<'a> {
     }
 
     pub fn execute(&self, chunk_pos: Position, seed: u32, config: GeneratorConfig) -> VoxelGrid {
+        self.execute_with_reality(chunk_pos, seed, config, &RealitySnapshot::default())
+    }
+
+    /// Generates a chunk against an immutable encounter-state snapshot.
+    /// The snapshot is part of the request identity in the browser pipeline;
+    /// generation itself remains pure and replayable.
+    pub fn execute_with_reality(
+        &self,
+        chunk_pos: Position,
+        seed: u32,
+        config: GeneratorConfig,
+        reality: &RealitySnapshot,
+    ) -> VoxelGrid {
         // Pluggable levels: everything except the legacy office blueprint
         // (level 1, kept inline below) goes through the LevelGenerator port.
         // Level 0 is the architecturally *planned* Backrooms: region plans
@@ -303,7 +366,13 @@ impl<'a> GenerateChunkArchitectureUseCase<'a> {
             } else {
                 &GrasslandLevel
             };
-            let mut grid = generator.generate(chunk_pos, seed, config, self.noise_provider);
+            let mut grid = generator.generate_with_reality(
+                chunk_pos,
+                seed,
+                config,
+                self.noise_provider,
+                reality,
+            );
             crate::domain::use_cases::calculate_lighting::calculate_voxel_lighting(&mut grid);
             crate::domain::use_cases::path_tracer::bake_face_occlusion(&mut grid);
 
@@ -598,7 +667,12 @@ impl<'a> GenerateChunkArchitectureUseCase<'a> {
                                 && (vx % 10 == 0 && vz % 10 == 0)
                             {
                                 if cell.zone == MicrobiomeZone::RedRoom {
-                                    grid.set(vx, wall_max_y - 1, vz, crate::domain::entities::voxel_grid::VOXEL_RED_LIGHT);
+                                    grid.set(
+                                        vx,
+                                        wall_max_y - 1,
+                                        vz,
+                                        crate::domain::entities::voxel_grid::VOXEL_RED_LIGHT,
+                                    );
                                 } else {
                                     grid.set(vx, wall_max_y - 1, vz, VOXEL_LIGHT);
                                 }

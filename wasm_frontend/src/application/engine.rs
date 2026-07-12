@@ -6,16 +6,19 @@
 //! No browser types appear anywhere in this file, so the whole game loop is
 //! natively unit-testable.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::application::atlas::{AtlasPool, MAX_CHUNKS, payload_rows};
-use crate::application::collision::CollisionWorld;
+use crate::application::collision::{CollisionWorld, player_aabb};
 use crate::application::player::{MoveIntent, Player};
 use crate::application::ports::{
     ChunkDraw, ChunkRequest, ChunkSourcePort, FrameParams, RendererPort, SurfaceChunk,
 };
 use crate::application::streaming::{
     ChunkKey, ChunkStore, LoadedChunk, StreamingPolicy, chunk_key,
+};
+use vackrooms::domain::entities::anomaly::{
+    AnomalyKind, RealitySnapshot, TraversalGateKind, WorldBounds,
 };
 
 /// Static configuration chosen by the composition root.
@@ -168,6 +171,8 @@ const LEVEL_GRASSLAND: u32 = 34;
 const NOCLIP_PUSH_SECONDS: f32 = 1.2;
 /// ...then one roll per second of continued pushing, at this probability.
 const NOCLIP_CHANCE: f32 = 0.2;
+/// One coarse wall voxel around a red-room footprint joins the same rebuild.
+const PLAN_TRANSITION_MARGIN: f32 = 0.4;
 
 pub struct Engine {
     config: EngineConfig,
@@ -182,9 +187,24 @@ pub struct Engine {
     governor: PerfGovernor,
     renderer: Box<dyn RendererPort>,
     source: Box<dyn ChunkSourcePort>,
-    /// Outstanding background loads (async sources only): key → requested
-    /// LOD. Prevents duplicate requests while a chunk is in flight.
-    pending: HashMap<ChunkKey, u8>,
+    /// Outstanding background loads (async sources only). The complete
+    /// request is retained so a late completion can neither clear nor replace
+    /// a newer request for the same spatial chunk.
+    pending: HashMap<ChunkKey, ChunkRequest>,
+    /// Monotonic worker-order identity. Kept independent from chunk/LOD so a
+    /// re-request after eviction is distinguishable from its predecessor.
+    next_request_id: u32,
+    /// Immutable encounter state used by every request in the active reality.
+    /// Traversal/event handling will replace this in a later slice; epoch zero
+    /// is sufficient to establish the transport and validation contract now.
+    reality: RealitySnapshot,
+    /// Resident red-room chunks that may safely rebuild after the player has
+    /// crossed the occluded inner threshold. Other remaps stay lazy until
+    /// ordinary eviction, so directly visible pillar/blackout geometry never
+    /// pops.
+    forced_reloads: HashSet<ChunkKey>,
+    /// Last non-hazard eye position used by pit-lattice recovery.
+    last_safe_position: [f32; 3],
     /// Active Backrooms level; chunks are requested for this level.
     level: u32,
     /// How long the player has been pushing into a wall without moving.
@@ -228,6 +248,10 @@ impl Engine {
             renderer,
             source,
             pending: HashMap::new(),
+            next_request_id: 1,
+            reality: RealitySnapshot::default(),
+            forced_reloads: HashSet::new(),
+            last_safe_position: config.spawn,
             level: LEVEL_BACKROOMS,
             push_seconds: 0.0,
             noclip_cooldown: 0.0,
@@ -281,6 +305,7 @@ impl Engine {
         // rejected by the level check, and clearing pending lets the new
         // level re-request the same keys immediately.
         self.pending.clear();
+        self.forced_reloads.clear();
         // The whole world is regenerated: drop the pool so the next stream
         // pass relayouts and re-uploads from scratch.
         self.pool = AtlasPool::new();
@@ -291,13 +316,21 @@ impl Engine {
         // Into the grassland you phase in place; the way back drops you at
         // the spawn clearing so you can't rematerialize inside a wall.
         if self.level == LEVEL_BACKROOMS {
-            self.player.position = self.config.spawn;
+            self.player.relocate(self.config.spawn);
         }
+        self.last_safe_position = self.player.position;
     }
 
     /// The active Backrooms level id.
     pub fn level(&self) -> u32 {
         self.level
+    }
+
+    /// Immutable encounter-state snapshot currently used to key generation.
+    /// A later traversal layer will own safe snapshot transitions; exposing
+    /// the current value here does not itself mutate or remap the world.
+    pub fn reality_snapshot(&self) -> &RealitySnapshot {
+        &self.reality
     }
 
     /// Advances the simulation one frame and issues the draw.
@@ -311,6 +344,7 @@ impl Engine {
             self.player.apply_look(input.look_dx, input.look_dy);
             self.player.step(dt, &input.intent, &self.world);
         }
+        self.update_anomalies(old_pos);
         self.update_noclip(dt, input, old_pos);
 
         self.stream_chunks();
@@ -349,6 +383,101 @@ impl Engine {
         dx * dx + dz * dz
     }
 
+    fn update_anomalies(&mut self, old_pos: [f32; 3]) {
+        if self.level != LEVEL_BACKROOMS {
+            self.last_safe_position = self.player.position;
+            return;
+        }
+
+        let hazards: Vec<_> = self.store.all_pit_hazards().copied().collect();
+        if let Some(hazard) = hazards
+            .iter()
+            .find(|h| h.contains(self.player.position[0], self.player.position[2]))
+        {
+            let authored = [
+                hazard.recovery.x,
+                self.player.position[1],
+                hazard.recovery.z,
+            ];
+            let recovery = if self.world.collides(authored) {
+                self.last_safe_position
+            } else {
+                authored
+            };
+            self.player.relocate(recovery);
+            self.last_safe_position = recovery;
+            return;
+        }
+
+        let mut gates: Vec<_> = self.store.all_traversal_gates().copied().collect();
+        gates.sort_by_key(|g| g.id);
+        gates.dedup_by_key(|g| g.id);
+        for gate in gates {
+            let Some(direction) = gate.crossing(
+                [old_pos[0], old_pos[2]],
+                [self.player.position[0], self.player.position[2]],
+            ) else {
+                continue;
+            };
+            if gate.kind == TraversalGateKind::RedThreshold && direction != gate.forward {
+                continue;
+            }
+            self.reality = self.reality.with_advanced_gate(&gate, direction);
+
+            if gate.anomaly_kind == AnomalyKind::RedRoom {
+                let bounds = gate.affected_bounds.expanded(PLAN_TRANSITION_MARGIN);
+                let targets: Vec<_> = self
+                    .store
+                    .iter_ordered()
+                    .filter(|chunk| {
+                        WorldBounds::new(
+                            chunk.origin.0,
+                            chunk.origin.1,
+                            chunk.origin.0 + self.config.chunk_size,
+                            chunk.origin.1 + self.config.chunk_size,
+                        )
+                        .intersects(bounds)
+                    })
+                    .map(|chunk| chunk_key(chunk.origin.0, chunk.origin.1))
+                    .collect();
+                for key in targets {
+                    // A pre-threshold refinement for this key is no longer
+                    // authoritative; its late completion cannot clear the new
+                    // exact request identity.
+                    self.pending.remove(&key);
+                    self.forced_reloads.insert(key);
+                }
+            }
+        }
+        self.last_safe_position = self.player.position;
+    }
+
+    fn make_request_for(
+        &mut self,
+        origin_x: f32,
+        origin_z: f32,
+        lod: u8,
+        reality: RealitySnapshot,
+    ) -> ChunkRequest {
+        let request_id = self.next_request_id;
+        self.next_request_id = self.next_request_id.wrapping_add(1);
+        if self.next_request_id == 0 {
+            self.next_request_id = 1;
+        }
+        ChunkRequest {
+            request_id,
+            origin_x,
+            origin_z,
+            level: self.level,
+            lod,
+            reality,
+        }
+    }
+
+    fn make_request(&mut self, origin_x: f32, origin_z: f32, lod: u8) -> ChunkRequest {
+        self.make_request_for(origin_x, origin_z, lod, self.reality.clone())
+    }
+
     /// Installs finished background loads, discarding stale work: a result
     /// for the wrong level (noclip happened), for a chunk that left the
     /// streaming footprint, or for a LOD no better than what is already
@@ -360,35 +489,67 @@ impl Engine {
         changed: &mut bool,
     ) {
         for done in self.source.poll_completed() {
-            let req = done.request;
+            let req = &done.request;
             let key = chunk_key(req.origin_x, req.origin_z);
+            // A completion is authoritative only while the exact order it
+            // echoes is still pending. In particular, an old result for the
+            // same chunk must not remove a newer pending request.
+            let is_current = self
+                .pending
+                .get(&key)
+                .is_some_and(|pending| pending.is_same_request(req));
+            if !is_current {
+                continue;
+            }
             self.pending.remove(&key);
             if req.level != self.level || !keep.contains(&key) {
                 continue;
             }
+            let is_forced = self.forced_reloads.contains(&key);
             let improves = match self.store.get(key) {
                 None => true,
-                Some(resident) => req.lod < resident.lod,
+                // LOD is monotonic only inside one exact reality. A chunk
+                // from a replaced reality is replaced even if its old LOD was
+                // finer; comparing their LODs would preserve stale geometry.
+                Some(resident) if resident.is_in_reality(&req.reality) => req.lod < resident.lod,
+                Some(_) => is_forced,
             };
             if !improves {
                 continue;
             }
+            if is_forced {
+                let player = player_aabb(self.player.position);
+                if done
+                    .payload
+                    .collision
+                    .iter()
+                    .any(|solid| solid.intersects(&player))
+                {
+                    // Safety beats the effect: keep the old resident reality
+                    // and let the closed topology take effect after eviction.
+                    self.forced_reloads.remove(&key);
+                    continue;
+                }
+            }
             self.store.insert(
                 key,
-                LoadedChunk {
-                    origin: (req.origin_x, req.origin_z),
-                    lod: req.lod,
-                    payload: done.payload,
-                },
+                LoadedChunk::new(
+                    (req.origin_x, req.origin_z),
+                    req.lod,
+                    req.reality.clone(),
+                    done.payload,
+                ),
             );
             if !loaded.contains(&key) {
                 loaded.push(key);
             }
             *changed = true;
+            self.forced_reloads.remove(&key);
         }
         // Drop pending entries that left the footprint so their slots free
         // up; a late completion for them is discarded by the keep check.
-        self.pending.retain(|key, _| keep.contains(key));
+        self.pending
+            .retain(|key, request| keep.contains(key) && request.level == self.level);
     }
 
     /// Tops up the background request queue: coarse availability for every
@@ -399,23 +560,39 @@ impl Engine {
         // would just build a stale backlog behind a moving player.
         let max_pending = (self.config.max_loads_per_tick * 2).max(4);
 
+        let forced: Vec<_> = self
+            .forced_reloads
+            .iter()
+            .filter_map(|&key| {
+                self.store
+                    .get(key)
+                    .map(|chunk| (key, chunk.origin.0, chunk.origin.1, chunk.lod))
+            })
+            .collect();
+        for (key, ox, oz, lod) in forced {
+            if self.pending.len() >= max_pending {
+                break;
+            }
+            if !self.pending.contains_key(&key) {
+                let request = self.make_request(ox, oz, lod);
+                self.pending.insert(key, request.clone());
+                self.source.request(request);
+            }
+        }
+
         for &(ox, oz) in desired_visual {
             if self.pending.len() >= max_pending {
                 break;
             }
             let key = chunk_key(ox, oz);
             if !self.store.contains(key) && !self.pending.contains_key(&key) {
-                self.pending.insert(key, COARSE_LOD);
-                self.source.request(ChunkRequest {
-                    origin_x: ox,
-                    origin_z: oz,
-                    level: self.level,
-                    lod: COARSE_LOD,
-                });
+                let request = self.make_request(ox, oz, COARSE_LOD);
+                self.pending.insert(key, request.clone());
+                self.source.request(request);
             }
         }
 
-        let fine_in_flight = self.pending.values().any(|&lod| lod == 0);
+        let fine_in_flight = self.pending.values().any(|request| request.lod == 0);
         if fine_in_flight || self.pending.len() >= max_pending {
             return;
         }
@@ -427,13 +604,11 @@ impl Engine {
                 && self.store.get(key).is_some_and(|c| c.lod > 0)
         });
         if let Some((ox, oz)) = target {
-            self.pending.insert(chunk_key(ox, oz), 0);
-            self.source.request(ChunkRequest {
-                origin_x: ox,
-                origin_z: oz,
-                level: self.level,
-                lod: 0,
-            });
+            let key = chunk_key(ox, oz);
+            let resident_reality = self.store.get(key).unwrap().reality.clone();
+            let request = self.make_request_for(ox, oz, 0, resident_reality);
+            self.pending.insert(key, request.clone());
+            self.source.request(request);
         }
     }
 
@@ -461,7 +636,10 @@ impl Engine {
         let desired_visual = self
             .visual_policy
             .desired_origins(self.player.position[0], self.player.position[2]);
-        let keep: Vec<_> = desired_visual.iter().map(|&(x, z)| chunk_key(x, z)).collect();
+        let keep: Vec<_> = desired_visual
+            .iter()
+            .map(|&(x, z)| chunk_key(x, z))
+            .collect();
 
         // Free the atlas slots of chunks about to be evicted.
         let evicted: Vec<ChunkKey> = self
@@ -471,6 +649,7 @@ impl Engine {
             .filter(|k| !keep.contains(k))
             .collect();
         let mut changed = self.store.retain_keys(&keep);
+        self.forced_reloads.retain(|key| keep.contains(key));
         if surface_renderer {
             if !evicted.is_empty() {
                 self.renderer.remove_surfaces(&evicted);
@@ -490,6 +669,41 @@ impl Engine {
         } else {
             let mut budget = self.config.max_loads_per_tick as u32 * FINE_LOAD_COST;
 
+            // Red-room closure is a semantic transition, not ordinary LOD
+            // work. Rebuild the small affected set first and install each
+            // complete payload atomically across its geometry/collision/light
+            // views. The threshold bend keeps this set out of direct sight.
+            let forced: Vec<_> = self
+                .forced_reloads
+                .iter()
+                .filter_map(|&key| {
+                    self.store
+                        .get(key)
+                        .map(|c| (key, c.origin.0, c.origin.1, c.lod))
+                })
+                .collect();
+            for (key, ox, oz, lod) in forced {
+                let payload = self
+                    .source
+                    .load_with_reality(ox, oz, self.level, lod, &self.reality);
+                let player = player_aabb(self.player.position);
+                if payload
+                    .collision
+                    .iter()
+                    .any(|solid| solid.intersects(&player))
+                {
+                    self.forced_reloads.remove(&key);
+                    continue;
+                }
+                self.store.insert(
+                    key,
+                    LoadedChunk::new((ox, oz), lod, self.reality.clone(), payload),
+                );
+                self.forced_reloads.remove(&key);
+                loaded.push(key);
+                changed = true;
+            }
+
             // Phase 1 — availability: missing chunks come in coarse, nearest
             // first. Only a leftover budget flows into refinement, so a moving
             // player always fills holes before sharpening anything.
@@ -499,14 +713,16 @@ impl Engine {
                 }
                 let key = chunk_key(ox, oz);
                 if !self.store.contains(key) {
-                    let payload = self.source.load(ox, oz, self.level, COARSE_LOD);
+                    let payload = self.source.load_with_reality(
+                        ox,
+                        oz,
+                        self.level,
+                        COARSE_LOD,
+                        &self.reality,
+                    );
                     self.store.insert(
                         key,
-                        LoadedChunk {
-                            origin: (ox, oz),
-                            lod: COARSE_LOD,
-                            payload,
-                        },
+                        LoadedChunk::new((ox, oz), COARSE_LOD, self.reality.clone(), payload),
                     );
                     loaded.push(key);
                     budget -= 1;
@@ -523,14 +739,13 @@ impl Engine {
                 });
                 let Some((ox, oz)) = target else { break };
                 let key = chunk_key(ox, oz);
-                let payload = self.source.load(ox, oz, self.level, 0);
+                let resident_reality = self.store.get(key).unwrap().reality.clone();
+                let payload =
+                    self.source
+                        .load_with_reality(ox, oz, self.level, 0, &resident_reality);
                 self.store.insert(
                     key,
-                    LoadedChunk {
-                        origin: (ox, oz),
-                        lod: 0,
-                        payload,
-                    },
+                    LoadedChunk::new((ox, oz), 0, resident_reality, payload),
                 );
                 if !loaded.contains(&key) {
                     loaded.push(key);
@@ -751,6 +966,8 @@ mod tests {
                 world_size: 12.8,
                 surface: crate::application::ports::SurfaceMeshPayload::empty(0),
                 collision: vec![Aabb::new([origin_x, 0.0, 0.0], [origin_x + 0.2, 3.0, 0.2])],
+                traversal_gates: vec![],
+                pit_hazards: vec![],
             }
         }
     }
@@ -770,6 +987,8 @@ mod tests {
                 world_size: 12.8,
                 surface: crate::application::ports::SurfaceMeshPayload::empty(0),
                 collision: vec![Aabb::new([-100.0, 0.0, -100.0], [100.0, 3.0, 100.0])],
+                traversal_gates: vec![],
+                pit_hazards: vec![],
             }
         }
     }
@@ -798,9 +1017,29 @@ mod tests {
     }
 
     fn completed(request: ChunkRequest) -> crate::application::ports::CompletedChunk {
-        crate::application::ports::CompletedChunk {
-            request,
-            payload: FlatChunkSource.load(request.origin_x, request.origin_z, request.level, request.lod),
+        let payload = FlatChunkSource.load(
+            request.origin_x,
+            request.origin_z,
+            request.level,
+            request.lod,
+        );
+        crate::application::ports::CompletedChunk { request, payload }
+    }
+
+    fn test_request(
+        request_id: u32,
+        origin_x: f32,
+        origin_z: f32,
+        level: u32,
+        lod: u8,
+    ) -> ChunkRequest {
+        ChunkRequest {
+            request_id,
+            origin_x,
+            origin_z,
+            level,
+            lod,
+            reality: RealitySnapshot::default(),
         }
     }
 
@@ -856,25 +1095,54 @@ mod tests {
         requests.borrow_mut().clear();
 
         // Wrong level: the engine is on level 0.
-        ready.borrow_mut().push(completed(ChunkRequest {
-            origin_x: 0.0,
-            origin_z: 0.0,
-            level: 34,
-            lod: 1,
-        }));
+        ready
+            .borrow_mut()
+            .push(completed(test_request(10_001, 0.0, 0.0, 34, 1)));
         // Outside the streaming footprint entirely.
-        ready.borrow_mut().push(completed(ChunkRequest {
-            origin_x: 500.0,
-            origin_z: 500.0,
-            level: 0,
-            lod: 1,
-        }));
+        ready
+            .borrow_mut()
+            .push(completed(test_request(10_002, 500.0, 500.0, 0, 1)));
         engine.tick(1.0 / 60.0, &input);
         assert_eq!(
             engine.stats().resident_chunks,
             0,
             "stale completions must not be installed"
         );
+    }
+
+    #[test]
+    fn old_completion_cannot_clear_a_newer_request_for_the_same_chunk() {
+        let source = AsyncFakeSource::default();
+        let requests = source.requests.clone();
+        let ready = source.ready.clone();
+        let mut engine = Engine::new(
+            EngineConfig::default(),
+            Box::new(RecordingRenderer::default()),
+            Box::new(source),
+        );
+        let input = InputFrame::default();
+        engine.tick(1.0 / 60.0, &input);
+
+        let current = requests.borrow()[0].clone();
+        let key = chunk_key(current.origin_x, current.origin_z);
+        let mut stale = current.clone();
+        stale.request_id = stale.request_id.wrapping_sub(1);
+        ready.borrow_mut().push(completed(stale));
+        engine.tick(1.0 / 60.0, &input);
+
+        assert!(
+            engine
+                .pending
+                .get(&key)
+                .is_some_and(|pending| pending.is_same_request(&current)),
+            "a stale completion must leave the newer request pending"
+        );
+        assert!(engine.store.get(key).is_none());
+
+        ready.borrow_mut().push(completed(current.clone()));
+        engine.tick(1.0 / 60.0, &input);
+        let installed = engine.store.get(key).expect("current completion installs");
+        assert!(installed.is_in_reality(&current.reality));
     }
 
     #[test]
@@ -898,12 +1166,9 @@ mod tests {
         assert_eq!(engine.stats().fine_chunks, 9);
 
         // A leftover coarse result for the spawn chunk arrives late.
-        ready.borrow_mut().push(completed(ChunkRequest {
-            origin_x: 0.0,
-            origin_z: 0.0,
-            level: 0,
-            lod: 1,
-        }));
+        let late = test_request(10_003, 0.0, 0.0, 0, 1);
+        engine.pending.insert(chunk_key(0.0, 0.0), late.clone());
+        ready.borrow_mut().push(completed(late));
         engine.tick(1.0 / 60.0, &input);
         assert_eq!(
             engine.stats().fine_chunks,
@@ -1053,6 +1318,76 @@ mod tests {
             engine.tick(1.0 / 60.0, &input);
         }
         assert_eq!(engine.collision_world().len(), 9);
+    }
+
+    #[test]
+    fn red_threshold_advances_reality_and_targets_only_affected_residents() {
+        use vackrooms::domain::entities::anomaly::{
+            AnomalyKind, Axis2, AxisDirection, TraversalGate, TraversalGateKind, WorldBounds,
+        };
+        let mut engine = Engine::new(
+            EngineConfig::default(),
+            Box::new(RecordingRenderer::default()),
+            Box::new(FlatChunkSource),
+        );
+        let gate = TraversalGate {
+            id: 7,
+            instance_id: 99,
+            anomaly_kind: AnomalyKind::RedRoom,
+            kind: TraversalGateKind::RedThreshold,
+            axis: Axis2::X,
+            plane: 5.0,
+            span_min: 0.0,
+            span_max: 10.0,
+            forward: AxisDirection::Positive,
+            affected_bounds: WorldBounds::new(0.0, 0.0, 10.0, 10.0),
+        };
+        let mut payload = FlatChunkSource.load(0.0, 0.0, 0, 0);
+        payload.traversal_gates.push(gate);
+        engine.store.insert(
+            chunk_key(0.0, 0.0),
+            LoadedChunk::new((0.0, 0.0), 0, RealitySnapshot::empty(), payload),
+        );
+        engine.player.position = [6.0, 1.7, 5.0];
+        engine.update_anomalies([4.0, 1.7, 5.0]);
+        assert_eq!(engine.reality.lookup(99).unwrap().epoch, 1);
+        assert!(engine.forced_reloads.contains(&chunk_key(0.0, 0.0)));
+
+        // Crossing the same directional threshold outward is not closure.
+        let before = engine.reality.clone();
+        engine.player.position = [4.0, 1.7, 5.0];
+        engine.update_anomalies([6.0, 1.7, 5.0]);
+        assert_eq!(engine.reality, before);
+    }
+
+    #[test]
+    fn entering_a_pit_uses_authored_relocation() {
+        use vackrooms::domain::entities::anomaly::PitHazard;
+        use vackrooms::entities::models::Position;
+        let mut engine = Engine::new(
+            EngineConfig::default(),
+            Box::new(RecordingRenderer::default()),
+            Box::new(FlatChunkSource),
+        );
+        let mut payload = FlatChunkSource.load(0.0, 0.0, 0, 0);
+        payload.pit_hazards.push(PitHazard {
+            id: 1,
+            instance_id: 2,
+            center: Position::new(5.0, 5.0),
+            half_side: 0.6,
+            depth: 2.4,
+            recovery: Position::new(7.0, 7.0),
+        });
+        engine.store.insert(
+            chunk_key(0.0, 0.0),
+            LoadedChunk::new((0.0, 0.0), 0, RealitySnapshot::empty(), payload),
+        );
+        engine.last_safe_position = [4.0, 1.7, 5.0];
+        engine.player.position = [5.0, 1.7, 5.0];
+        engine.update_anomalies([4.9, 1.7, 5.0]);
+        assert_eq!(engine.player.position, [7.0, 1.7, 7.0]);
+        engine.update_anomalies([7.0, 1.7, 7.0]);
+        assert_eq!(engine.player.position, [7.0, 1.7, 7.0]);
     }
 
     #[test]

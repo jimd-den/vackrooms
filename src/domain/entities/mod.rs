@@ -1,3 +1,4 @@
+pub mod anomaly;
 pub mod architecture;
 pub mod cell;
 pub mod grid;

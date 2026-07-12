@@ -10,6 +10,7 @@
 //!     -> collision walk               (solid leaves -> world-space AABBs)
 
 use vackrooms::adapters::octree_gpu_serializer::OctreeGpuSerializer;
+use vackrooms::domain::entities::anomaly::RealitySnapshot;
 use vackrooms::domain::entities::sparse_voxel_octree::{SparseVoxelOctree, SvoNode};
 use vackrooms::domain::entities::voxel_grid::VoxelGrid;
 use vackrooms::domain::use_cases::build_octree::BuildOctreeUseCase;
@@ -60,10 +61,15 @@ impl<N: NoiseProvider> LocalChunkSource<N> {
             config,
         }
     }
-}
 
-impl<N: NoiseProvider> ChunkSourcePort for LocalChunkSource<N> {
-    fn load(&self, origin_x: f32, origin_z: f32, level: u32, lod: u8) -> ChunkPayload {
+    fn generate_payload(
+        &self,
+        origin_x: f32,
+        origin_z: f32,
+        level: u32,
+        lod: u8,
+        reality: &RealitySnapshot,
+    ) -> ChunkPayload {
         let config = self.config.with_level(level).at_lod(lod);
         let generator =
             GenerateChunkArchitectureUseCase::with_telemetry(&self.noise, self.telemetry);
@@ -76,10 +82,11 @@ impl<N: NoiseProvider> ChunkSourcePort for LocalChunkSource<N> {
             chunk_size: config.chunk_size + config.voxel_scale * 2.0,
             ..config
         };
-        let halo_grid = generator.execute(
+        let halo_grid = generator.execute_with_reality(
             Position::new(origin_x - config.voxel_scale, origin_z - config.voxel_scale),
             self.seed,
             halo_config,
+            reality,
         );
         let grid = crop_lateral_halo(&halo_grid, 1);
         let surface = build_surface_mesh(&halo_grid, config.voxel_scale, lod, 1);
@@ -96,7 +103,26 @@ impl<N: NoiseProvider> ChunkSourcePort for LocalChunkSource<N> {
             world_size: config.svo_world_size(),
             surface,
             collision,
+            traversal_gates: halo_grid.traversal_gates.clone(),
+            pit_hazards: halo_grid.pit_hazards.clone(),
         }
+    }
+}
+
+impl<N: NoiseProvider> ChunkSourcePort for LocalChunkSource<N> {
+    fn load(&self, origin_x: f32, origin_z: f32, level: u32, lod: u8) -> ChunkPayload {
+        self.generate_payload(origin_x, origin_z, level, lod, &RealitySnapshot::default())
+    }
+
+    fn load_with_reality(
+        &self,
+        origin_x: f32,
+        origin_z: f32,
+        level: u32,
+        lod: u8,
+        reality: &RealitySnapshot,
+    ) -> ChunkPayload {
+        self.generate_payload(origin_x, origin_z, level, lod, reality)
     }
 }
 

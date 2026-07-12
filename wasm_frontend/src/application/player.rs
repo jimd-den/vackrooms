@@ -49,6 +49,16 @@ impl Player {
         }
     }
 
+    /// Moves the player to an authored recovery point and clears momentum.
+    /// Pit relocation uses this instead of assigning `position` directly so
+    /// the velocity that carried the player over the edge cannot immediately
+    /// push them back into the same hazard.
+    pub fn relocate(&mut self, position: [f32; 3]) {
+        self.position = position;
+        self.vel_strafe = 0.0;
+        self.vel_forward = 0.0;
+    }
+
     /// Applies a mouse movement delta (in pixels) to yaw/pitch.
     pub fn apply_look(&mut self, dx: f32, dy: f32) {
         self.yaw -= dx * MOUSE_SENSITIVITY;
@@ -197,5 +207,23 @@ mod tests {
             "should have slid along the wall, x = {}",
             p.position[0]
         );
+    }
+
+    #[test]
+    fn relocation_clears_momentum() {
+        let world = CollisionWorld::new();
+        let mut player = Player::new([0.0, 1.7, 0.0]);
+        walk(
+            &mut player,
+            &world,
+            MoveIntent {
+                forward: true,
+                ..Default::default()
+            },
+            1.0,
+        );
+        player.relocate([10.0, 1.7, 10.0]);
+        player.step(1.0 / 60.0, &MoveIntent::default(), &world);
+        assert_eq!(player.position, [10.0, 1.7, 10.0]);
     }
 }
