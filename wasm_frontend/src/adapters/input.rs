@@ -16,6 +16,10 @@ pub struct InputCollector {
     pending_dy: f32,
     locked: bool,
     flashlight: bool,
+    /// One queued flare drop, consumed by the next frame. Edge-triggered:
+    /// holding G never queues a second drop until the key is released.
+    flare_queued: bool,
+    flare_key_held: bool,
 }
 
 impl InputCollector {
@@ -34,6 +38,16 @@ impl InputCollector {
 
         if pressed && code == "KeyF" {
             self.flashlight = !self.flashlight;
+        }
+
+        // Flare drop: fires once per press, only while playing (the engine
+        // additionally ignores drops when the session is not locked, so a
+        // G typed into the settings menu can never reach gameplay).
+        if code == "KeyG" {
+            if pressed && !self.flare_key_held && self.locked {
+                self.flare_queued = true;
+            }
+            self.flare_key_held = pressed;
         }
 
         if doom {
@@ -95,6 +109,14 @@ impl InputCollector {
         self.flashlight = !self.flashlight;
     }
 
+    /// Queues one flare drop (touch button; keyboard uses KeyG). One queued
+    /// drop per frame regardless of how many events bubble in.
+    pub fn queue_flare(&mut self) {
+        if self.locked {
+            self.flare_queued = true;
+        }
+    }
+
     /// Pointer lock engaged/released. Releasing clears held keys so the
     /// player doesn't keep walking while the overlay is up.
     pub fn set_locked(&mut self, locked: bool) {
@@ -103,6 +125,7 @@ impl InputCollector {
             self.intent = MoveIntent::default();
             self.pending_dx = 0.0;
             self.pending_dy = 0.0;
+            self.flare_queued = false;
         }
     }
 
@@ -119,9 +142,11 @@ impl InputCollector {
             look_dy: self.pending_dy,
             locked: self.locked,
             flashlight: self.flashlight,
+            drop_flare: self.flare_queued,
         };
         self.pending_dx = 0.0;
         self.pending_dy = 0.0;
+        self.flare_queued = false;
         frame
     }
 }

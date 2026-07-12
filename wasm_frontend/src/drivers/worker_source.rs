@@ -2,7 +2,7 @@
 //!
 //! Each worker (`static/worker.js`) is a second instance of this same wasm
 //! module running on its own OS thread. The main thread posts small
-//! `{gen, ox, oz, level, lod}` messages round-robin; workers run the full
+//! `{gen, requestId, ox, oz, level, lod, reality}` messages round-robin; workers run the full
 //! chunk pipeline (generation, BFS lighting, greedy mesh + face instances,
 //! SVO build/serialize, collision) and transfer one encoded byte buffer
 //! back (`adapters::chunk_codec`). No WebGL object ever leaves the main
@@ -20,9 +20,8 @@ use web_sys::{MessageEvent, Worker, WorkerOptions, WorkerType};
 
 use crate::adapters::chunk_codec::decode_chunk_payload;
 use crate::adapters::local_chunk_source::LocalChunkSource;
-use crate::application::ports::{
-    ChunkPayload, ChunkRequest, ChunkSourcePort, CompletedChunk,
-};
+use crate::application::ports::{ChunkPayload, ChunkRequest, ChunkSourcePort, CompletedChunk};
+use vackrooms::domain::entities::anomaly::RealitySnapshot;
 use vackrooms::frameworks_drivers::simple_noise::SimpleNoiseProvider;
 
 pub struct WorkerChunkSource {
@@ -97,6 +96,18 @@ impl ChunkSourcePort for WorkerChunkSource {
         self.fallback.load(origin_x, origin_z, level, lod)
     }
 
+    fn load_with_reality(
+        &self,
+        origin_x: f32,
+        origin_z: f32,
+        level: u32,
+        lod: u8,
+        reality: &RealitySnapshot,
+    ) -> ChunkPayload {
+        self.fallback
+            .load_with_reality(origin_x, origin_z, level, lod, reality)
+    }
+
     fn is_async(&self) -> bool {
         true
     }
@@ -107,10 +118,14 @@ impl ChunkSourcePort for WorkerChunkSource {
             let _ = Reflect::set(&message, &k.into(), &v);
         };
         set("type", "gen".into());
+        set("requestId", (request.request_id as f64).into());
         set("ox", (request.origin_x as f64).into());
         set("oz", (request.origin_z as f64).into());
         set("level", (request.level as f64).into());
         set("lod", (request.lod as f64).into());
+        let reality_words = request.reality.to_words();
+        let reality = js_sys::Uint32Array::from(reality_words.as_slice());
+        set("reality", reality.into());
         let worker = &self.workers[self.next_worker % self.workers.len()];
         self.next_worker = self.next_worker.wrapping_add(1);
         let _ = worker.post_message(&message);
@@ -131,10 +146,16 @@ fn parse_done_message(event: &MessageEvent) -> Option<CompletedChunk> {
         return None;
     }
     let request = ChunkRequest {
+        request_id: field("requestId")?.as_f64()? as u32,
         origin_x: field("ox")?.as_f64()? as f32,
         origin_z: field("oz")?.as_f64()? as f32,
         level: field("level")?.as_f64()? as u32,
         lod: field("lod")?.as_f64()? as u8,
+        reality: {
+            let encoded = field("reality")?;
+            let words = js_sys::Uint32Array::new(&encoded).to_vec();
+            RealitySnapshot::from_words(&words).ok()?
+        },
     };
     let buffer: ArrayBuffer = field("buf")?.dyn_into().ok()?;
     let bytes = Uint8Array::new(&buffer).to_vec();

@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
     <title>Vackrooms — WASM Voxel Engine</title>
     <!--
         Thin presentation shell. All engine logic — procedural generation,
@@ -43,17 +43,10 @@
             image-rendering: pixelated;
             touch-action: none;
         }
-        #minimap {
-            position: absolute;
-            top: 12px;
-            right: 12px;
-            border: 1px solid #4a4433;
-            opacity: 0.85;
-        }
         #hud {
             position: absolute;
-            bottom: 12px;
-            left: 12px;
+            bottom: calc(12px + env(safe-area-inset-bottom, 0px));
+            left: calc(12px + env(safe-area-inset-left, 0px));
             font-size: 13px;
             line-height: 1.6;
             background: rgba(0, 0, 0, 0.55);
@@ -62,10 +55,10 @@
             pointer-events: none;
         }
         #hud b { color: #fff3c4; }
+        #hud-dist { letter-spacing: 1px; }
 
         /* Small screens: shrink the chrome so the world stays visible. */
         @media (max-width: 700px) {
-            #minimap { width: 120px; height: 120px; top: 8px; right: 8px; }
             #hud { font-size: 11px; padding: 5px 8px; bottom: 8px; left: 8px; }
             #overlay h1 { font-size: 22px !important; }
         }
@@ -220,7 +213,9 @@
            active. Big hit targets, corners out of the joystick zones. */
         #touch-ui {
             display: none;
-            position: absolute; top: 10px; left: 10px;
+            position: absolute;
+            top: calc(10px + env(safe-area-inset-top, 0px));
+            left: calc(10px + env(safe-area-inset-left, 0px));
             gap: 10px; z-index: 5;
         }
         #touch-ui button {
@@ -229,6 +224,7 @@
             border: 1px solid #4a4433; border-radius: 8px;
             font-family: inherit; touch-action: none;
         }
+        #btn-flare { color: #ff9a55; }
         #touch-hint {
             position: absolute; bottom: 10px; width: 100%; text-align: center;
             font-size: 11px; color: rgba(216, 207, 159, 0.5); pointer-events: none;
@@ -237,9 +233,9 @@
 </head>
 <body>
     <canvas id="view"></canvas>
-    <canvas id="minimap" width="200" height="200"></canvas>
 
     <div id="hud">
+        DISTANCE <b id="hud-dist">0 m</b><br>
         Renderer <b id="hud-renderer">—</b><br>
         FPS <b id="hud-fps">—</b><br>
         Chunks <b id="hud-chunks">0</b><br>
@@ -252,6 +248,7 @@
     <div id="touch-ui">
         <button id="btn-menu" aria-label="Menu">&#9776;</button>
         <button id="btn-flashlight" aria-label="Flashlight">&#128294;</button>
+        <button id="btn-flare" aria-label="Drop flare">&#128293;</button>
         <div id="touch-hint">left: move &middot; right: look</div>
     </div>
 
@@ -259,8 +256,8 @@
         <h1>VACKROOMS</h1>
         <p id="status-msg">Generating world in WebAssembly&hellip;</p>
         <p id="play-msg">
-            Click to enter &mdash; WASD move &middot; mouse look &middot; F flashlight &middot; ESC release<br>
-            <span style="color:#9a916c">Touch: tap to enter &mdash; left thumb move &middot; right thumb look</span>
+            Click to enter &mdash; WASD move &middot; mouse look &middot; F flashlight &middot; G drop flare &middot; ESC release<br>
+            <span style="color:#9a916c">Touch: tap to enter &mdash; left thumb move &middot; right thumb look &middot; &#128293; drop flare</span>
         </p>
         <button id="settings-btn" style="display: none;">Settings</button>
     </div>

@@ -6,10 +6,11 @@
 //
 // Protocol (main -> worker):
 //   { type: "init", query, seed }        one-time generator setup
-//   { type: "gen", ox, oz, level, lod }  one chunk order
+//   { type: "gen", requestId, ox, oz, level, lod, reality } one chunk order;
+//                                                        reality is Uint32Array
 // (worker -> main):
-//   { type: "done", ox, oz, level, lod, ms, buf }  buf transferred, encoded
-//                                                  by adapters::chunk_codec
+//   { type: "done", requestId, ox, oz, level, lod, reality, ms, buf }
+//                                   buf transferred, encoded by chunk_codec
 import init, { worker_init, worker_generate } from "./pkg/wasm_frontend.js";
 
 let wasmReady = null;
@@ -27,13 +28,31 @@ onmessage = (event) => {
       worker_init(m.query, m.seed >>> 0);
     } else if (m.type === "gen") {
       const t0 = performance.now();
-      const bytes = worker_generate(m.ox, m.oz, m.level, m.lod);
+      const reality = new Uint32Array(m.reality);
+      const bytes = worker_generate(
+        m.requestId >>> 0,
+        m.ox,
+        m.oz,
+        m.level,
+        m.lod,
+        reality
+      );
       const ms = performance.now() - t0;
       console.debug(
         `[WORKER] chunk (${m.ox}, ${m.oz}) lod ${m.lod} generated in ${ms.toFixed(1)} ms`
       );
       postMessage(
-        { type: "done", ox: m.ox, oz: m.oz, level: m.level, lod: m.lod, ms, buf: bytes.buffer },
+        {
+          type: "done",
+          requestId: m.requestId,
+          ox: m.ox,
+          oz: m.oz,
+          level: m.level,
+          lod: m.lod,
+          reality,
+          ms,
+          buf: bytes.buffer,
+        },
         [bytes.buffer]
       );
     }

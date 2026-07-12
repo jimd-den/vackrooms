@@ -550,6 +550,11 @@ uniform sampler2D uShadowMap;
 uniform mat4 uLightViewProjection;
 uniform int uShadowedLightIndex;
 
+// Dropped-flare cores: xyz = world position, w = intensity (pre-flickered).
+uniform int uCoreCount;
+uniform vec4 uCores[4];
+uniform vec3 uCoreColors[4];
+
 out vec4 fragColor;
 
 vec3 materialColor(float material) {
@@ -561,7 +566,14 @@ vec3 materialColor(float material) {
     if (material < 6.5) return vec3(0.31, 0.60, 0.24); // grass
     if (material < 7.5) return vec3(0.18, 0.42, 0.72); // water
     if (material < 8.5) return vec3(0.42, 0.29, 0.18); // tree
-    return vec3(1.0, 0.16, 0.10);                      // red light
+    if (material < 9.5) return vec3(1.00, 0.27, 0.20);  // red light
+    if (material < 10.5) return vec3(0.85, 0.82, 0.75); // pale arch wall
+    if (material < 11.5) return vec3(0.54, 0.50, 0.36); // rough damaged wall
+    if (material < 12.5) return vec3(0.76, 0.72, 0.42); // dry shallow carpet
+    if (material < 13.5) return vec3(0.42, 0.37, 0.13); // deep wet carpet
+    if (material < 14.5) return vec3(0.48, 0.29, 0.15); // sticky red carpet
+    if (material < 15.5) return vec3(0.18, 0.16, 0.13); // dark pooled fluid
+    return vec3(0.62, 0.77, 0.91);                      // cool glimmer
 }
 
 float pcf4(sampler2D shadowMap, vec2 uv, float compareDepth) {
@@ -607,7 +619,8 @@ float shadowVisibility(vec3 worldPos, vec3 normal, vec3 lightDir, vec2 halfSize)
 }
 
 bool emissive(float material) {
-    return abs(material - 4.0) < 0.1 || abs(material - 9.0) < 0.1;
+    return abs(material - 4.0) < 0.1 || abs(material - 9.0) < 0.1
+        || abs(material - 16.0) < 0.1;
 }
 
 float hash3D(vec3 p) {
@@ -814,6 +827,23 @@ void main() {
     // Add a subtle ambient glow to the near-field (so it isn't completely dry and flat up close)
     color += glow * 0.12 * exp(-distanceToCamera * 0.05);
 
+    // Flare cores: small additive glow sprites, occluded by any surface
+    // nearer than the flare along this fragment's view ray — no x-ray dots.
+    {
+        vec3 toFrag = vWorldPosition - uCameraPosition;
+        float fragDist = length(toFrag);
+        vec3 rd = toFrag / max(fragDist, 1e-4);
+        for (int i = 0; i < uCoreCount; i++) {
+            vec3 toLight = uCores[i].xyz - uCameraPosition;
+            float along = dot(toLight, rd);
+            if (along <= 0.05 || along >= fragDist) continue;
+            float perp = length(toLight - rd * along);
+            float coreSize = 0.06 + along * 0.004;
+            float core = 1.0 - smoothstep(coreSize * 0.4, coreSize, perp);
+            color += uCoreColors[i] * uCores[i].w * core * 1.4;
+        }
+    }
+
     // Simple tone mapping and gamma
     color = color / (color + vec3(1.0));
     color = pow(color, vec3(1.0 / 2.2));
@@ -891,7 +921,14 @@ vec3 materialColor(float material) {
     if (material < 6.5) return vec3(0.31, 0.60, 0.24); // grass
     if (material < 7.5) return vec3(0.18, 0.42, 0.72); // water
     if (material < 8.5) return vec3(0.42, 0.29, 0.18); // tree
-    return vec3(1.0, 0.16, 0.10);                      // red light
+    if (material < 9.5) return vec3(1.00, 0.27, 0.20);  // red light
+    if (material < 10.5) return vec3(0.85, 0.82, 0.75); // pale arch wall
+    if (material < 11.5) return vec3(0.54, 0.50, 0.36); // rough damaged wall
+    if (material < 12.5) return vec3(0.76, 0.72, 0.42); // dry shallow carpet
+    if (material < 13.5) return vec3(0.42, 0.37, 0.13); // deep wet carpet
+    if (material < 14.5) return vec3(0.48, 0.29, 0.15); // sticky red carpet
+    if (material < 15.5) return vec3(0.18, 0.16, 0.13); // dark pooled fluid
+    return vec3(0.62, 0.77, 0.91);                      // cool glimmer
 }
 
 float hash3D(vec3 p) {
@@ -1060,6 +1097,11 @@ flat in float vBeamPattern;
 uniform vec3 uCameraPosition;
 uniform float uVoxelScale;
 
+// Dropped-flare cores: xyz = world position, w = intensity (pre-flickered).
+uniform int uCoreCount;
+uniform vec4 uCores[4];
+uniform vec3 uCoreColors[4];
+
 out vec4 fragColor;
 
 float hash3D(vec3 p) {
@@ -1114,6 +1156,22 @@ void main() {
     float farFade = smoothstep(28.0, 48.0, distanceToCamera);
     vec3 currentFogColor = mix(heightFogColor, vec3(0.0), farFade);
     color = mix(color, currentFogColor, clamp(fogAmount, 0.0, 1.0));
+
+    // Flare cores (see the surface shader for the occlusion rule).
+    {
+        vec3 toFrag = vWorldPos - uCameraPosition;
+        float fragDist = length(toFrag);
+        vec3 rd = toFrag / max(fragDist, 1e-4);
+        for (int i = 0; i < uCoreCount; i++) {
+            vec3 toLight = uCores[i].xyz - uCameraPosition;
+            float along = dot(toLight, rd);
+            if (along <= 0.05 || along >= fragDist) continue;
+            float perp = length(toLight - rd * along);
+            float coreSize = 0.06 + along * 0.004;
+            float core = 1.0 - smoothstep(coreSize * 0.4, coreSize, perp);
+            color += uCoreColors[i] * uCores[i].w * core * 1.4;
+        }
+    }
 
     color = color / (color + vec3(1.0));
     color = pow(color, vec3(1.0 / 2.2));

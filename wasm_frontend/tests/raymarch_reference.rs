@@ -284,11 +284,12 @@ fn multi_chunk_raymarch_reports_no_phantom_geometry() {
     for dz in -2..=2 {
         for dx in -2..=2 {
             let (ox, oz) = (dx as f32 * 10.0, dz as f32 * 10.0);
-            chunks.push(LoadedChunk {
-                origin: (ox, oz),
-                lod: 0,
-                payload: source.load(ox, oz, 0, 0),
-            });
+            chunks.push(LoadedChunk::new(
+                (ox, oz),
+                0,
+                vackrooms::domain::entities::anomaly::RealitySnapshot::empty(),
+                source.load(ox, oz, 0, 0),
+            ));
         }
     }
     let build = build_atlas(&chunks);
@@ -368,11 +369,12 @@ fn pitched_rays_never_escape_through_cracks() {
     for dz in -1..=1 {
         for dx in -1..=1 {
             let (ox, oz) = (dx as f32 * 10.0, dz as f32 * 10.0);
-            chunks.push(LoadedChunk {
-                origin: (ox, oz),
-                lod: 0,
-                payload: source.load(ox, oz, 0, 0),
-            });
+            chunks.push(LoadedChunk::new(
+                (ox, oz),
+                0,
+                vackrooms::domain::entities::anomaly::RealitySnapshot::empty(),
+                source.load(ox, oz, 0, 0),
+            ));
         }
     }
     let build = build_atlas(&chunks);

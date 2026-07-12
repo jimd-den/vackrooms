@@ -19,8 +19,10 @@
 //! All coordinates are snapped to a 0.4 u lattice — the coarsest voxel size —
 //! so plan geometry lands identically at every LOD.
 
+use crate::domain::entities::anomaly::AnomalyKind;
 use crate::domain::entities::architecture::*;
 use crate::entities::models::Position;
+use crate::use_cases::anomaly_plan::plan_anomalies_for_region;
 use crate::use_cases::generate_chunk::GeneratorConfig;
 use crate::use_cases::ports::NoiseProvider;
 
@@ -83,6 +85,19 @@ fn pick_index(h: f32, len: usize) -> usize {
 fn v_edge_portal_z(seed: u32, ex: i64, rz: i64) -> f32 {
     let f = 0.30 + 0.40 * hash01(seed, &[0x0E1, ex, rz]);
     snap((rz as f32 + f) * REGION_SIZE)
+}
+
+/// World spawn: a point *on the main corridor centerline* of region (0, 0),
+/// a few units east of its west portal. The first thing the player sees is
+/// therefore the region's dominant circulation route — walls running away in
+/// both directions — rather than unplanned fabric. Both the generator core
+/// and the browser composition root derive spawn from this single function,
+/// so the player and the voxelizer can never disagree about where "here" is.
+pub fn spawn_point(seed: u32) -> Position {
+    // The main spine's west leg always runs from (0, west_z) to at least
+    // x = 0.35 * REGION_SIZE, so a few units in we are guaranteed to stand
+    // on a straight, readable stretch of corridor.
+    Position::new(6.0, v_edge_portal_z(seed, 0, 0))
 }
 
 // ---------------------------------------------------------------------------
@@ -557,7 +572,7 @@ pub fn generate_region_plan(
     seed: u32,
     region_origin: Position,
     region_size: f32,
-    _config: &GeneratorConfig,
+    config: &GeneratorConfig,
     noise: &dyn NoiseProvider,
 ) -> RegionPlan {
     let rx = region_index(region_origin.x + 0.1);
@@ -640,9 +655,22 @@ pub fn generate_region_plan(
         rx,
         rz,
         &dominant,
+        config.anomalies.frequency * config.anomalies.red_rooms,
         &mut assemblies,
         &mut taken,
         &corridors,
+    );
+
+    // Macro anomalies are derived after ordinary architecture so compact red
+    // rooms can promote a real assembly, while region-spanning families keep
+    // stable world-lattice identities independent of this region query.
+    let anomalies = plan_anomalies_for_region(
+        seed,
+        region_origin,
+        region_size,
+        &assemblies,
+        spawn_point(seed),
+        config,
     );
 
     RegionPlan {
@@ -651,6 +679,7 @@ pub fn generate_region_plan(
         architects,
         assemblies,
         corridors,
+        anomalies,
     }
 }
 
@@ -660,6 +689,7 @@ fn corrupt(
     rx: i64,
     rz: i64,
     dominant: &ArchitectGenome,
+    red_room_scale: f32,
     assemblies: &mut Vec<AssemblyInstance>,
     taken: &mut Vec<(f32, f32, f32, f32)>,
     spines: &[CirculationSpine],
@@ -736,14 +766,27 @@ fn corrupt(
         let k = pick_index(h(8), assemblies.len());
         assemblies[k].corruption.renovation_overlay = true;
     }
+
+    // 4. Rarely, one occupied room's fixtures all burn red. The lighting is
+    // the anomaly, and it belongs to a whole architectural space — never a
+    // lone fixture, never red masonry. Applied last so it respects whatever
+    // the earlier corruption passes decided (an abandoned shell stays dark).
+    if h(10) < (0.22 * red_room_scale.clamp(0.0, 4.0)).min(0.88) {
+        let k = pick_index(h(11), assemblies.len());
+        let a = &mut assemblies[k];
+        if !a.corruption.abandoned {
+            a.corruption.red_room = true;
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
 // Debug hook.
 // ---------------------------------------------------------------------------
 
-/// ASCII plan view at `step` world units per character. Corridors `=`,
-/// assembly interiors by program initial, entrances `+`, empty fabric `.`.
+/// ASCII plan view at `step` world units per character. Corridors `=`, macro
+/// anomalies `P/B/H` (pillar/blackout/pits), red loops `R`, assembly interiors
+/// by program initial, entrances `+`, empty fabric `.`.
 pub fn debug_region_ascii(plan: &RegionPlan, step: f32) -> String {
     let n = (plan.size_world / step) as usize;
     let mut out = String::with_capacity((n + 1) * n);
@@ -765,6 +808,17 @@ pub fn debug_region_ascii(plan: &RegionPlan, step: f32) -> String {
                         SpaceProgram::AbandonedExpansion => 'x',
                         SpaceProgram::Atrium => 'A',
                         _ => 'r',
+                    };
+                }
+            }
+            for anomaly in &plan.anomalies {
+                if anomaly.contains(x, z) {
+                    ch = match anomaly.kind {
+                        AnomalyKind::PillarExpanse => 'P',
+                        AnomalyKind::BlackoutExpanse => 'B',
+                        AnomalyKind::PitLattice => 'H',
+                        AnomalyKind::RedRoom => 'R',
+                        AnomalyKind::ArchwayRoom => 'M',
                     };
                 }
             }

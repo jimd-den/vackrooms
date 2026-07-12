@@ -10,6 +10,8 @@ use std::collections::HashMap;
 
 use crate::application::collision::Aabb;
 use crate::application::ports::ChunkPayload;
+use vackrooms::domain::entities::anomaly::RealitySnapshot;
+use vackrooms::domain::entities::anomaly::{PitHazard, TraversalGate};
 
 /// Integer key for a chunk, quantized from its world origin.
 /// Origins are always integer multiples of `chunk_size`, so rounding to
@@ -67,7 +69,35 @@ impl StreamingPolicy {
 pub struct LoadedChunk {
     pub origin: (f32, f32),
     pub lod: u8,
+    /// Exact immutable encounter state from which every payload view
+    /// (collision, SVO, mesh and lighting) was derived.
+    pub reality: RealitySnapshot,
+    /// Cached identity for diagnostics and fast rejection paths. Exact
+    /// equality still uses `reality`, so a hash collision cannot mix worlds.
+    pub reality_fingerprint: u64,
     pub payload: ChunkPayload,
+}
+
+impl LoadedChunk {
+    pub fn new(
+        origin: (f32, f32),
+        lod: u8,
+        reality: RealitySnapshot,
+        payload: ChunkPayload,
+    ) -> Self {
+        let reality_fingerprint = reality.fingerprint();
+        Self {
+            origin,
+            lod,
+            reality,
+            reality_fingerprint,
+            payload,
+        }
+    }
+
+    pub fn is_in_reality(&self, reality: &RealitySnapshot) -> bool {
+        self.reality_fingerprint == reality.fingerprint() && &self.reality == reality
+    }
 }
 
 /// Keyed store of resident chunks. Iteration order is the insertion order of
@@ -126,6 +156,16 @@ impl ChunkStore {
     pub fn all_collision_boxes(&self) -> impl Iterator<Item = &Aabb> {
         self.iter_ordered().flat_map(|c| c.payload.collision.iter())
     }
+
+    pub fn all_traversal_gates(&self) -> impl Iterator<Item = &TraversalGate> {
+        self.iter_ordered()
+            .flat_map(|c| c.payload.traversal_gates.iter())
+    }
+
+    pub fn all_pit_hazards(&self) -> impl Iterator<Item = &PitHazard> {
+        self.iter_ordered()
+            .flat_map(|c| c.payload.pit_hazards.iter())
+    }
 }
 
 #[cfg(test)]
@@ -165,22 +205,16 @@ mod tests {
             world_size: 10.0,
             surface: crate::application::ports::SurfaceMeshPayload::empty(0),
             collision: vec![],
+            traversal_gates: vec![],
+            pit_hazards: vec![],
         };
         store.insert(
             chunk_key(0.0, 0.0),
-            LoadedChunk {
-                origin: (0.0, 0.0),
-                lod: 0,
-                payload: payload.clone(),
-            },
+            LoadedChunk::new((0.0, 0.0), 0, RealitySnapshot::default(), payload.clone()),
         );
         store.insert(
             chunk_key(10.0, 0.0),
-            LoadedChunk {
-                origin: (10.0, 0.0),
-                lod: 0,
-                payload,
-            },
+            LoadedChunk::new((10.0, 0.0), 0, RealitySnapshot::default(), payload),
         );
         assert_eq!(store.len(), 2);
         assert!(store.retain_keys(&[chunk_key(0.0, 0.0)]));

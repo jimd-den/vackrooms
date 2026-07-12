@@ -1,5 +1,5 @@
 //! Browser runtime driver: DOM/event plumbing, the requestAnimationFrame
-//! loop, pointer lock, the HUD and the 2D minimap.
+//! loop, pointer lock and the HUD.
 //!
 //! This module is the composition root's workhorse: it instantiates the
 //! concrete adapters/drivers, hands them to `application::engine::Engine`,
@@ -11,8 +11,7 @@ use std::rc::Rc;
 use wasm_bindgen::JsCast;
 use wasm_bindgen::prelude::*;
 use web_sys::{
-    CanvasRenderingContext2d, Document, HtmlCanvasElement, HtmlElement, KeyboardEvent, MouseEvent,
-    TouchEvent, Window,
+    Document, HtmlCanvasElement, HtmlElement, KeyboardEvent, MouseEvent, TouchEvent, Window,
 };
 
 use vackrooms::frameworks_drivers::simple_noise::SimpleNoiseProvider;
@@ -39,8 +38,6 @@ const JOYSTICK_RADIUS: f64 = 60.0;
 const TOUCH_LOOK_SCALE: f32 = 2.2;
 /// HUD refresh cadence in frames.
 const HUD_INTERVAL: u32 = 30;
-/// Minimap pixels per world unit.
-const MINIMAP_SCALE: f64 = 12.0;
 
 /// The default renderer is indexed greedy surfaces. The old SVO raymarcher
 /// remains available only as `?renderer=raymarch` for visual/reference
@@ -68,9 +65,9 @@ impl DriverRenderer {
     /// lets CSS upscale with `image-rendering: pixelated`.
     fn resolution_factor(&self) -> f64 {
         match self {
-            DriverRenderer::Surface(_)
-            | DriverRenderer::Splat(_)
-            | DriverRenderer::Raymarch(_) => 1.0,
+            DriverRenderer::Surface(_) | DriverRenderer::Splat(_) | DriverRenderer::Raymarch(_) => {
+                1.0
+            }
             DriverRenderer::Cpu(_) => 0.25,
         }
     }
@@ -250,9 +247,8 @@ pub fn boot() -> Result<(), JsValue> {
         .document()
         .ok_or_else(|| JsValue::from_str("no document"))?;
 
-    let canvas: HtmlCanvasElement = element(&document, "view")
-        .or_else(|_| element(&document, "game-canvas"))?;
-    let minimap: HtmlCanvasElement = element(&document, "minimap")?;
+    let canvas: HtmlCanvasElement =
+        element(&document, "view").or_else(|_| element(&document, "game-canvas"))?;
     let overlay: HtmlElement = element(&document, "overlay")?;
     let status_msg: HtmlElement = element(&document, "status-msg")?;
     let play_msg: HtmlElement = element(&document, "play-msg")?;
@@ -265,13 +261,23 @@ pub fn boot() -> Result<(), JsValue> {
     web_sys::console::log_1(&format!("BOOTING ENGINE: query={}", query).into());
     let gen_params = parse_generation_params(&query, WORLD_SEED);
     let high_spec = query.contains("spec=high");
+    // Spawn on the main corridor of region (0,0), looking east down its
+    // west leg: the first frame is a lit, walled corridor receding into
+    // fog — the player knows immediately that this is the Backrooms.
+    let spawn_at = vackrooms::use_cases::region_plan::spawn_point(gen_params.seed);
+    let spawn = [spawn_at.x, 1.7, spawn_at.z];
+    let spawn_yaw = -std::f32::consts::FRAC_PI_2; // face +X
     let (generator_config, engine_config) = if high_spec {
         (
-            GeneratorConfig::high_spec().with_tuning(gen_params.tuning),
+            GeneratorConfig::high_spec()
+                .with_tuning(gen_params.tuning)
+                .with_anomalies(gen_params.anomalies),
             EngineConfig {
                 chunk_size: 20.0,
                 chunk_radius: 2,
                 seed: gen_params.seed,
+                spawn,
+                spawn_yaw,
                 // 5x5 footprint: the outer ring (>= 20 units away) stays at
                 // the coarse LOD, so high spec pays for ~9 fine chunks, not 25.
                 fine_distance: 25.0,
@@ -280,9 +286,13 @@ pub fn boot() -> Result<(), JsValue> {
         )
     } else {
         (
-            GeneratorConfig::low_spec().with_tuning(gen_params.tuning),
+            GeneratorConfig::low_spec()
+                .with_tuning(gen_params.tuning)
+                .with_anomalies(gen_params.anomalies),
             EngineConfig {
                 seed: gen_params.seed,
+                spawn,
+                spawn_yaw,
                 ..EngineConfig::default()
             },
         )
@@ -295,7 +305,8 @@ pub fn boot() -> Result<(), JsValue> {
     // Chunk generation runs on a Web Worker pool so crossing a streaming
     // boundary never stalls the frame loop. `?workers=0` forces the old
     // synchronous in-thread source (also the fallback if workers fail).
-    let source: Box<dyn crate::application::ports::ChunkSourcePort> = if query.contains("workers=0") {
+    let source: Box<dyn crate::application::ports::ChunkSourcePort> = if query.contains("workers=0")
+    {
         Box::new(LocalChunkSource::with_telemetry(
             SimpleNoiseProvider::new(),
             gen_params.seed,
@@ -336,13 +347,17 @@ pub fn boot() -> Result<(), JsValue> {
 
     let is_capture = query.contains("capture=1");
     if is_capture {
-        let mut cam_pos = [5.0, 1.7, 5.0];
+        let mut cam_pos = spawn;
         if let Some(pos_idx) = query.find("camera=") {
             let s = &query[pos_idx + 7..];
             let end = s.find('&').unwrap_or(s.len());
             let parts: Vec<&str> = s[..end].split(',').collect();
             if parts.len() == 3 {
-                if let (Ok(x), Ok(y), Ok(z)) = (parts[0].parse::<f32>(), parts[1].parse::<f32>(), parts[2].parse::<f32>()) {
+                if let (Ok(x), Ok(y), Ok(z)) = (
+                    parts[0].parse::<f32>(),
+                    parts[1].parse::<f32>(),
+                    parts[2].parse::<f32>(),
+                ) {
                     cam_pos = [x, y, z];
                 }
             }
@@ -363,7 +378,9 @@ pub fn boot() -> Result<(), JsValue> {
                 pitch_val = p;
             }
         }
-        engine.borrow_mut().teleport_player(cam_pos, yaw_val, pitch_val);
+        engine
+            .borrow_mut()
+            .teleport_player(cam_pos, yaw_val, pitch_val);
     }
 
     if !is_capture {
@@ -371,7 +388,7 @@ pub fn boot() -> Result<(), JsValue> {
         attach_touch_listeners(&document, &canvas, &overlay, &input, &touch)?;
     }
     run_frame_loop(
-        window, document, canvas, minimap, overlay, status_msg, play_msg, renderer, engine, input,
+        window, document, canvas, overlay, status_msg, play_msg, renderer, engine, input,
     )
 }
 
@@ -588,6 +605,17 @@ fn attach_touch_listeners(
     }
 
     // On-screen buttons (optional elements; the page may omit them).
+    if let Ok(btn) = element::<HtmlElement>(document, "btn-flare") {
+        let input = input.clone();
+        let closure = Closure::<dyn FnMut(web_sys::Event)>::new(move |e: web_sys::Event| {
+            e.prevent_default();
+            e.stop_propagation();
+            input.borrow_mut().queue_flare();
+        });
+        btn.add_event_listener_with_callback("touchend", closure.as_ref().unchecked_ref())?;
+        btn.add_event_listener_with_callback("click", closure.as_ref().unchecked_ref())?;
+        closure.forget();
+    }
     if let Ok(btn) = element::<HtmlElement>(document, "btn-flashlight") {
         let input = input.clone();
         let closure = Closure::<dyn FnMut(web_sys::Event)>::new(move |e: web_sys::Event| {
@@ -619,7 +647,6 @@ fn run_frame_loop(
     window: Window,
     _document: Document,
     canvas: HtmlCanvasElement,
-    minimap: HtmlCanvasElement,
     _overlay: HtmlElement,
     status_msg: HtmlElement,
     play_msg: HtmlElement,
@@ -627,16 +654,14 @@ fn run_frame_loop(
     engine: Rc<RefCell<Engine>>,
     input: Rc<RefCell<InputCollector>>,
 ) -> Result<(), JsValue> {
-    let minimap_ctx: CanvasRenderingContext2d = minimap
-        .get_context("2d")?
-        .ok_or_else(|| JsValue::from_str("no 2d context for minimap"))?
-        .dyn_into()?;
-
     let hud_fps: HtmlElement = element(window.document().as_ref().unwrap(), "hud-fps")?;
     let hud_chunks: HtmlElement = element(window.document().as_ref().unwrap(), "hud-chunks")?;
     let hud_nodes: HtmlElement = element(window.document().as_ref().unwrap(), "hud-nodes")?;
     let hud_scale: HtmlElement = element(window.document().as_ref().unwrap(), "hud-scale")?;
     let hud_gpu: HtmlElement = element(window.document().as_ref().unwrap(), "hud-gpu")?;
+    let hud_dist: Option<HtmlElement> =
+        element(window.document().as_ref().unwrap(), "hud-dist").ok();
+    let last_dist_text = Rc::new(RefCell::new(String::new()));
 
     let query = window.location().search().unwrap_or_default();
     let is_capture = query.contains("capture=1");
@@ -692,7 +717,9 @@ fn run_frame_loop(
             if matches!(*renderer.borrow(), DriverRenderer::Cpu(_)) {
                 let max_w = 480.0;
                 let max_h = 270.0;
-                let cap_scale = (max_w / target_w as f32).min(max_h as f32 / target_h as f32).min(1.0);
+                let cap_scale = (max_w / target_w as f32)
+                    .min(max_h as f32 / target_h as f32)
+                    .min(1.0);
                 target_w = (target_w as f32 * cap_scale).round() as u32;
                 target_h = (target_h as f32 * cap_scale).round() as u32;
             }
@@ -715,13 +742,6 @@ fn run_frame_loop(
             let _ = play_msg.style().set_property("display", "block");
         }
 
-        // The minimap is a pure convenience display: redrawing its dozens of
-        // fill_rects every frame costs real CPU on low-end machines, so it
-        // refreshes at a third of the frame rate.
-        if frame_count.get() % 3 == 0 {
-            draw_minimap(&minimap_ctx, &minimap, &engine.borrow());
-        }
-
         // HUD refresh at a fixed frame cadence.
         frame_count.set(frame_count.get() + 1);
         if frame_count.get() % HUD_INTERVAL == 0 {
@@ -737,6 +757,15 @@ fn run_frame_loop(
             )));
             hud_nodes.set_text_content(Some(&stats.atlas_nodes.to_string()));
             hud_scale.set_text_content(Some(&format!("{:.0}%", stats.resolution_scale * 100.0)));
+            if let Some(hud_dist) = &hud_dist {
+                // Restrained rounding, and only touch the DOM on change.
+                let text = format!("{:.0} m", stats.distance_m);
+                let mut last = last_dist_text.borrow_mut();
+                if *last != text {
+                    hud_dist.set_text_content(Some(&text));
+                    *last = text;
+                }
+            }
             let gpu = renderer.borrow().gpu_frame_ms();
             let cpu_telemetry = renderer.borrow().cpu_telemetry_string();
             if let Some(text) = cpu_telemetry {
@@ -799,51 +828,4 @@ fn run_frame_loop(
     // Keep the closure (and everything it captures) alive forever.
     std::mem::forget(raf_handle);
     Ok(())
-}
-
-/// Top-down radar: solid collision boxes around the player, plus a player
-/// dot and view direction line. Pure presentation — reads engine state only.
-fn draw_minimap(ctx: &CanvasRenderingContext2d, canvas: &HtmlCanvasElement, engine: &Engine) {
-    let w = canvas.width() as f64;
-    let h = canvas.height() as f64;
-    let cx = w / 2.0;
-    let cy = h / 2.0;
-    let player = engine.player();
-
-    ctx.clear_rect(0.0, 0.0, w, h);
-    ctx.set_fill_style_str("rgba(0, 0, 0, 0.5)");
-    ctx.fill_rect(0.0, 0.0, w, h);
-
-    ctx.set_fill_style_str("#ff5555");
-    let range = (w / 2.0) / MINIMAP_SCALE + 1.0;
-    for b in engine.collision_world().boxes() {
-        let rel_x = (b.min[0] - player.position[0]) as f64;
-        let rel_z = (b.min[2] - player.position[2]) as f64;
-        if rel_x.abs() > range || rel_z.abs() > range {
-            continue;
-        }
-        let size_x = (b.max[0] - b.min[0]) as f64 * MINIMAP_SCALE;
-        let size_z = (b.max[2] - b.min[2]) as f64 * MINIMAP_SCALE;
-        ctx.fill_rect(
-            cx + rel_x * MINIMAP_SCALE,
-            cy + rel_z * MINIMAP_SCALE,
-            size_x.max(1.0),
-            size_z.max(1.0),
-        );
-    }
-
-    // Player dot.
-    ctx.set_fill_style_str("#00ff00");
-    ctx.begin_path();
-    let _ = ctx.arc(cx, cy, 4.0, 0.0, std::f64::consts::TAU);
-    ctx.fill();
-
-    // View direction.
-    ctx.set_stroke_style_str("#00ff00");
-    ctx.set_line_width(2.0);
-    ctx.begin_path();
-    ctx.move_to(cx, cy);
-    let yaw = player.yaw as f64;
-    ctx.line_to(cx + yaw.sin() * -14.0, cy + yaw.cos() * -14.0);
-    ctx.stroke();
 }

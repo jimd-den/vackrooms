@@ -1,6 +1,8 @@
 use crate::domain::entities::voxel_grid::{
-    VOXEL_AIR, VOXEL_CEILING, VOXEL_FLOOR, VOXEL_GRASS, VOXEL_LIGHT, VOXEL_RED_LIGHT,
-    VOXEL_RED_WALL, VOXEL_TREE, VOXEL_WALL, VOXEL_WATER, VoxelGrid,
+    MATERIAL_COLORS, VOXEL_AIR, VOXEL_CEILING, VOXEL_DAMAGED_WALL, VOXEL_DEEP_CARPET,
+    VOXEL_DRY_CARPET, VOXEL_FLOOR, VOXEL_FLUID, VOXEL_GLIMMER, VOXEL_GRASS, VOXEL_LIGHT,
+    VOXEL_PALE_WALL, VOXEL_RED_LIGHT, VOXEL_RED_WALL, VOXEL_STICKY_CARPET, VOXEL_TREE, VOXEL_WALL,
+    VOXEL_WATER, VoxelGrid,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -14,6 +16,13 @@ pub enum VoxelType {
     Water,
     Tree,
     RedLight,
+    PaleWall,
+    DamagedWall,
+    DryCarpet,
+    DeepCarpet,
+    StickyCarpet,
+    Fluid,
+    Glimmer,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -292,23 +301,23 @@ impl VoxelMapper {
             VOXEL_GRASS => VoxelType::Grass,
             VOXEL_WATER => VoxelType::Water,
             VOXEL_TREE => VoxelType::Tree,
+            VOXEL_PALE_WALL => VoxelType::PaleWall,
+            VOXEL_DAMAGED_WALL => VoxelType::DamagedWall,
+            VOXEL_DRY_CARPET => VoxelType::DryCarpet,
+            VOXEL_DEEP_CARPET => VoxelType::DeepCarpet,
+            VOXEL_STICKY_CARPET => VoxelType::StickyCarpet,
+            VOXEL_FLUID => VoxelType::Fluid,
+            VOXEL_GLIMMER => VoxelType::Glimmer,
             _ => VoxelType::Wall,
         }
     }
 
     fn material_color(voxel: u8) -> u32 {
-        match voxel {
-            VOXEL_WALL => 0xDDCC66,
-            VOXEL_FLOOR => 0x998811,
-            VOXEL_CEILING => 0xCCCCCC,
-            VOXEL_LIGHT => 0xFFF8D6,
-            VOXEL_RED_LIGHT => 0xFF4433,
-            VOXEL_RED_WALL => 0x880000,
-            VOXEL_GRASS => 0x4F9A3D,
-            VOXEL_WATER => 0x3A6FB8,
-            VOXEL_TREE => 0x6B4A2F,
-            _ => 0x000000,
-        }
+        // Single authority: the palette table beside the material ids.
+        MATERIAL_COLORS
+            .get(voxel as usize)
+            .copied()
+            .unwrap_or(0x000000)
     }
 
     /// Helper that performs 2D greedy meshing on a slice.

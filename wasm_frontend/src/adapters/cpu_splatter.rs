@@ -384,6 +384,10 @@ struct Camera {
     half_w: f32,
     half_h: f32,
     flashlight: bool,
+    /// Per-frame dynamic lights (flares), pre-flickered by the engine.
+    dynamic_lights: [crate::application::ports::DynamicLight;
+        crate::application::ports::MAX_DYNAMIC_LIGHTS],
+    dynamic_light_count: usize,
 }
 
 impl Camera {
@@ -399,6 +403,8 @@ impl Camera {
             half_w: width as f32 / 2.0,
             half_h: height as f32 / 2.0,
             flashlight: frame.flashlight,
+            dynamic_lights: frame.dynamic_lights,
+            dynamic_light_count: frame.dynamic_light_count as usize,
         }
     }
 }
@@ -614,21 +620,40 @@ impl SoftwareRasterizer {
             }
         }
 
+        // Dynamic lights (flares): warm local point lights with quadratic
+        // falloff. No occlusion test — the CPU path has no ray budget for it
+        // — but the small radius keeps light from reading through far walls.
+        let mut dynamic_color = [0.0f32; 3];
+        for light in &cam.dynamic_lights[..cam.dynamic_light_count] {
+            let lx = light.position[0] - center[0];
+            let ly = light.position[1] - center[1];
+            let lz = light.position[2] - center[2];
+            let d2 = lx * lx + ly * ly + lz * lz;
+            let r2 = light.radius * light.radius;
+            if d2 >= r2 {
+                continue;
+            }
+            let atten = (1.0 - d2 / r2).powi(2) * light.intensity;
+            dynamic_color[0] += light.color[0] * atten;
+            dynamic_color[1] += light.color[1] * atten;
+            dynamic_color[2] += light.color[2] * atten;
+        }
+
         // Apply lighting to base color
         let final_r = if is_emissive {
             base_color[0] * 1.5
         } else {
-            base_color[0] * (ambient[0] + flashlight_color[0])
+            base_color[0] * (ambient[0] + flashlight_color[0] + dynamic_color[0])
         };
         let final_g = if is_emissive {
             base_color[1] * 1.5
         } else {
-            base_color[1] * (ambient[1] + flashlight_color[1])
+            base_color[1] * (ambient[1] + flashlight_color[1] + dynamic_color[1])
         };
         let final_b = if is_emissive {
             base_color[2] * 1.5
         } else {
-            base_color[2] * (ambient[2] + flashlight_color[2])
+            base_color[2] * (ambient[2] + flashlight_color[2] + dynamic_color[2])
         };
 
         // Exponential fog blending
@@ -1122,6 +1147,34 @@ impl RendererPort for SoftwareRasterizer {
             );
         }
 
+        // Flare cores: one small depth-tested splat per dynamic light, so
+        // the ember is visible exactly when its cell is (walls occlude it
+        // through the ordinary z-buffer, no x-ray dots).
+        for light in frame.active_dynamic_lights() {
+            let v = [
+                light.position[0] - cam.pos[0],
+                light.position[1] - cam.pos[1],
+                light.position[2] - cam.pos[2],
+            ];
+            let z_cam = dot(v, cam.forward);
+            if z_cam <= 0.1 || z_cam > self.settings.max_draw_distance {
+                continue;
+            }
+            let px = cam.half_w + dot(v, cam.right) / z_cam * cam.focal_px;
+            let py = cam.half_h - dot(v, cam.up) / z_cam * cam.focal_px;
+            let half = (0.06 / z_cam * cam.focal_px).clamp(1.0, 6.0);
+            let i = light.intensity.clamp(0.0, 1.6) / 1.6;
+            self.splat(
+                px,
+                py,
+                half,
+                z_cam - 0.05,
+                (255.0 * i) as u8,
+                (150.0 * i) as u8,
+                (60.0 * i) as u8,
+            );
+        }
+
         self.frame_index = self.frame_index.wrapping_add(1);
     }
 }
@@ -1154,6 +1207,7 @@ mod tests {
             yaw,
             pitch: 0.0,
             flashlight: false,
+            ..FrameParams::default()
         }
     }
 
@@ -1307,6 +1361,7 @@ mod tests {
             yaw: 0.0,
             pitch: 0.0,
             flashlight: false,
+            ..FrameParams::default()
         };
         let cam_a = Camera::new(&frame_a, 16, 16, &CpuRenderSettings::default());
 
@@ -1316,6 +1371,7 @@ mod tests {
             yaw: 0.0,
             pitch: 0.0,
             flashlight: false,
+            ..FrameParams::default()
         };
         let cam_b = Camera::new(&frame_b, 16, 16, &CpuRenderSettings::default());
 
@@ -1378,6 +1434,7 @@ mod tests {
             yaw: 0.0,
             pitch: 0.0,
             flashlight: false,
+            ..FrameParams::default()
         };
         let cam = Camera::new(&frame, 16, 16, &CpuRenderSettings::default());
 
@@ -1435,6 +1492,7 @@ mod tests {
             yaw: 0.0,
             pitch: 0.0,
             flashlight: false,
+            ..FrameParams::default()
         };
         let cam = Camera::new(&frame, 16, 16, &CpuRenderSettings::default());
 
