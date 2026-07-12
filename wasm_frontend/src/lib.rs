@@ -45,6 +45,16 @@ pub static MOUSE_SENSITIVITY_BITS: AtomicU32 = AtomicU32::new(0x3F80_0000); // 1
 #[cfg(target_arch = "wasm32")]
 pub static RENDER_SCALE_BITS: AtomicU32 = AtomicU32::new(0);
 
+/// Anomaly debug overlay visibility (settings switch and the F3 key).
+#[cfg(target_arch = "wasm32")]
+pub static ANOMALY_DEBUG: AtomicBool = AtomicBool::new(false);
+
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen::prelude::wasm_bindgen]
+pub fn set_anomaly_debug(enabled: bool) {
+    ANOMALY_DEBUG.store(enabled, Ordering::Relaxed);
+}
+
 #[cfg(target_arch = "wasm32")]
 #[wasm_bindgen::prelude::wasm_bindgen]
 pub fn set_doom_controls(enabled: bool) {

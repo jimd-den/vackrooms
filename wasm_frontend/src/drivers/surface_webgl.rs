@@ -40,6 +40,9 @@ struct Uniforms {
     shadow_map: Option<WebGlUniformLocation>,
     light_view_proj: Option<WebGlUniformLocation>,
     shadowed_light_index: Option<WebGlUniformLocation>,
+    outdoor: Option<WebGlUniformLocation>,
+    fog_color: Option<WebGlUniformLocation>,
+    ambient_scale: Option<WebGlUniformLocation>,
 }
 
 struct ShadowUniforms {
@@ -112,6 +115,9 @@ impl SurfaceRenderer {
             shadow_map: gl.get_uniform_location(&program, "uShadowMap"),
             light_view_proj: gl.get_uniform_location(&program, "uLightViewProjection"),
             shadowed_light_index: gl.get_uniform_location(&program, "uShadowedLightIndex"),
+            outdoor: gl.get_uniform_location(&program, "uOutdoor"),
+            fog_color: gl.get_uniform_location(&program, "uFogColor"),
+            ambient_scale: gl.get_uniform_location(&program, "uAmbientScale"),
         };
         let timer_extension = gl
             .get_extension("EXT_disjoint_timer_query_webgl2")
@@ -377,8 +383,14 @@ impl RendererPort for SurfaceRenderer {
         {
             let gl = &self.gl;
             gl.viewport(0, 0, self.width, self.height);
-            // Match the shader's fog color to hide ungenerated chunk boundaries
-            gl.clear_color(0.15, 0.125, 0.055, 1.0);
+            // Match the shader's fog color to hide ungenerated chunk
+            // boundaries; outdoor levels clear to the environment's sky.
+            let env = frame.environment;
+            if env.outdoor {
+                gl.clear_color(env.sky_color[0], env.sky_color[1], env.sky_color[2], 1.0);
+            } else {
+                gl.clear_color(0.15, 0.125, 0.055, 1.0);
+            }
             gl.clear_depth(1.0);
             gl.clear(Gl::COLOR_BUFFER_BIT | Gl::DEPTH_BUFFER_BIT);
             gl.enable(Gl::DEPTH_TEST);
@@ -405,6 +417,14 @@ impl RendererPort for SurfaceRenderer {
                 self.uniforms.flashlight.as_ref(),
                 if frame.flashlight { 1 } else { 0 },
             );
+            gl.uniform1i(self.uniforms.outdoor.as_ref(), if env.outdoor { 1 } else { 0 });
+            gl.uniform3f(
+                self.uniforms.fog_color.as_ref(),
+                env.fog_color[0],
+                env.fog_color[1],
+                env.fog_color[2],
+            );
+            gl.uniform1f(self.uniforms.ambient_scale.as_ref(), env.ambient_scale);
 
             // 1. Collect all visible meshes
             let mut visible_meshes = Vec::new();
@@ -560,18 +580,25 @@ impl RendererPort for SurfaceRenderer {
                 gl.uniform4fv_with_f32_array(self.uniforms.cores.as_ref(), &core_vec);
                 gl.uniform3fv_with_f32_array(self.uniforms.core_colors.as_ref(), &core_col);
             }
+            // The shadow sampler MUST always point at unit 1: an unset
+            // sampler uniform defaults to unit 0, which already holds the
+            // 3D light volume, and two samplers of different types on one
+            // unit make GL reject every draw call. This is exactly the
+            // zero-fixture case (e.g. the grassland, which has no
+            // LightSource fixtures at all).
+            gl.active_texture(Gl::TEXTURE1);
+            gl.bind_texture(Gl::TEXTURE_2D, Some(&self.shadow_texture));
+            gl.uniform1i(self.uniforms.shadow_map.as_ref(), 1);
+            gl.uniform_matrix4fv_with_f32_array(
+                self.uniforms.light_view_proj.as_ref(),
+                false,
+                &light_view_proj,
+            );
+            gl.uniform1i(self.uniforms.shadowed_light_index.as_ref(), shadowed_light_index);
             if global_light_count > 0 {
                 gl.uniform3fv_with_f32_array(self.uniforms.light_positions.as_ref(), &global_light_positions);
                 gl.uniform3fv_with_f32_array(self.uniforms.light_colors.as_ref(), &global_light_colors);
                 gl.uniform4fv_with_f32_array(self.uniforms.light_params.as_ref(), &global_light_params);
-
-                gl.active_texture(Gl::TEXTURE1);
-                gl.bind_texture(Gl::TEXTURE_2D, Some(&self.shadow_texture));
-                gl.uniform1i(self.uniforms.shadow_map.as_ref(), 1);
-                gl.uniform_matrix4fv_with_f32_array(self.uniforms.light_view_proj.as_ref(), false, &light_view_proj);
-                gl.uniform1i(self.uniforms.shadowed_light_index.as_ref(), shadowed_light_index);
-            } else {
-                gl.uniform1i(self.uniforms.shadowed_light_index.as_ref(), -1);
             }
 
             for mesh in &visible_meshes {

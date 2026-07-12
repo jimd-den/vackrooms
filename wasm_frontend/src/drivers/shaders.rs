@@ -48,6 +48,19 @@ uniform float uFaceWeightZ;
 
 uniform int uFlashlightEnabled;
 
+// Level atmosphere: outdoors (grassland) the miss/fog colors switch to a
+// bright sky and the ambient response scales up. Indoors these are unused.
+uniform int uOutdoor;
+uniform vec3 uSkyColor;
+uniform vec3 uFogColor;
+uniform float uAmbientScale;
+
+// Per-frame dynamic lights (dropped flares): xyz = position, w = radius /
+// intensity. Same contract as the surface/splat/CPU paths.
+uniform int uDynamicLightCount;
+uniform vec4 uDynamicPosRadius[4];
+uniform vec4 uDynamicColorIntensity[4];
+
 uniform usampler2D uNodeTexture;
 uniform int uNumChunks;
 uniform vec3 uChunkOrigins[25];
@@ -391,7 +404,12 @@ void main() {
 
         vec3 groundColor = vec3(0.24, 0.21, 0.16);
         vec3 skyColor = vec3(0.52, 0.48, 0.40);
-        vec3 ambient = mix(groundColor, skyColor, N.y * 0.5 + 0.5) * (bfs_term * face_shading_scalar * face_occlusion_factor) * edgeAO;
+        if (uOutdoor == 1) {
+            // Daylight: cool bright hemisphere instead of sickly interior.
+            groundColor = vec3(0.38, 0.40, 0.36);
+            skyColor = vec3(0.72, 0.78, 0.86);
+        }
+        vec3 ambient = mix(groundColor, skyColor, N.y * 0.5 + 0.5) * (bfs_term * face_shading_scalar * face_occlusion_factor) * edgeAO * uAmbientScale;
         // Let strong colored light bleed subtly into the ambient term.
         ambient *= mix(vec3(1.0), lightTint, 0.5 * staticLight);
         
@@ -460,7 +478,27 @@ void main() {
             
             litColor += (flashDiffuse + flashSpecular) * vec3(1.0, 0.95, 0.9);
         }
-        
+
+        // Dynamic lights (dropped flares): local point lights with quadratic
+        // falloff, matching the other render paths.
+        {
+            vec3 world_hit = ro + closest_t * rd;
+            for (int i = 0; i < 4; i++) {
+                if (i >= uDynamicLightCount) break;
+                vec3 toL = uDynamicPosRadius[i].xyz - world_hit;
+                float d2 = dot(toL, toL);
+                float r = uDynamicPosRadius[i].w;
+                float r2 = r * r;
+                if (d2 >= r2) continue;
+                float d = sqrt(d2);
+                vec3 L = toL / max(d, 1e-4);
+                float ndotl = max(dot(N, L), 0.0);
+                float atten = pow(max(1.0 - d2 / r2, 0.0), 2.0);
+                litColor += albedo * uDynamicColorIntensity[i].rgb
+                    * (uDynamicColorIntensity[i].a * atten * ndotl);
+            }
+        }
+
         // 3. Fog and Vignette
         float dist = closest_t;
         float fogFactor = exp(-0.02 * dist);
@@ -468,7 +506,8 @@ void main() {
         float vignette = vUv.x * vUv.y * (1.0 - vUv.x) * (1.0 - vUv.y);
         vignette = clamp(pow(16.0 * vignette, 0.25), 0.0, 1.0);
 
-        vec3 outColor = mix(vec3(0.0), litColor, fogFactor * vignette);
+        vec3 fogTarget = uOutdoor == 1 ? uFogColor : vec3(0.0);
+        vec3 outColor = mix(fogTarget, litColor, fogFactor * vignette);
         // Interleaved-gradient-noise dither: breaks up the 8-bit banding
         // that fog/vignette gradients produce, which is especially visible
         // at the reduced internal resolutions low-spec machines render at.
@@ -477,7 +516,7 @@ void main() {
         outColor += (ign - 0.5) * (1.0 / 128.0);
         fragColor = vec4(outColor, 1.0);
     } else {
-        fragColor = vec4(0.0, 0.0, 0.0, 1.0);
+        fragColor = vec4(uOutdoor == 1 ? uSkyColor : vec3(0.0), 1.0);
     }
 }
 "#;
@@ -554,6 +593,12 @@ uniform int uShadowedLightIndex;
 uniform int uCoreCount;
 uniform vec4 uCores[4];
 uniform vec3 uCoreColors[4];
+
+// Level atmosphere: outdoors (grassland) fog turns into bright sky haze and
+// the ambient response scales up. Indoors these are unused.
+uniform int uOutdoor;
+uniform vec3 uFogColor;
+uniform float uAmbientScale;
 
 out vec4 fragColor;
 
@@ -674,8 +719,14 @@ void main() {
 
     vec3 uvw = (vWorldPosition - uChunkOrigin) / uChunkSize;
     vec3 irradiance = texture(uLightVolume, clamp(uvw, 0.0, 1.0)).rgb;
-    irradiance = max(irradiance, vec3(0.16, 0.13, 0.07));
-    irradiance = mix(vec3(0.18, 0.15, 0.08), irradiance, 0.25);    
+    if (uOutdoor == 1) {
+        // Daylight floor: the sky layer's BFS light dominates outdoors; do
+        // not crush it toward the dim interior baseline.
+        irradiance = max(irradiance, vec3(0.30, 0.32, 0.36));
+    } else {
+        irradiance = max(irradiance, vec3(0.16, 0.13, 0.07));
+        irradiance = mix(vec3(0.18, 0.15, 0.08), irradiance, 0.25);
+    }
     
     // Upward-facing surfaces brightest, downward surfaces notably darker, side walls vary subtly by cardinal direction
     float faceResponse = 0.8;
@@ -697,10 +748,15 @@ void main() {
         roughness = 0.6; // Floor
     }
 
-    // Yellow-green ambient and olive shadows
+    // Yellow-green ambient and olive shadows (cool neutral hemisphere
+    // outdoors so the grassland reads as daylight, not office fluorescence).
     vec3 ambientUp = vec3(0.35, 0.38, 0.22) * irradiance;
     vec3 ambientDown = vec3(0.14, 0.15, 0.08) * irradiance;
-    vec3 ambient = mix(ambientDown, ambientUp, N.y * 0.5 + 0.5) * ao * faceResponse;
+    if (uOutdoor == 1) {
+        ambientUp = vec3(0.62, 0.66, 0.72) * irradiance;
+        ambientDown = vec3(0.34, 0.36, 0.33) * irradiance;
+    }
+    vec3 ambient = mix(ambientDown, ambientUp, N.y * 0.5 + 0.5) * ao * faceResponse * uAmbientScale;
 
     float flashlight = 0.0;
     if (uFlashlightEnabled == 1) {
@@ -796,7 +852,7 @@ void main() {
     }
 
     // Slight distance desaturation and contrast compression before fog, retaining bright emissive ceiling fixtures
-    if (!emissive(vMaterial)) {
+    if (!emissive(vMaterial) && uOutdoor == 0) {
         float desatFactor = clamp(distanceToCamera * 0.015, 0.0, 0.55);
         float gray = dot(color, vec3(0.299, 0.587, 0.114));
         color = mix(color, vec3(gray), desatFactor);
@@ -805,7 +861,7 @@ void main() {
 
     // Baseline fog color
     vec3 baselineFogColor = vec3(0.15, 0.125, 0.055);
-    
+
     // Height-based fog color: warmer/darker near the floor, sickly-green/dimmer near the ceiling
     float hNorm = clamp(vWorldPosition.y / 5.0, 0.0, 1.0);
     vec3 heightFogColor = mix(
@@ -813,6 +869,11 @@ void main() {
         vec3(0.14, 0.15, 0.06), // sickly-green/dimmer near the ceiling
         hNorm
     );
+    if (uOutdoor == 1) {
+        // Outdoors distance haze fades toward the bright sky.
+        baselineFogColor = uFogColor;
+        heightFogColor = uFogColor;
+    }
     
     // Seamless transition back to baseline fog color at far boundary
     float farFade = smoothstep(35.0, 50.0, distanceToCamera);
@@ -884,6 +945,10 @@ uniform sampler2D uShadowMap;
 uniform mat4 uLightViewProjection;
 uniform int uShadowedLightIndex;
 uniform int uShadowTaps;
+
+// Level atmosphere (see the surface shader).
+uniform int uOutdoor;
+uniform float uAmbientScale;
 
 out vec3 vWorldPos;
 flat out vec3 vColor;
@@ -1025,6 +1090,9 @@ void main() {
     vec3 bakedWarm = vec3(baked, baked * 0.94, baked * 0.72);
     irradiance = max(irradiance, bakedWarm);
     irradiance = max(irradiance, vec3(0.035, 0.03, 0.015));
+    if (uOutdoor == 1) {
+        irradiance = max(irradiance, vec3(0.30, 0.32, 0.36));
+    }
 
     float faceResponse = 0.8;
     if (N.y > 0.5) {
@@ -1039,7 +1107,11 @@ void main() {
 
     vec3 ambientUp = vec3(1.05, 1.0, 0.72) * irradiance;
     vec3 ambientDown = vec3(0.58, 0.52, 0.30) * irradiance;
-    vec3 ambient = mix(ambientDown, ambientUp, N.y * 0.5 + 0.5) * ao * faceResponse;
+    if (uOutdoor == 1) {
+        ambientUp = vec3(0.98, 1.02, 1.08) * irradiance;
+        ambientDown = vec3(0.56, 0.58, 0.55) * irradiance;
+    }
+    vec3 ambient = mix(ambientDown, ambientUp, N.y * 0.5 + 0.5) * ao * faceResponse * uAmbientScale;
 
     vec3 directDiffuse = vec3(0.0);
     for (int i = 0; i < 4; ++i) {
@@ -1086,6 +1158,9 @@ void main() {
 /// arrived flat from the vertex shader.
 pub const SPLAT_FRAGMENT_SHADER: &str = r#"#version 300 es
 precision highp float;
+// Fragment ints default to mediump; the vertex stage declares uOutdoor at
+// its (highp) default, and linking demands the precisions match.
+precision highp int;
 
 in vec3 vWorldPos;
 flat in vec3 vColor;
@@ -1101,6 +1176,11 @@ uniform float uVoxelScale;
 uniform int uCoreCount;
 uniform vec4 uCores[4];
 uniform vec3 uCoreColors[4];
+
+// Level atmosphere: outdoors the fog fades to a bright sky haze instead of
+// black (the framebuffer is cleared to the matching sky color).
+uniform int uOutdoor;
+uniform vec3 uFogColor;
 
 out vec4 fragColor;
 
@@ -1155,6 +1235,9 @@ void main() {
     );
     float farFade = smoothstep(28.0, 48.0, distanceToCamera);
     vec3 currentFogColor = mix(heightFogColor, vec3(0.0), farFade);
+    if (uOutdoor == 1) {
+        currentFogColor = uFogColor;
+    }
     color = mix(color, currentFogColor, clamp(fogAmount, 0.0, 1.0));
 
     // Flare cores (see the surface shader for the occlusion rule).

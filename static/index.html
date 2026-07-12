@@ -11,11 +11,14 @@
         the bottom of this file. The JavaScript here only bootstraps the
         module and binds the settings menu to the engine's exported setters.
 
-        Query flags:  ?spec=high     -> 20u chunks, 5x5 streaming, 0.1u voxels
-                      ?renderer=cpu  -> CPU microvoxel splatting (no GPU/WebGL;
-                                        also the automatic WebGL2 fallback)
-                      (default)      -> low-spec profile, GPU raymarcher
+        Query flags:  ?spec=high          -> 20u chunks, 5x5 streaming, 0.1u voxels
+                      ?renderer=splat     -> instanced GPU face splats
+                      ?renderer=raymarch  -> fullscreen SVO raymarcher (debug)
+                      ?renderer=cpu       -> CPU microvoxel splatting (no GPU/WebGL;
+                                             also the automatic WebGL2 fallback)
+                      (default)           -> low-spec profile, GPU surface meshes
                       ?seed=… ?pillars= ?walls= ?atria= ?lights=
+                      ?force_anomaly=pillars|blackout|pits|archway (debug spawn)
     -->
     <style>
         html, body {
@@ -57,9 +60,45 @@
         #hud b { color: #fff3c4; }
         #hud-dist { letter-spacing: 1px; }
 
+        /* Top-right section readout: which level/zone the player is in. */
+        #hud-section {
+            position: absolute;
+            top: calc(12px + env(safe-area-inset-top, 0px));
+            right: calc(12px + env(safe-area-inset-right, 0px));
+            font-size: 13px;
+            letter-spacing: 2px;
+            color: #fff3c4;
+            background: rgba(0, 0, 0, 0.55);
+            border: 1px solid #4a4433;
+            padding: 6px 12px;
+            pointer-events: none;
+            text-align: right;
+        }
+
+        /* Anomaly debug overlay (F3 or Settings > Debug). */
+        #debug-overlay {
+            display: none;
+            position: absolute;
+            top: calc(48px + env(safe-area-inset-top, 0px));
+            left: calc(12px + env(safe-area-inset-left, 0px));
+            max-width: min(560px, calc(100vw - 24px));
+            max-height: 60vh;
+            overflow: hidden;
+            font-size: 11px;
+            line-height: 1.45;
+            white-space: pre;
+            color: #9fe8a0;
+            background: rgba(0, 0, 0, 0.7);
+            border: 1px solid #2f5c30;
+            padding: 8px 10px;
+            pointer-events: none;
+            z-index: 6;
+        }
+
         /* Small screens: shrink the chrome so the world stays visible. */
         @media (max-width: 700px) {
             #hud { font-size: 11px; padding: 5px 8px; bottom: 8px; left: 8px; }
+            #hud-section { font-size: 10px; padding: 4px 8px; letter-spacing: 1px; }
             #overlay h1 { font-size: 22px !important; }
         }
 
@@ -244,6 +283,9 @@
         GPU <b id="hud-gpu">—</b>
     </div>
 
+    <div id="hud-section">&hellip;</div>
+    <pre id="debug-overlay"></pre>
+
     <!-- Touch-session chrome; the wasm driver toggles its visibility. -->
     <div id="touch-ui">
         <button id="btn-menu" aria-label="Menu">&#9776;</button>
@@ -270,6 +312,7 @@
             <button class="tab-btn" data-tab="tab-graphics">GRAPHICS</button>
             <button class="tab-btn" data-tab="tab-world">WORLD</button>
             <button class="tab-btn" data-tab="tab-cpu">CPU RENDER</button>
+            <button class="tab-btn" data-tab="tab-debug">DEBUG</button>
         </div>
 
         <!-- Controls Tab -->
@@ -303,7 +346,9 @@
             <div class="setting-row">
                 <label for="setting-renderer">Renderer <span class="value">reload</span></label>
                 <select id="setting-renderer">
-                    <option value="gpu">GPU raymarcher (WebGL2)</option>
+                    <option value="surface">GPU surfaces (default)</option>
+                    <option value="splat">GPU face splats (microvoxel)</option>
+                    <option value="raymarch">GPU SVO raymarcher (debug)</option>
                     <option value="cpu">CPU splatter (no GPU needed)</option>
                 </select>
             </div>
@@ -374,6 +419,25 @@
             </div>
         </div>
 
+        <!-- Debug Tab -->
+        <div id="tab-debug" class="tab-content" style="display: none;">
+            <div class="setting-row inline-switch">
+                <label for="setting-anomaly-debug">Anomaly debug overlay (F3)</label>
+                <input type="checkbox" id="setting-anomaly-debug">
+            </div>
+            <div class="setting-row">
+                <label for="setting-force-anomaly">Spawn anomaly at spawn point <span class="value">reload</span></label>
+                <select id="setting-force-anomaly">
+                    <option value="">None (organic only)</option>
+                    <option value="pillars">Pillar expanse</option>
+                    <option value="blackout">Blackout expanse</option>
+                    <option value="pits">Pit lattice</option>
+                    <option value="archway">Archway anchor room</option>
+                </select>
+            </div>
+            <p class="hint">The forced anomaly is placed deterministically on the spawn's macro cell so every worker generates the same world. The overlay lists reality epochs, traversal gates and pit hazards near you.</p>
+        </div>
+
         <p class="hint">Controls, Graphics &amp; CPU Render settings apply instantly. World changes need Apply &amp; Reload.</p>
 
         <div class="settings-actions">
@@ -395,6 +459,7 @@
             set_cpu_max_splat_half,
             set_cpu_max_draw_distance,
             set_cpu_shadows,
+            set_anomaly_debug,
         } from './pkg/wasm_frontend.js';
 
         const $ = (id) => document.getElementById(id);
@@ -414,7 +479,8 @@
             cpuLod: 1.0,
             cpuSplat: 12.0,
             cpuDist: 96.0,
-            cpuShadows: 'off'
+            cpuShadows: 'off',
+            anomalyDebug: false
         };
         let prefs = { ...defaults };
         try { prefs = { ...defaults, ...JSON.parse(localStorage.getItem(PREFS_KEY) || '{}') }; } catch (_) {}
@@ -450,7 +516,13 @@
 
         // URL parameters overrides (link sharing)
         $('setting-quality').value = urlParams.get('spec') === 'high' ? 'high' : 'low';
-        $('setting-renderer').value = urlParams.get('renderer') === 'cpu' ? 'cpu' : 'gpu';
+        const RENDERERS = ['surface', 'splat', 'raymarch', 'cpu'];
+        const urlRenderer = urlParams.get('renderer');
+        $('setting-renderer').value = RENDERERS.includes(urlRenderer) ? urlRenderer : 'surface';
+        const FORCED_ANOMALIES = ['pillars', 'blackout', 'pits', 'archway'];
+        const urlForced = urlParams.get('force_anomaly');
+        $('setting-force-anomaly').value = FORCED_ANOMALIES.includes(urlForced) ? urlForced : '';
+        $('setting-anomaly-debug').checked = !!prefs.anomalyDebug;
         if (urlParams.has('seed')) $('setting-seed').value = urlParams.get('seed');
         for (const knob of ['pillars', 'walls', 'atria', 'lights']) {
             if (urlParams.has(knob)) {
@@ -493,6 +565,7 @@
             set_cpu_max_splat_half(Number(prefs.cpuSplat));
             set_cpu_max_draw_distance(Number(prefs.cpuDist));
             set_cpu_shadows(prefs.cpuShadows === 'hero' ? 1 : 0);
+            set_anomaly_debug(!!prefs.anomalyDebug);
         };
 
         // Live preferences event listeners
@@ -543,6 +616,10 @@
         $('setting-cpu-shadows').addEventListener('change', (e) => {
             prefs.cpuShadows = e.target.value; savePrefs();
             set_cpu_shadows(prefs.cpuShadows === 'hero' ? 1 : 0);
+        });
+        $('setting-anomaly-debug').addEventListener('change', (e) => {
+            prefs.anomalyDebug = e.target.checked; savePrefs();
+            set_anomaly_debug(prefs.anomalyDebug);
         });
 
         // World tuning sliders live display
@@ -598,7 +675,10 @@
                 if (v !== '' && Number(v) !== 1.0) params.set(knob, v);
             }
             if ($('setting-quality').value === 'high') params.set('spec', 'high');
-            if ($('setting-renderer').value === 'cpu') params.set('renderer', 'cpu');
+            const renderer = $('setting-renderer').value;
+            if (renderer !== 'surface') params.set('renderer', renderer);
+            const forcedAnomaly = $('setting-force-anomaly').value;
+            if (forcedAnomaly) params.set('force_anomaly', forcedAnomaly);
 
             // Persist CPU configurations on link
             if (Number(prefs.cpuScale) !== 1.0) params.set('cpuScale', prefs.cpuScale);
