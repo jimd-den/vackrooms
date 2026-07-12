@@ -27,7 +27,7 @@
 //! This module is platform-free (no web-sys): the browser driver only blits
 //! the RGBA buffer. All geometry/shading logic is natively unit-tested.
 
-use crate::application::ports::{ChunkDraw, FrameParams, RendererPort};
+use crate::application::ports::{ChunkDraw, Environment, FrameParams, RendererPort};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CpuShadowMode {
@@ -443,6 +443,9 @@ pub struct SoftwareRasterizer {
     pub settings: CpuRenderSettings,
     shadow_cache: Vec<f32>,
     frame_index: usize,
+    /// Level atmosphere for the current frame (sky/fog/ambient), captured
+    /// from `FrameParams` at the top of `draw`.
+    environment: Environment,
 }
 
 impl SoftwareRasterizer {
@@ -462,6 +465,7 @@ impl SoftwareRasterizer {
             settings: CpuRenderSettings::default(),
             shadow_cache: vec![1.0; 65536],
             frame_index: 0,
+            environment: Environment::default(),
         };
         r.resize(width, height);
         r
@@ -488,10 +492,21 @@ impl SoftwareRasterizer {
     }
 
     fn clear(&mut self) {
+        // Interior levels clear to black (unloaded space reads as void);
+        // outdoor levels clear to the environment's bright sky.
+        let bg = if self.environment.outdoor {
+            [
+                (self.environment.sky_color[0] * 255.0) as u8,
+                (self.environment.sky_color[1] * 255.0) as u8,
+                (self.environment.sky_color[2] * 255.0) as u8,
+            ]
+        } else {
+            [0, 0, 0]
+        };
         for px in self.rgba.chunks_exact_mut(4) {
-            px[0] = 0;
-            px[1] = 0;
-            px[2] = 0;
+            px[0] = bg[0];
+            px[1] = bg[1];
+            px[2] = bg[2];
             px[3] = 255;
         }
         self.depth.fill(f32::INFINITY);
@@ -581,18 +596,28 @@ impl SoftwareRasterizer {
         let raw_ao = 1.0 - 0.04 * crowded_siblings.saturating_sub(1) as f32;
         let ao = (raw_ao * 1.3).clamp(0.22, 1.0);
 
-        let light_norm = (light_level / 15.0) * shadow_factor;
+        let light_norm = (light_level / 15.0) * shadow_factor * self.environment.ambient_scale;
 
-        // Fluorescent yellow-green ambient top vs dark olive ambient bottom mix
+        // Fluorescent yellow-green ambient top vs dark olive ambient bottom
+        // mix indoors; a cool neutral daylight hemisphere outdoors.
         let n_y = if sum > 1e-6 {
             (dy_sq / sum) * (if to_cam[1] > 0.0 { -1.0 } else { 1.0 })
         } else {
             0.0
         };
         let t_mix = n_y * 0.5 + 0.5;
-        
-        let ambient_up = [1.05 * light_norm, 1.0 * light_norm, 0.7 * light_norm];
-        let ambient_down = [0.6 * light_norm, 0.55 * light_norm, 0.35 * light_norm];
+
+        let (ambient_up, ambient_down) = if self.environment.outdoor {
+            (
+                [0.98 * light_norm, 1.02 * light_norm, 1.08 * light_norm],
+                [0.56 * light_norm, 0.58 * light_norm, 0.55 * light_norm],
+            )
+        } else {
+            (
+                [1.05 * light_norm, 1.0 * light_norm, 0.7 * light_norm],
+                [0.6 * light_norm, 0.55 * light_norm, 0.35 * light_norm],
+            )
+        };
         
         let ambient = [
             (ambient_down[0] * (1.0 - t_mix) + ambient_up[0] * t_mix) * ao * face_response,
@@ -659,8 +684,17 @@ impl SoftwareRasterizer {
         // Exponential fog blending
         let fog = (-self.settings.fog_density * (dist - self.settings.fog_start).max(0.0)).exp();
 
-        // Blend with the background sickly-brown clear color: (0.15, 0.125, 0.055)
-        let clear_color = [0.15 * 255.0, 0.125 * 255.0, 0.055 * 255.0];
+        // Blend with the background sickly-brown clear color indoors, or the
+        // environment's bright haze outdoors.
+        let clear_color = if self.environment.outdoor {
+            [
+                self.environment.fog_color[0] * 255.0,
+                self.environment.fog_color[1] * 255.0,
+                self.environment.fog_color[2] * 255.0,
+            ]
+        } else {
+            [0.15 * 255.0, 0.125 * 255.0, 0.055 * 255.0]
+        };
         let r = (final_r * fog + clear_color[0] * (1.0 - fog)).clamp(0.0, 255.0) as u8;
         let g = (final_g * fog + clear_color[1] * (1.0 - fog)).clamp(0.0, 255.0) as u8;
         let b = (final_b * fog + clear_color[2] * (1.0 - fog)).clamp(0.0, 255.0) as u8;
@@ -1110,6 +1144,7 @@ impl RendererPort for SoftwareRasterizer {
     }
 
     fn draw(&mut self, frame: &FrameParams, chunks: &[ChunkDraw]) {
+        self.environment = frame.environment;
         self.clear();
         self.visited_nodes = 0;
         self.budget_exhausted = false;

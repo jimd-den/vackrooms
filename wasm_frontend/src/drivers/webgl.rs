@@ -60,6 +60,15 @@ struct Uniforms {
 
     flashlight: Option<WebGlUniformLocation>,
 
+    outdoor: Option<WebGlUniformLocation>,
+    sky_color: Option<WebGlUniformLocation>,
+    fog_color: Option<WebGlUniformLocation>,
+    ambient_scale: Option<WebGlUniformLocation>,
+
+    dynamic_light_count: Option<WebGlUniformLocation>,
+    dynamic_pos_radius: Option<WebGlUniformLocation>,
+    dynamic_color_intensity: Option<WebGlUniformLocation>,
+
     node_texture: Option<WebGlUniformLocation>,
     num_chunks: Option<WebGlUniformLocation>,
     chunk_origins: Option<WebGlUniformLocation>,
@@ -114,6 +123,15 @@ impl WebGl2Renderer {
             face_weight_z: gl.get_uniform_location(&program, "uFaceWeightZ"),
 
             flashlight: gl.get_uniform_location(&program, "uFlashlightEnabled"),
+
+            outdoor: gl.get_uniform_location(&program, "uOutdoor"),
+            sky_color: gl.get_uniform_location(&program, "uSkyColor"),
+            fog_color: gl.get_uniform_location(&program, "uFogColor"),
+            ambient_scale: gl.get_uniform_location(&program, "uAmbientScale"),
+
+            dynamic_light_count: gl.get_uniform_location(&program, "uDynamicLightCount"),
+            dynamic_pos_radius: gl.get_uniform_location(&program, "uDynamicPosRadius"),
+            dynamic_color_intensity: gl.get_uniform_location(&program, "uDynamicColorIntensity"),
 
             node_texture: gl.get_uniform_location(&program, "uNodeTexture"),
             num_chunks: gl.get_uniform_location(&program, "uNumChunks"),
@@ -247,7 +265,12 @@ impl RendererPort for WebGl2Renderer {
         let gl = &self.gl;
 
         gl.viewport(0, 0, self.width, self.height);
-        gl.clear_color(0.0, 0.0, 0.0, 1.0);
+        let env = frame.environment;
+        if env.outdoor {
+            gl.clear_color(env.sky_color[0], env.sky_color[1], env.sky_color[2], 1.0);
+        } else {
+            gl.clear_color(0.0, 0.0, 0.0, 1.0);
+        }
         gl.clear(Gl::COLOR_BUFFER_BIT);
 
         gl.uniform3f(
@@ -281,6 +304,40 @@ impl RendererPort for WebGl2Renderer {
             self.uniforms.flashlight.as_ref(),
             if frame.flashlight { 1 } else { 0 },
         );
+
+        gl.uniform1i(self.uniforms.outdoor.as_ref(), if env.outdoor { 1 } else { 0 });
+        gl.uniform3f(
+            self.uniforms.sky_color.as_ref(),
+            env.sky_color[0],
+            env.sky_color[1],
+            env.sky_color[2],
+        );
+        gl.uniform3f(
+            self.uniforms.fog_color.as_ref(),
+            env.fog_color[0],
+            env.fog_color[1],
+            env.fog_color[2],
+        );
+        gl.uniform1f(self.uniforms.ambient_scale.as_ref(), env.ambient_scale);
+
+        // Dropped flares as point lights (parity with the raster paths).
+        {
+            let lights = frame.active_dynamic_lights();
+            let mut pos_radius = [0.0f32; 16];
+            let mut color_intensity = [0.0f32; 16];
+            for (i, light) in lights.iter().enumerate() {
+                pos_radius[i * 4..i * 4 + 3].copy_from_slice(&light.position);
+                pos_radius[i * 4 + 3] = light.radius;
+                color_intensity[i * 4..i * 4 + 3].copy_from_slice(&light.color);
+                color_intensity[i * 4 + 3] = light.intensity;
+            }
+            gl.uniform1i(self.uniforms.dynamic_light_count.as_ref(), lights.len() as i32);
+            gl.uniform4fv_with_f32_array(self.uniforms.dynamic_pos_radius.as_ref(), &pos_radius);
+            gl.uniform4fv_with_f32_array(
+                self.uniforms.dynamic_color_intensity.as_ref(),
+                &color_intensity,
+            );
+        }
 
         let count = chunks.len().min(MAX_CHUNKS);
         gl.uniform1i(self.uniforms.num_chunks.as_ref(), count as i32);

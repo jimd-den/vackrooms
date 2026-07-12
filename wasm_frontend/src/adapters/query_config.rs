@@ -17,6 +17,7 @@
 //! web-sys so it is natively unit-tested; the browser driver only hands in
 //! `window.location.search`.
 
+use vackrooms::domain::entities::anomaly::AnomalyKind;
 use vackrooms::use_cases::generate_chunk::{AnomalyTuning, GeneratorConfig, LevelTuning};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -78,6 +79,18 @@ pub fn parse_generation_params(query: &str, default_seed: u32) -> GenerationPara
             // Bounded deception: the fraction of blackout glimmers placed one
             // segment off the recovery skeleton (never more than half).
             "blackout_decoys" => ranged(&mut params.anomalies.blackout_decoys, 0.0, 0.5),
+            // Debug: guarantee one anomaly of this family on the spawn's
+            // macro cell (settings menu "Spawn anomaly"). Unknown values
+            // leave the world untouched.
+            "force_anomaly" => {
+                params.anomalies.forced_kind = match value {
+                    "pillars" => Some(AnomalyKind::PillarExpanse),
+                    "blackout" => Some(AnomalyKind::BlackoutExpanse),
+                    "pits" => Some(AnomalyKind::PitLattice),
+                    "archway" => Some(AnomalyKind::ArchwayRoom),
+                    _ => None,
+                };
+            }
             _ => {}
         }
     }
@@ -146,6 +159,20 @@ mod tests {
         let p = parse_generation_params("?pillars=banana&walls=99&renderer=cpu&spec=high", 42);
         assert_eq!(p.tuning.pillars, 1.0);
         assert_eq!(p.tuning.walls, 4.0);
+    }
+
+    #[test]
+    fn parses_force_anomaly_values() {
+        let p = parse_generation_params("?force_anomaly=pillars", 42);
+        assert_eq!(p.anomalies.forced_kind, Some(AnomalyKind::PillarExpanse));
+        let p = parse_generation_params("?force_anomaly=blackout", 42);
+        assert_eq!(p.anomalies.forced_kind, Some(AnomalyKind::BlackoutExpanse));
+        let p = parse_generation_params("?force_anomaly=pits", 42);
+        assert_eq!(p.anomalies.forced_kind, Some(AnomalyKind::PitLattice));
+        let p = parse_generation_params("?force_anomaly=archway", 42);
+        assert_eq!(p.anomalies.forced_kind, Some(AnomalyKind::ArchwayRoom));
+        let p = parse_generation_params("?force_anomaly=banana", 42);
+        assert_eq!(p.anomalies.forced_kind, None);
     }
 
     #[test]

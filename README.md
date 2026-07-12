@@ -95,6 +95,12 @@ combinable:
 | `lights` | `0`–`4` | Ceiling light panel density. Default `1`. |
 | `renderer` | `splat`, `raymarch`, `cpu` | Picks a non-default renderer backend (see above). |
 | `workers` | `0` | Disables the Web Worker generation pool and generates chunks synchronously on the main thread. |
+| `level` | `0`, `34` | Debug: boots straight into a level (34 = the grassland) instead of waiting on a noclip roll. |
+| `force_anomaly` | `pillars`, `blackout`, `pits`, `archway` | Debug: guarantees one anomaly of that family on the spawn's macro cell, bypassing the spawn keep-out. |
+
+The top-right HUD names the section you are in (level, zone, region), and
+**F3** (or Settings → Debug) toggles the anomaly debug overlay: reality
+epochs, resident traversal gates and pit hazards, and streaming counters.
 
 The in-page settings menu (gear icon) also exposes mouse sensitivity, invert
 Y, render scale, FOV and control scheme; those are saved to `localStorage`

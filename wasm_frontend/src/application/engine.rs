@@ -12,8 +12,8 @@ use crate::application::atlas::{AtlasPool, MAX_CHUNKS, payload_rows};
 use crate::application::collision::{CollisionWorld, player_aabb};
 use crate::application::player::{MoveIntent, Player};
 use crate::application::ports::{
-    ChunkDraw, ChunkRequest, ChunkSourcePort, DynamicLight, FrameParams, MAX_DYNAMIC_LIGHTS,
-    RendererPort, SurfaceChunk,
+    ChunkDraw, ChunkRequest, ChunkSourcePort, CompletedChunk, DynamicLight, Environment,
+    FrameParams, MAX_DYNAMIC_LIGHTS, RendererPort, SurfaceChunk,
 };
 use crate::application::streaming::{
     ChunkKey, ChunkStore, LoadedChunk, StreamingPolicy, chunk_key,
@@ -45,6 +45,10 @@ pub struct EngineConfig {
     /// full resolution. A coarse voxel at this distance projects to roughly
     /// the same pixels as a fine voxel at half of it.
     pub fine_distance: f32,
+    /// Level to boot into (0 = Backrooms, 34 = grassland). Exposed as the
+    /// `?level=` debug query so any level is reachable in any renderer
+    /// without waiting on a noclip roll.
+    pub initial_level: u32,
 }
 
 impl Default for EngineConfig {
@@ -57,6 +61,7 @@ impl Default for EngineConfig {
             spawn_yaw: 0.0,
             max_loads_per_tick: 2,
             fine_distance: 15.0,
+            initial_level: LEVEL_BACKROOMS,
         }
     }
 }
@@ -225,6 +230,12 @@ pub struct Engine {
     /// request is retained so a late completion can neither clear nor replace
     /// a newer request for the same spatial chunk.
     pending: HashMap<ChunkKey, ChunkRequest>,
+    /// Finished background loads waiting for install budget. Workers can
+    /// return several chunks in one tick; installing them all at once (mesh
+    /// upload + collision rebuild per chunk) is exactly the frame hitch the
+    /// worker pool exists to avoid, so installs are metered per tick and the
+    /// overflow waits here. Every entry is re-validated at install time.
+    completed_backlog: Vec<CompletedChunk>,
     /// Monotonic worker-order identity. Kept independent from chunk/LOD so a
     /// re-request after eviction is distinguishable from its predecessor.
     next_request_id: u32,
@@ -290,11 +301,12 @@ impl Engine {
             renderer,
             source,
             pending: HashMap::new(),
+            completed_backlog: Vec::new(),
             next_request_id: 1,
             reality: RealitySnapshot::default(),
             forced_reloads: HashSet::new(),
             last_safe_position: config.spawn,
-            level: LEVEL_BACKROOMS,
+            level: config.initial_level,
             push_seconds: 0.0,
             noclip_cooldown: 0.0,
             rng: (config.seed as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1,
@@ -351,6 +363,7 @@ impl Engine {
         // rejected by the level check, and clearing pending lets the new
         // level re-request the same keys immediately.
         self.pending.clear();
+        self.completed_backlog.clear();
         self.forced_reloads.clear();
         // The whole world is regenerated: drop the pool so the next stream
         // pass relayouts and re-uploads from scratch.
@@ -372,6 +385,16 @@ impl Engine {
     /// The active Backrooms level id.
     pub fn level(&self) -> u32 {
         self.level
+    }
+
+    /// Per-level atmosphere shared by every renderer: the grassland is an
+    /// open daylight plane, everything else keeps the interior palette.
+    pub fn environment(&self) -> Environment {
+        if self.level == LEVEL_GRASSLAND {
+            Environment::daylight()
+        } else {
+            Environment::interior()
+        }
     }
 
     /// Immutable encounter-state snapshot currently used to key generation.
@@ -435,6 +458,7 @@ impl Engine {
             flashlight: input.flashlight,
             dynamic_lights: self.flare_lights(),
             dynamic_light_count: self.flare_light_count(),
+            environment: self.environment(),
         };
         self.renderer.draw(&frame, &self.draws);
     }
@@ -662,13 +686,32 @@ impl Engine {
     /// for the wrong level (noclip happened), for a chunk that left the
     /// streaming footprint, or for a LOD no better than what is already
     /// resident. Refinement stays monotonic exactly like the sync path.
+    ///
+    /// Installs are metered by the same per-tick cost budget as synchronous
+    /// loads (coarse = 1, fine = `FINE_LOAD_COST`): when a burst of worker
+    /// results lands in one frame, the overflow waits in
+    /// `completed_backlog` instead of stacking mesh uploads and collision
+    /// rebuilds into a single frame.
     fn install_completed(
         &mut self,
         keep: &[ChunkKey],
         loaded: &mut Vec<ChunkKey>,
         changed: &mut bool,
     ) {
-        for done in self.source.poll_completed() {
+        let fresh = self.source.poll_completed();
+        self.completed_backlog.extend(fresh);
+        let mut budget = (self.config.max_loads_per_tick as u32 * FINE_LOAD_COST).max(1);
+        let mut deferred: Vec<CompletedChunk> = Vec::new();
+        for done in self.completed_backlog.drain(..).collect::<Vec<_>>() {
+            let install_cost = if done.request.lod == 0 {
+                FINE_LOAD_COST
+            } else {
+                1
+            };
+            if budget < install_cost {
+                deferred.push(done);
+                continue;
+            }
             let req = &done.request;
             let key = chunk_key(req.origin_x, req.origin_z);
             // A completion is authoritative only while the exact order it
@@ -711,6 +754,7 @@ impl Engine {
                     continue;
                 }
             }
+            budget -= install_cost;
             self.store.insert(
                 key,
                 LoadedChunk::new(
@@ -726,6 +770,7 @@ impl Engine {
             *changed = true;
             self.forced_reloads.remove(&key);
         }
+        self.completed_backlog = deferred;
         // Drop pending entries that left the footprint so their slots free
         // up; a late completion for them is discarded by the keep check.
         self.pending
@@ -1066,6 +1111,109 @@ impl Engine {
         &self.world
     }
 
+    /// Multi-line plain-text report of the live anomaly machinery, for the
+    /// debug overlay: reality-snapshot epochs, resident traversal gates and
+    /// pit hazards (nearest first), and the streaming pipeline counters.
+    /// Pure formatting over engine state — no browser types, natively
+    /// testable.
+    pub fn anomaly_debug_text(&self) -> String {
+        use std::fmt::Write;
+        let p = self.player.position;
+        let mut out = String::with_capacity(1024);
+        let _ = writeln!(
+            out,
+            "pos ({:.1}, {:.1}, {:.1})  level {}  yaw {:.2}",
+            p[0], p[1], p[2], self.level, self.player.yaw
+        );
+        let _ = writeln!(
+            out,
+            "chunks {} resident ({} fine) | pending {} | backlog {} | forced reloads {}",
+            self.store.len(),
+            self.store.iter_ordered().filter(|c| c.lod == 0).count(),
+            self.pending.len(),
+            self.completed_backlog.len(),
+            self.forced_reloads.len(),
+        );
+        let _ = writeln!(out, "flares {} | push {:.2}s", self.flares.len(), self.push_seconds);
+
+        let stamps = self.reality.stamps();
+        let _ = writeln!(out, "reality: {} stamp(s)", stamps.len());
+        for stamp in stamps {
+            let _ = writeln!(
+                out,
+                "  {:016x} epoch {}  plane {:.1} {:?} {:?}",
+                stamp.instance_id,
+                stamp.epoch,
+                stamp.gate_plane(),
+                stamp.gate_axis,
+                stamp.travel_direction,
+            );
+        }
+
+        let mut gates: Vec<_> = self.store.all_traversal_gates().copied().collect();
+        gates.sort_by_key(|g| g.id);
+        gates.dedup_by_key(|g| g.id);
+        gates.sort_by(|a, b| {
+            let d = |g: &vackrooms::domain::entities::anomaly::TraversalGate| match g.axis {
+                vackrooms::domain::entities::anomaly::Axis2::X => (g.plane - p[0]).abs(),
+                vackrooms::domain::entities::anomaly::Axis2::Z => (g.plane - p[2]).abs(),
+            };
+            d(a).total_cmp(&d(b))
+        });
+        let _ = writeln!(out, "gates resident: {}", gates.len());
+        for gate in gates.iter().take(6) {
+            let dist = match gate.axis {
+                vackrooms::domain::entities::anomaly::Axis2::X => (gate.plane - p[0]).abs(),
+                vackrooms::domain::entities::anomaly::Axis2::Z => (gate.plane - p[2]).abs(),
+            };
+            let epoch = self
+                .reality
+                .lookup(gate.instance_id)
+                .map_or(0, |s| s.epoch);
+            let _ = writeln!(
+                out,
+                "  {:?}/{:?} of {:?} {:08x}  plane {:.1} on {:?}  d={:.1}  epoch {}",
+                gate.kind,
+                gate.forward,
+                gate.anomaly_kind,
+                (gate.instance_id & 0xFFFF_FFFF) as u32,
+                gate.plane,
+                gate.axis,
+                dist,
+                epoch,
+            );
+        }
+
+        let mut pits: Vec<_> = self.store.all_pit_hazards().copied().collect();
+        pits.sort_by_key(|h| h.id);
+        pits.dedup_by_key(|h| h.id);
+        pits.sort_by(|a, b| {
+            let d = |h: &vackrooms::domain::entities::anomaly::PitHazard| {
+                let dx = h.center.x - p[0];
+                let dz = h.center.z - p[2];
+                dx * dx + dz * dz
+            };
+            d(a).total_cmp(&d(b))
+        });
+        let _ = writeln!(out, "pit hazards resident: {}", pits.len());
+        for pit in pits.iter().take(4) {
+            let dx = pit.center.x - p[0];
+            let dz = pit.center.z - p[2];
+            let _ = writeln!(
+                out,
+                "  {:08x} at ({:.1}, {:.1})  half {:.1}  d={:.1}  recovery ({:.1}, {:.1})",
+                (pit.id & 0xFFFF_FFFF) as u32,
+                pit.center.x,
+                pit.center.z,
+                pit.half_side,
+                (dx * dx + dz * dz).sqrt(),
+                pit.recovery.x,
+                pit.recovery.z,
+            );
+        }
+        out
+    }
+
     pub fn stats(&self) -> HudStats {
         let spawn_key = chunk_key(
             (self.config.spawn[0] / self.config.chunk_size).floor() * self.config.chunk_size,
@@ -1261,6 +1409,81 @@ mod tests {
         let before = requests.borrow().len();
         engine.tick(1.0 / 60.0, &input);
         assert_eq!(requests.borrow().len(), before);
+    }
+
+    #[test]
+    fn worker_result_bursts_install_across_ticks_not_in_one_frame() {
+        let source = AsyncFakeSource::default();
+        let ready = source.ready.clone();
+        let mut engine = Engine::new(
+            EngineConfig::default(),
+            Box::new(RecordingRenderer::default()),
+            Box::new(source),
+        );
+        let input = InputFrame::default();
+        engine.tick(1.0 / 60.0, &input);
+
+        // A worst-case burst: fine results for all nine footprint chunks
+        // land in the same frame.
+        let desired = engine
+            .policy
+            .desired_origins(engine.player.position[0], engine.player.position[2]);
+        let mut id = 90_000;
+        for (ox, oz) in desired {
+            let req = test_request(id, ox, oz, 0, 0);
+            id += 1;
+            engine.pending.insert(chunk_key(ox, oz), req.clone());
+            ready.borrow_mut().push(completed(req));
+        }
+
+        // Budget: max_loads_per_tick (2) fine-equivalents per tick, so the
+        // burst spreads over ceil(9 / 2) ticks instead of hitching one frame.
+        engine.tick(1.0 / 60.0, &input);
+        assert_eq!(engine.stats().fine_chunks, 2);
+        engine.tick(1.0 / 60.0, &input);
+        assert_eq!(engine.stats().fine_chunks, 4);
+        for _ in 0..3 {
+            engine.tick(1.0 / 60.0, &input);
+        }
+        assert_eq!(engine.stats().fine_chunks, 9, "backlog must fully drain");
+    }
+
+    #[test]
+    fn anomaly_debug_text_reports_reality_and_gates() {
+        use vackrooms::domain::entities::anomaly::{
+            AnomalyKind, Axis2, AxisDirection, TraversalGate, TraversalGateKind, WorldBounds,
+        };
+        let mut engine = Engine::new(
+            EngineConfig::default(),
+            Box::new(RecordingRenderer::default()),
+            Box::new(FlatChunkSource),
+        );
+        let gate = TraversalGate {
+            id: 7,
+            instance_id: 0xABCD_EF01,
+            anomaly_kind: AnomalyKind::RedRoom,
+            kind: TraversalGateKind::RedThreshold,
+            axis: Axis2::X,
+            plane: 5.0,
+            span_min: 0.0,
+            span_max: 10.0,
+            forward: AxisDirection::Positive,
+            affected_bounds: WorldBounds::new(0.0, 0.0, 10.0, 10.0),
+        };
+        let mut payload = FlatChunkSource.load(0.0, 0.0, 0, 0);
+        payload.traversal_gates.push(gate);
+        engine.store.insert(
+            chunk_key(0.0, 0.0),
+            LoadedChunk::new((0.0, 0.0), 0, RealitySnapshot::empty(), payload),
+        );
+        engine.player.position = [6.0, 1.7, 5.0];
+        engine.update_anomalies([4.0, 1.7, 5.0]);
+
+        let text = engine.anomaly_debug_text();
+        assert!(text.contains("reality: 1 stamp(s)"), "{text}");
+        assert!(text.contains("epoch 1"), "{text}");
+        assert!(text.contains("gates resident: 1"), "{text}");
+        assert!(text.contains("RedRoom"), "{text}");
     }
 
     #[test]
