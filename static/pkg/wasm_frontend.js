@@ -1,5 +1,3 @@
-/* @ts-self-types="./wasm_frontend.d.ts" */
-
 /**
  * @param {number} seed
  * @param {number} rx

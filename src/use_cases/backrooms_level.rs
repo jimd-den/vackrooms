@@ -130,12 +130,15 @@ impl BackroomsLevel {
         wx: f32,
         wz: f32,
     ) -> FabricCeilingBand {
+        // Regular dropped ceiling — the labyrinth fabric — is the default
+        // condition of Level 0. Expanses and vaults are deliberate
+        // punctuation the maze occasionally opens into, never the baseline.
         let field = Self::n(noise, seed, 0xAA10, wx, wz, 0.18);
         if field < -0.60 {
             FabricCeilingBand::Compression
-        } else if field < 0.36 {
+        } else if field < 0.52 {
             FabricCeilingBand::Regular
-        } else if field < 0.68 {
+        } else if field < 0.76 {
             FabricCeilingBand::Expanse
         } else {
             FabricCeilingBand::Vault
@@ -1128,8 +1131,9 @@ mod tests {
         }
         let total = counts.iter().sum::<usize>() as f32;
         let ratio = |index| counts[index] as f32 / total;
+        // The labyrinth fabric is the default; open volumes punctuate it.
         assert!(
-            (0.45..=0.70).contains(&ratio(1)),
+            (0.60..=0.85).contains(&ratio(1)),
             "ceiling territories: compression {:.1}%, regular {:.1}%, expanse {:.1}%, vault {:.1}%",
             ratio(0) * 100.0,
             ratio(1) * 100.0,
@@ -1137,12 +1141,12 @@ mod tests {
             ratio(3) * 100.0
         );
         assert!(
-            (0.18..=0.42).contains(&ratio(2)),
+            (0.10..=0.28).contains(&ratio(2)),
             "open expanse territory was {:.1}%",
             ratio(2) * 100.0
         );
         assert!(
-            (0.05..=0.22).contains(&ratio(3)),
+            (0.03..=0.15).contains(&ratio(3)),
             "vault territory was {:.1}%",
             ratio(3) * 100.0
         );
