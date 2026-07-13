@@ -72,10 +72,32 @@ pub enum ArchLayout {
     DeadEnd = 1,
 }
 
+/// What passing through this archway *means* in the world graph. An arch is
+/// a topological connector, not decorative carving: crossing a `Transition`
+/// room changes which spatial grammar you are inside, and the two halves of
+/// the room disagree just enough to be read in hindsight.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum ArchBehavior {
+    /// A plain stable anchor room: both sides share one grammar (the
+    /// historical arch-room behavior, still the most common).
+    Anchor = 0,
+    /// The far side belongs to a different architectural culture: ceiling
+    /// regime, floor finish, and fixture rhythm disagree with the near side,
+    /// and the far arcade's lintels ride lower.
+    CultureSeam = 1,
+    /// The far side repeats the same grammar at a larger scale: the ceiling
+    /// lifts, openings broaden, and the light rhythm stretches.
+    ScaleBreach = 2,
+}
+
 /// Arch-room composition parameters, all snapped to the 0.4u plan lattice.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ArchProfile {
     pub layout: ArchLayout,
+    /// Graph meaning of the crossing. Always [`ArchBehavior::Anchor`] for
+    /// [`ArchLayout::DeadEnd`] rooms — a dead end connects nothing.
+    pub behavior: ArchBehavior,
     /// Center-to-center rhythm of arch openings along the long (local X) walls.
     pub bay: f32,
     /// Clear width of one arch opening.

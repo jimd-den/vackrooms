@@ -19,6 +19,13 @@ pub(crate) fn voxelize_columns(grid: &mut VoxelGrid, field: &ColumnField, voxel_
 
             if plan.floor {
                 grid.set(x, 0, z, plan.floor_material);
+                // Raised floor (stair treads, landings) is solid mass in
+                // wall material: collision derives from solid voxels, so a
+                // tread must block like architecture, not paint like carpet.
+                let raised = (plan.floor_units / voxel_size).round() as usize;
+                for y in 1..=raised.min(max_y) {
+                    grid.set(x, y, z, plan.wall_material);
+                }
             }
 
             if plan.solid {
