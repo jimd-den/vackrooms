@@ -2,6 +2,8 @@
 /* eslint-disable */
 export const memory: WebAssembly.Memory;
 export const start: () => void;
+export const set_face_weights: (a: number, b: number, c: number, d: number) => void;
+export const set_fov: (a: number) => void;
 export const worker_generate: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number];
 export const worker_init: (a: number, b: number, c: number) => void;
 export const get_blueprint_svg: (a: number, b: number, c: number, d: number, e: number) => [number, number];
@@ -22,8 +24,6 @@ export const set_cpu_scale: (a: number) => void;
 export const set_mouse_sensitivity: (a: number) => void;
 export const set_render_scale: (a: number) => void;
 export const set_cpu_shadows: (a: number) => void;
-export const set_face_weights: (a: number, b: number, c: number, d: number) => void;
-export const set_fov: (a: number) => void;
 export const wasm_bindgen__convert__closures_____invoke__h4a98415c8f04dfea: (a: number, b: number, c: number) => void;
 export const wasm_bindgen__convert__closures_____invoke__h00d81ef20398ee11: (a: number, b: number, c: any) => void;
 export const wasm_bindgen__convert__closures_____invoke__h00d81ef20398ee11_2: (a: number, b: number, c: any) => void;

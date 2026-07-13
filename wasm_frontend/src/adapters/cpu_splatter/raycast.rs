@@ -23,17 +23,61 @@ pub struct RayHit {
     pub voxel_type: u32,
 }
 
-/// Keeps slab divisions finite for axis-aligned rays. `f32::signum()` is
-/// zero for `0.0`, so multiplying it by epsilon would leave the divisor at
-/// zero; choose the sign explicitly instead.
-fn nonzero_direction(component: f32) -> f32 {
-    if component.abs() >= 1.0e-4 {
-        component
-    } else if component.is_sign_negative() {
-        -1.0e-4
-    } else {
-        1.0e-4
+/// The parameter interval over which a ray lies inside an axis-aligned box.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(super) struct RayInterval {
+    pub entry: f32,
+    pub exit: f32,
+}
+
+/// Exact ray/AABB slab intersection shared by chunk traversal and flashlight
+/// receiver geometry.
+///
+/// A zero direction component means that axis is parallel: the ray either
+/// remains inside that slab forever or can never enter it. Tiny *non-zero*
+/// components remain untouched. Replacing them with an epsilon changes the
+/// ray itself and made CPU flashlight shadows jump when yaw or pitch crossed
+/// a cardinal direction.
+pub(super) fn ray_box_interval(
+    origin: [f32; 3],
+    direction: [f32; 3],
+    bounds_min: [f32; 3],
+    bounds_max: [f32; 3],
+) -> Option<RayInterval> {
+    let mut entry = f32::NEG_INFINITY;
+    let mut exit = f32::INFINITY;
+    let mut has_direction = false;
+
+    for axis in 0..3 {
+        let origin_axis = origin[axis];
+        let direction_axis = direction[axis];
+        if !origin_axis.is_finite()
+            || !direction_axis.is_finite()
+            || !bounds_min[axis].is_finite()
+            || !bounds_max[axis].is_finite()
+        {
+            return None;
+        }
+
+        if direction_axis == 0.0 {
+            if origin_axis < bounds_min[axis] || origin_axis > bounds_max[axis] {
+                return None;
+            }
+            continue;
+        }
+
+        has_direction = true;
+        let first = (bounds_min[axis] - origin_axis) / direction_axis;
+        let second = (bounds_max[axis] - origin_axis) / direction_axis;
+        entry = entry.max(first.min(second));
+        exit = exit.min(first.max(second));
+
+        if entry > exit {
+            return None;
+        }
     }
+
+    has_direction.then_some(RayInterval { entry, exit })
 }
 
 /// One saved traversal level: the parent node and its bounds.
@@ -108,20 +152,29 @@ impl TraversalCursor {
 /// Advances the ray to `bounds`' exit and nudges every tied axis just past
 /// its plane. Leaving an axis exactly *on* its plane stalls the march (t
 /// stops advancing), so the epsilon push is required for termination.
-fn skip_to_exit(ro: [f32; 3], rd: [f32; 3], b_min: [f32; 3], b_max: [f32; 3]) -> (f32, [f32; 3]) {
-    let exit_plane = |axis: usize| {
-        if rd[axis] > 0.0 {
-            b_max[axis]
+fn skip_to_exit(
+    ro: [f32; 3],
+    rd: [f32; 3],
+    b_min: [f32; 3],
+    b_max: [f32; 3],
+) -> Option<(f32, [f32; 3])> {
+    let exit_plane = |axis: usize| match rd[axis].total_cmp(&0.0) {
+        std::cmp::Ordering::Greater => b_max[axis],
+        std::cmp::Ordering::Less => b_min[axis],
+        std::cmp::Ordering::Equal => ro[axis],
+    };
+    let axis_exit = |axis: usize| {
+        if rd[axis] == 0.0 {
+            f32::INFINITY
         } else {
-            b_min[axis]
+            (exit_plane(axis) - ro[axis]) / rd[axis]
         }
     };
-    let t_max_planes = [
-        (exit_plane(0) - ro[0]) / rd[0],
-        (exit_plane(1) - ro[1]) / rd[1],
-        (exit_plane(2) - ro[2]) / rd[2],
-    ];
+    let t_max_planes = [axis_exit(0), axis_exit(1), axis_exit(2)];
     let t_exit = t_max_planes[0].min(t_max_planes[1]).min(t_max_planes[2]);
+    if !t_exit.is_finite() {
+        return None;
+    }
     let mut p = [
         ro[0] + t_exit * rd[0],
         ro[1] + t_exit * rd[1],
@@ -132,7 +185,7 @@ fn skip_to_exit(ro: [f32; 3], rd: [f32; 3], b_min: [f32; 3], b_max: [f32; 3]) ->
             p[axis] = exit_plane(axis) + if rd[axis] > 0.0 { 0.001 } else { -0.001 };
         }
     }
-    (t_exit, p)
+    Some((t_exit, p))
 }
 
 /// Marches one chunk's SVO from `t_entry`. `ro`/`rd` are chunk-local.
@@ -164,7 +217,7 @@ fn raymarch_svo_single(
             }
             // TRAVERSAL: empty-space skip — one step to this empty
             // leaf's exit plane instead of voxel-by-voxel stepping.
-            (t, p) = skip_to_exit(ro, rd, cursor.b_min, cursor.b_max);
+            (t, p) = skip_to_exit(ro, rd, cursor.b_min, cursor.b_max)?;
             if !cursor.pop_exited(p) {
                 return None;
             }
@@ -208,7 +261,7 @@ fn raymarch_svo_single(
             cursor.node = node.child_base + child_idx;
         } else {
             // TRAVERSAL: masked-out (air) octant skipped in one step.
-            (t, p) = skip_to_exit(ro, rd, oct_min, oct_max);
+            (t, p) = skip_to_exit(ro, rd, oct_min, oct_max)?;
             if !cursor.pop_exited(p) {
                 return None;
             }
@@ -234,11 +287,6 @@ pub fn trace_svo(
 
     let mut hits = Vec::with_capacity(chunks.len());
 
-    // Axis-aligned rays divide by the direction components; clamp near-zero
-    // components so the slab test stays finite.
-    let safe_rd = direction.map(nonzero_direction);
-    let inv_rd = [1.0 / safe_rd[0], 1.0 / safe_rd[1], 1.0 / safe_rd[2]];
-
     for (i, chunk) in chunks.iter().enumerate() {
         let local_ro = [
             origin[0] - chunk.origin[0],
@@ -246,20 +294,15 @@ pub fn trace_svo(
             origin[2] - chunk.origin[2],
         ];
 
-        // Slab test against the chunk's [0, world_size]^3 cube.
-        let mut t_entry = f32::NEG_INFINITY;
-        let mut t_exit = f32::INFINITY;
-        for axis in 0..3 {
-            let t1 = (0.0 - local_ro[axis]) * inv_rd[axis];
-            let t2 = (chunk.world_size - local_ro[axis]) * inv_rd[axis];
-            t_entry = t_entry.max(t1.min(t2));
-            t_exit = t_exit.min(t1.max(t2));
-        }
+        let Some(interval) = ray_box_interval(local_ro, direction, [0.0; 3], [chunk.world_size; 3])
+        else {
+            continue;
+        };
 
-        if t_entry < t_exit && t_exit > 0.0 && t_entry < max_t {
+        if interval.entry < interval.exit && interval.exit > 0.0 && interval.entry < max_t {
             hits.push(ChunkHit {
                 idx: i,
-                t_min: t_entry.max(0.0),
+                t_min: interval.entry.max(0.0),
             });
         }
     }
@@ -283,7 +326,7 @@ pub fn trace_svo(
         if let Some(ray_hit) = raymarch_svo_single(
             atlas,
             local_ro,
-            safe_rd,
+            direction,
             chunk.root_index as usize,
             hit.t_min,
             chunk.world_size,
@@ -307,14 +350,39 @@ pub fn trace_svo(
 
 #[cfg(test)]
 mod tests {
-    use super::nonzero_direction;
+    use super::{ray_box_interval, skip_to_exit};
 
     #[test]
-    fn axis_aligned_zero_gets_a_finite_slab_divisor() {
-        for component in [0.0, -0.0, 1.0e-8, -1.0e-8] {
-            let safe = nonzero_direction(component);
-            assert!(safe != 0.0);
-            assert!((1.0 / safe).is_finite());
-        }
+    fn parallel_slab_axes_do_not_change_the_ray() {
+        let bounds_min = [0.0; 3];
+        let bounds_max = [2.0; 3];
+
+        let exact = ray_box_interval([1.0, 1.0, -1.0], [0.0, 0.0, 1.0], bounds_min, bounds_max)
+            .expect("axis-aligned ray crosses the box");
+        assert_eq!(exact.entry, 1.0);
+        assert_eq!(exact.exit, 3.0);
+
+        let tiny = ray_box_interval(
+            [1.0, 1.0, -1.0],
+            [5.0e-7, -5.0e-7, 1.0],
+            bounds_min,
+            bounds_max,
+        )
+        .expect("tiny real components still cross the box");
+        assert_eq!(tiny.entry, 1.0);
+        assert_eq!(tiny.exit, 3.0);
+    }
+
+    #[test]
+    fn parallel_ray_outside_a_slab_misses() {
+        assert!(ray_box_interval([3.0, 1.0, -1.0], [0.0, 0.0, 1.0], [0.0; 3], [2.0; 3],).is_none());
+    }
+
+    #[test]
+    fn skip_ignores_parallel_planes() {
+        let (t, point) = skip_to_exit([1.0, 1.0, -1.0], [0.0, 0.0, 1.0], [0.0; 3], [2.0; 3])
+            .expect("the moving z axis has an exit");
+        assert_eq!(t, 3.0);
+        assert_eq!(point, [1.0, 1.0, 2.001]);
     }
 }

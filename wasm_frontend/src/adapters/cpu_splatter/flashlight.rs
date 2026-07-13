@@ -25,7 +25,7 @@
 use crate::application::ports::ChunkDraw;
 
 use super::camera::{Camera, dot};
-use super::raycast::trace_svo;
+use super::raycast::{ray_box_interval, trace_svo};
 
 /// Inner cone half-angle: full-strength core of the beam.
 pub const INNER_DEG: f32 = 11.0;
@@ -103,41 +103,42 @@ impl BeamReceiver {
             self.center.map(|value| value + self.half_extent),
         )
     }
-}
 
-/// Distance from `origin` to the first point where `direction` enters the
-/// receiver box. Parallel axes are handled without artificial directions so
-/// this remains exact for the common axis-aligned flashlight ray.
-fn ray_box_entry(
-    origin: [f32; 3],
-    direction: [f32; 3],
-    bounds_min: [f32; 3],
-    bounds_max: [f32; 3],
-) -> Option<f32> {
-    let mut entry = f32::NEG_INFINITY;
-    let mut exit = f32::INFINITY;
-    for axis in 0..3 {
-        if direction[axis].abs() < 1.0e-6 {
-            if origin[axis] < bounds_min[axis] || origin[axis] > bounds_max[axis] {
-                return None;
-            }
-            continue;
-        }
-        let inverse = 1.0 / direction[axis];
-        let first = (bounds_min[axis] - origin[axis]) * inverse;
-        let second = (bounds_max[axis] - origin[axis]) * inverse;
-        entry = entry.max(first.min(second));
-        exit = exit.min(first.max(second));
+    /// Chooses the point on this box nearest the spotlight's center axis.
+    ///
+    /// A CPU splat is flat-shaded as one unit. Sampling only its center makes
+    /// a coarse splat abruptly go dark when the center leaves the outer cone,
+    /// even while part of its visible footprint is still inside. Projecting
+    /// the box center onto the axis and clamping that point to the AABB is a
+    /// continuous, allocation-free approximation of the closest point.
+    fn sample_nearest_axis(self, lamp: [f32; 3], axis: [f32; 3]) -> [f32; 3] {
+        let to_center = [
+            self.center[0] - lamp[0],
+            self.center[1] - lamp[1],
+            self.center[2] - lamp[2],
+        ];
+        let along_axis = dot(to_center, axis).max(0.0);
+        let point_on_axis = [
+            lamp[0] + axis[0] * along_axis,
+            lamp[1] + axis[1] * along_axis,
+            lamp[2] + axis[2] * along_axis,
+        ];
+        let (bounds_min, bounds_max) = self.bounds();
+        [
+            point_on_axis[0].clamp(bounds_min[0], bounds_max[0]),
+            point_on_axis[1].clamp(bounds_min[1], bounds_max[1]),
+            point_on_axis[2].clamp(bounds_min[2], bounds_max[2]),
+        ]
     }
-    (entry <= exit && exit >= 0.0).then_some(entry.max(0.0))
 }
 
 /// RGB contribution of the flashlight on one cubic splat receiver.
 ///
-/// The ray aims at the receiver center but intersects its AABB to recover the
-/// physical near face. Occlusion depends on that geometric segment, never on
-/// subtracting an arbitrary fraction of the LOD size. `toggles` controls both
-/// the optional SVO ray and its near-to-far traversal order.
+/// The ray aims at an in-bounds sample nearest the cone axis, then intersects
+/// the receiver AABB to recover the physical near face. Occlusion depends on
+/// that geometric segment, never on subtracting an arbitrary fraction of the
+/// LOD size. `toggles` controls both the optional SVO ray and its near-to-far
+/// traversal order.
 pub fn beam_contribution(
     cam: &Camera,
     atlas: &[u32],
@@ -152,24 +153,29 @@ pub fn beam_contribution(
         cam.pos[2] + cam.forward[2] * LAMP_FORWARD,
     ];
 
-    let to_center = [
-        receiver.center[0] - lamp[0],
-        receiver.center[1] - lamp[1],
-        receiver.center[2] - lamp[2],
+    let sample = receiver.sample_nearest_axis(lamp, cam.forward);
+    let to_sample = [
+        sample[0] - lamp[0],
+        sample[1] - lamp[1],
+        sample[2] - lamp[2],
     ];
-    let center_distance = dot(to_center, to_center).sqrt();
-    if center_distance <= 0.0001 {
+    let sample_distance = dot(to_sample, to_sample).sqrt();
+    if sample_distance <= 0.0001 {
         return [0.0; 3];
     }
     let beam = [
-        to_center[0] / center_distance,
-        to_center[1] / center_distance,
-        to_center[2] / center_distance,
+        to_sample[0] / sample_distance,
+        to_sample[1] / sample_distance,
+        to_sample[2] / sample_distance,
     ];
     let (bounds_min, bounds_max) = receiver.bounds();
-    let Some(receiver_distance) = ray_box_entry(lamp, beam, bounds_min, bounds_max) else {
+    let Some(receiver_interval) = ray_box_interval(lamp, beam, bounds_min, bounds_max) else {
         return [0.0; 3];
     };
+    if receiver_interval.exit < 0.0 {
+        return [0.0; 3];
+    }
+    let receiver_distance = receiver_interval.entry.max(0.0);
 
     let cone = cone_falloff(dot(beam, cam.forward));
     if cone <= 0.0 {
@@ -346,6 +352,40 @@ mod tests {
         assert!(
             max_component(contribution) > 0.0,
             "diagonal receiver self-shadowed: {contribution:?}"
+        );
+    }
+
+    /// Regression: the receiver center is outside the 24-degree cone, but
+    /// the coarse box visibly overlaps it. Center-only flat shading made the
+    /// whole splat disappear at this camera angle.
+    #[test]
+    fn coarse_receiver_overlapping_cone_uses_an_in_bounds_sample() {
+        let cam = camera_facing_positive_z();
+        let atlas = [1, 1, 0x00FF_FFFF, 0];
+        let chunks = [ChunkDraw {
+            origin: [2.0, -1.0, 6.0],
+            root_index: 0,
+            world_size: 4.0,
+        }];
+        let receiver = BeamReceiver::cube([4.0, 1.0, 8.0], 4.0, [-0.45, 0.0, -0.89]);
+
+        let lamp = [0.0, 1.0, LAMP_FORWARD];
+        let center_direction = [4.0, 0.0, 8.0 - LAMP_FORWARD];
+        let center_length = dot(center_direction, center_direction).sqrt();
+        let center_alignment = center_direction[2] / center_length;
+        assert_eq!(
+            cone_falloff(center_alignment),
+            0.0,
+            "fixture must reproduce the old center-only angular dropout"
+        );
+        let sample = receiver.sample_nearest_axis(lamp, cam.forward);
+        assert!(sample[0] >= 2.0 && sample[0] <= 6.0);
+
+        let contribution =
+            beam_contribution(&cam, &atlas, &chunks, receiver, &RenderToggles::default());
+        assert!(
+            max_component(contribution) > 0.0,
+            "box overlaps the cone but its flat sample went dark"
         );
     }
 }
