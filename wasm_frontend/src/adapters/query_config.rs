@@ -88,6 +88,7 @@ pub fn parse_generation_params(query: &str, default_seed: u32) -> GenerationPara
                     "blackout" => Some(AnomalyKind::BlackoutExpanse),
                     "pits" => Some(AnomalyKind::PitLattice),
                     "archway" => Some(AnomalyKind::ArchwayRoom),
+                    "redroom" => Some(AnomalyKind::RedRoom),
                     _ => None,
                 };
             }
@@ -171,6 +172,8 @@ mod tests {
         assert_eq!(p.anomalies.forced_kind, Some(AnomalyKind::PitLattice));
         let p = parse_generation_params("?force_anomaly=archway", 42);
         assert_eq!(p.anomalies.forced_kind, Some(AnomalyKind::ArchwayRoom));
+        let p = parse_generation_params("?force_anomaly=redroom", 42);
+        assert_eq!(p.anomalies.forced_kind, Some(AnomalyKind::RedRoom));
         let p = parse_generation_params("?force_anomaly=banana", 42);
         assert_eq!(p.anomalies.forced_kind, None);
     }

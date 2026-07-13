@@ -158,6 +158,51 @@ pub fn set_cpu_shadows(mode: u32) {
     CPU_SHADOWS.store(mode, Ordering::Relaxed);
 }
 
+/// Renderer optimization toggles as a bitfield — see
+/// [`application::render_settings::RenderToggles`]. Initialized from the URL
+/// query at boot; the settings menu flips individual switches afterwards.
+#[cfg(target_arch = "wasm32")]
+pub static RENDER_TOGGLE_BITS: AtomicU32 = AtomicU32::new(u32::MAX);
+
+/// Flips one renderer optimization switch by name (`"hiz"`, `"f2b"`,
+/// `"mips"`, `"beam_occlusion"`, `"shadows"`, `"cells"`, `"cull"`,
+/// `"budget"`, `"dither"`, `"timer"`). Unknown names are ignored.
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen::prelude::wasm_bindgen]
+pub fn set_render_toggle(name: &str, enabled: bool) {
+    let mut toggles = get_render_toggles();
+    toggles.set(name, enabled);
+    RENDER_TOGGLE_BITS.store(toggles.to_bits(), Ordering::Relaxed);
+}
+
+/// Returns one renderer switch by its short URL name. This small diagnostic
+/// export lets the settings UI and browser smoke tests verify the effective
+/// state after URL and local-preference overrides have been composed.
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen::prelude::wasm_bindgen]
+pub fn render_toggle_enabled(name: &str) -> Option<bool> {
+    get_render_toggles().enabled(name)
+}
+
+/// Snapshot of the toggle switchboard, taken once per frame by each driver
+/// and passed by value into the platform-free render code.
+#[cfg(target_arch = "wasm32")]
+pub fn get_render_toggles() -> crate::application::render_settings::RenderToggles {
+    let bits = RENDER_TOGGLE_BITS.load(Ordering::Relaxed);
+    if bits == u32::MAX {
+        crate::application::render_settings::RenderToggles::default()
+    } else {
+        crate::application::render_settings::RenderToggles::from_bits(bits)
+    }
+}
+
+/// Boot-time initialization from the URL query (`?rt_<name>=0|1`).
+#[cfg(target_arch = "wasm32")]
+pub fn init_render_toggles(query: &str) {
+    let toggles = crate::application::render_settings::parse_render_toggles(query);
+    RENDER_TOGGLE_BITS.store(toggles.to_bits(), Ordering::Relaxed);
+}
+
 #[cfg(target_arch = "wasm32")]
 pub fn get_cpu_settings() -> crate::adapters::cpu_splatter::CpuRenderSettings {
     let scale = f32::from_bits(CPU_SCALE_BITS.load(Ordering::Relaxed));
@@ -559,6 +604,8 @@ pub fn get_debug_chunk_json(seed: u32, chunk_x: f32, chunk_z: f32, voxel_scale: 
                     vackrooms::domain::entities::anomaly::TraversalGateKind::Remap => "GATE",
                     vackrooms::domain::entities::anomaly::TraversalGateKind::RedThreshold =>
                         "THRESHOLD",
+                    vackrooms::domain::entities::anomaly::TraversalGateKind::RedLoop => "RED LOOP",
+                    vackrooms::domain::entities::anomaly::TraversalGateKind::RedEscape => "ESCAPE",
                 },
                 (gate.instance_id & 0xFFFF_FFFF) as u32
             );
