@@ -9,4 +9,5 @@ pub mod collision;
 pub mod engine;
 pub mod player;
 pub mod ports;
+pub mod render_settings;
 pub mod streaming;

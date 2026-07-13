@@ -16,7 +16,6 @@
 //! unit-tested.
 
 use vackrooms::adapters::voxel_mapper::{FaceDirection, MergedQuad};
-use vackrooms::domain::entities::voxel_grid::{VOXEL_LIGHT, VOXEL_RED_LIGHT};
 
 use crate::adapters::surface_mesh::material_id;
 use crate::application::ports::{

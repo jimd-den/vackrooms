@@ -112,7 +112,8 @@ impl RendererPort for DriverRenderer {
         match self {
             DriverRenderer::Surface(r) => r.gpu_frame_ms(),
             DriverRenderer::Splat(r) => r.gpu_frame_ms(),
-            DriverRenderer::Raymarch(_) | DriverRenderer::Cpu(_) => None,
+            DriverRenderer::Raymarch(r) => r.gpu_frame_ms(),
+            DriverRenderer::Cpu(_) => None,
         }
     }
     fn cpu_telemetry_string(&self) -> Option<String> {
@@ -260,6 +261,9 @@ pub fn boot() -> Result<(), JsValue> {
     // knobs ?pillars= ?walls= ?atria= ?lights= (multipliers, default 1).
     let query = window.location().search().unwrap_or_default();
     web_sys::console::log_1(&format!("BOOTING ENGINE: query={}", query).into());
+    // Renderer optimization switchboard (?rt_<name>=0|1); see
+    // application::render_settings for the catalog of switches.
+    crate::init_render_toggles(&query);
     let gen_params = parse_generation_params(&query, WORLD_SEED);
     let high_spec = query.contains("spec=high");
     // Spawn on the main corridor of region (0,0), looking east down its
@@ -701,6 +705,11 @@ fn run_frame_loop(
 
     let query = window.location().search().unwrap_or_default();
     let is_capture = query.contains("capture=1");
+    // Visual baselines get fifteen settled frames; renderer smoke tests only
+    // need proof that a loaded scene completed a couple of real draws. The
+    // shorter path keeps deliberately unoptimized reference renderers usable
+    // under software WebGL in CI without weakening screenshot baselines.
+    let capture_settle_frames = if query.contains("smoke=1") { 2 } else { 15 };
     let capture_frame_counter = Rc::new(Cell::new(0u32));
 
     let last_time = Rc::new(Cell::new(0.0f64));
@@ -844,7 +853,8 @@ fn run_frame_loop(
             }
         }
 
-        // If in capture mode, wait until the camera chunk is loaded, then wait 15 frames
+        // In capture mode, wait until the camera chunk is loaded, then allow
+        // the requested number of frames to settle before exposing readiness.
         if is_capture {
             let engine_ref = engine.borrow();
             let pos = engine_ref.player().position;
@@ -868,7 +878,7 @@ fn run_frame_loop(
             }
             if engine_ref.is_chunk_resident(cam_chunk) {
                 let frames = capture_frame_counter.get();
-                if frames < 15 {
+                if frames < capture_settle_frames {
                     capture_frame_counter.set(frames + 1);
                 } else {
                     if let Some(w) = web_sys::window() {
