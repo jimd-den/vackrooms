@@ -51,40 +51,17 @@ fn snap_width(v: f32) -> f32 {
 }
 
 // ---------------------------------------------------------------------------
-// Deterministic hashing (all "randomness" flows through here).
+// Deterministic hashing and edge portals.
+//
+// All "randomness" flows through `world_topology::hash01`, and the portal a
+// corridor uses to cross a region border is the macro graph's portal — one
+// derivation shared by both neighbors of the edge and by the topology layer.
 // ---------------------------------------------------------------------------
 
-fn mix(mut h: u32) -> u32 {
-    h ^= h >> 16;
-    h = h.wrapping_mul(0x85EB_CA6B);
-    h ^= h >> 13;
-    h = h.wrapping_mul(0xC2B2_AE35);
-    h ^= h >> 16;
-    h
-}
-
-/// Hash of a seed plus any number of integer keys, uniform in [0, 1).
-fn hash01(seed: u32, keys: &[i64]) -> f32 {
-    let mut h = mix(seed ^ 0x9E37_79B9);
-    for &k in keys {
-        h = mix(h ^ (k as u32)).wrapping_add(mix((k >> 32) as u32));
-    }
-    (mix(h) >> 8) as f32 / (1u32 << 24) as f32
-}
+use crate::use_cases::world_topology::{hash01, primary_portal_z as v_edge_portal_z};
 
 fn pick_index(h: f32, len: usize) -> usize {
     ((h * len as f32) as usize).min(len - 1)
-}
-
-// ---------------------------------------------------------------------------
-// Edge portals: where corridors cross region borders.
-// ---------------------------------------------------------------------------
-
-/// Portal position on the vertical edge `x = ex * REGION_SIZE` of region row
-/// `rz`. Both regions sharing the edge derive the same value.
-fn v_edge_portal_z(seed: u32, ex: i64, rz: i64) -> f32 {
-    let f = 0.30 + 0.40 * hash01(seed, &[0x0E1, ex, rz]);
-    snap((rz as f32 + f) * REGION_SIZE)
 }
 
 /// World spawn: a point *on the main corridor centerline* of region (0, 0),
@@ -582,7 +559,16 @@ pub fn generate_region_plan(
     let dominant = derive_genome(seed, rx, rz, 0, noise);
     let renovator = derive_genome(seed, rx, rz, 1, noise);
     let mut architects = vec![dominant.clone(), renovator];
-    if h(0) < 0.3 {
+    // A third designer intrudes where the style-blend field runs high: the
+    // macro fields decide *where* cultures leak into each other; the hash
+    // only decides whether this particular region exposes the seam.
+    let fields = crate::use_cases::world_topology::sample_fields(
+        noise,
+        seed,
+        (rx as f32 + 0.5) * REGION_SIZE,
+        (rz as f32 + 0.5) * REGION_SIZE,
+    );
+    if h(0) < 0.10 + 0.55 * fields.style_blend {
         architects.push(derive_genome(seed, rx, rz, 2, noise));
     }
 
@@ -656,10 +642,39 @@ pub fn generate_region_plan(
         rz,
         &dominant,
         config,
+        noise,
         &mut assemblies,
         &mut taken,
         &corridors,
     );
+
+    // --- vertical circulation ------------------------------------------------
+    // The macro graph may have reserved a stairwell here. Upward links are
+    // realized as a Stair assembly beside the main spine; downward links
+    // stay graph reservations until the engine streams below elevation 0.
+    // Placed after corruption so no pass can duplicate, abandon, or redden
+    // a stair core.
+    if let Some(link) = crate::use_cases::world_topology::vertical_link_for_region(seed, noise, rx, rz)
+        && crate::use_cases::vertical_circulation::link_wants_geometry(&link)
+        && let Some(stair) = crate::use_cases::vertical_circulation::place_stairwell(
+            id + 2000,
+            &link,
+            &legs,
+            region_origin,
+            region_size,
+            EDGE_MARGIN,
+            PLAN_WALL_T,
+            &taken,
+            |cx, cz, clearance| {
+                corridors
+                    .iter()
+                    .all(|s| s.distance(cx, cz) >= s.width * 0.5 + clearance)
+            },
+        )
+    {
+        taken.push(stair.footprint.bounds());
+        assemblies.push(stair);
+    }
 
     // Macro anomalies are derived after ordinary architecture so compact red
     // rooms can promote a real assembly, while region-spanning families keep
@@ -671,6 +686,7 @@ pub fn generate_region_plan(
         &assemblies,
         spawn_point(seed),
         config,
+        noise,
     );
 
     RegionPlan {
@@ -684,12 +700,14 @@ pub fn generate_region_plan(
 }
 
 /// Backrooms corruption: the plan was sane; the building is not.
+#[allow(clippy::too_many_arguments)]
 fn corrupt(
     seed: u32,
     rx: i64,
     rz: i64,
     dominant: &ArchitectGenome,
     config: &GeneratorConfig,
+    noise: &dyn NoiseProvider,
     assemblies: &mut Vec<AssemblyInstance>,
     taken: &mut Vec<(f32, f32, f32, f32)>,
     spines: &[CirculationSpine],
@@ -771,6 +789,11 @@ fn corrupt(
     // the anomaly, and it belongs to a whole architectural space — never a
     // lone fixture, never red masonry. Applied last so it respects whatever
     // the earlier corruption passes decided (an abandoned shell stays dark).
+    //
+    // Where a red room happens is a *graph event*, not a per-region coin
+    // flip: the macro topology plans separated events on its lattice (see
+    // `world_topology::red_room_event_for_region`), and this pass merely
+    // realizes an event that targets this region on one eligible assembly.
     let red_room_scale = config.anomalies.frequency * config.anomalies.red_rooms;
     let mut red_room_forced = false;
     let sp = spawn_point(seed);
@@ -816,11 +839,27 @@ fn corrupt(
         }
     }
 
-    if !red_room_forced && h(10) < (0.22 * red_room_scale.clamp(0.0, 4.0)).min(0.88) {
-        let k = pick_index(h(11), assemblies.len());
-        let a = &mut assemblies[k];
-        if !a.corruption.abandoned {
-            a.corruption.red_room = true;
+    if !red_room_forced
+        && let Some(event) = crate::use_cases::world_topology::red_room_event_for_region(
+            seed,
+            noise,
+            rx,
+            rz,
+            red_room_scale.clamp(0.0, 4.0),
+        )
+    {
+        // Realize the event on one occupied, reachable assembly, rotating
+        // from a stable start so the choice replays for every query of this
+        // region. If no assembly qualifies the event stays unrealized — a
+        // planned encounter never overwrites navigable circulation.
+        let count = assemblies.len();
+        let start = (event.id % count as u64) as usize;
+        for offset in 0..count {
+            let a = &mut assemblies[(start + offset) % count];
+            if !a.corruption.abandoned && !a.entrances.is_empty() {
+                a.corruption.red_room = true;
+                break;
+            }
         }
     }
 }
@@ -852,6 +891,7 @@ pub fn debug_region_ascii(plan: &RegionPlan, step: f32) -> String {
                         SpaceProgram::WaitingArea => 'w',
                         SpaceProgram::AbandonedExpansion => 'x',
                         SpaceProgram::Atrium => 'A',
+                        SpaceProgram::Stair => 'S',
                         _ => 'r',
                     };
                 }
@@ -981,12 +1021,16 @@ mod tests {
                 let p = plan(rx, rz);
                 for a in &p.assemblies {
                     let b = a.footprint.bounds();
-                    assert!(
-                        ((12.0 - 0.01)..=(24.0 + 0.01)).contains(&(b.2 - b.0)),
-                        "assembly {} has {} u frontage",
-                        a.id,
-                        b.2 - b.0
-                    );
+                    // Stair cores are deliberately compact circulation, not
+                    // program suites; every other mass keeps suite scale.
+                    if a.program != SpaceProgram::Stair {
+                        assert!(
+                            ((12.0 - 0.01)..=(24.0 + 0.01)).contains(&(b.2 - b.0)),
+                            "assembly {} has {} u frontage",
+                            a.id,
+                            b.2 - b.0
+                        );
+                    }
                     for e in &a.entrances {
                         entrances += 1;
                         if e.width <= 1.3 {
@@ -1049,6 +1093,87 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// Red rooms are graph events: a region shows one only when the macro
+    /// topology targeted it, and committed encounters keep the cooldown
+    /// distance from each other (no clustering into a red biome).
+    #[test]
+    fn red_rooms_realize_only_macro_graph_events_and_keep_their_distance() {
+        use crate::use_cases::world_topology::red_room_event_for_region;
+        let noise = SimpleNoiseProvider::new();
+        let mut realized: Vec<(i64, i64)> = Vec::new();
+        for rx in -8..=8 {
+            for rz in -8..=8 {
+                let p = plan(rx, rz);
+                let has_red = p.assemblies.iter().any(|a| a.corruption.red_room);
+                let event = red_room_event_for_region(42, &noise, rx, rz, 1.0);
+                if event.is_none() {
+                    assert!(
+                        !has_red,
+                        "region ({rx},{rz}) has a red room without a graph event"
+                    );
+                }
+                if has_red {
+                    realized.push((rx, rz));
+                }
+            }
+        }
+        assert!(!realized.is_empty(), "no red-room event realized in 289 regions");
+        for (i, a) in realized.iter().enumerate() {
+            for b in realized.iter().skip(i + 1) {
+                let chebyshev = (a.0 - b.0).abs().max((a.1 - b.1).abs());
+                assert!(
+                    chebyshev >= 3,
+                    "red rooms at {a:?} and {b:?} violate the macro cooldown"
+                );
+            }
+        }
+    }
+
+    /// Where the macro graph reserved an upward vertical link and placement
+    /// succeeded, the region owns exactly one Stair assembly with a
+    /// corridor-facing entrance near the link's anchor.
+    #[test]
+    fn stairwells_realize_upward_vertical_links() {
+        use crate::use_cases::vertical_circulation::link_wants_geometry;
+        use crate::use_cases::world_topology::vertical_link_for_region;
+        let noise = SimpleNoiseProvider::new();
+        let mut realized = 0usize;
+        for rx in -8..=8 {
+            for rz in -8..=8 {
+                let p = plan(rx, rz);
+                let stairs: Vec<_> = p
+                    .assemblies
+                    .iter()
+                    .filter(|a| a.program == SpaceProgram::Stair)
+                    .collect();
+                let link = vertical_link_for_region(42, &noise, rx, rz);
+                match link {
+                    Some(link) if link_wants_geometry(&link) => {
+                        assert!(stairs.len() <= 1, "region ({rx},{rz}) built extra stairs");
+                        if let Some(stair) = stairs.first() {
+                            realized += 1;
+                            assert!(!stair.entrances.is_empty(), "stair core has no entrance");
+                            let b = stair.footprint.bounds();
+                            let (cx, cz) = ((b.0 + b.2) * 0.5, (b.1 + b.3) * 0.5);
+                            let d = ((cx - link.anchor.x).powi(2)
+                                + (cz - link.anchor.z).powi(2))
+                            .sqrt();
+                            assert!(
+                                d < REGION_SIZE,
+                                "stair strayed {d} u from its reservation anchor"
+                            );
+                        }
+                    }
+                    _ => assert!(
+                        stairs.is_empty(),
+                        "region ({rx},{rz}) built a stair without a reservation"
+                    ),
+                }
+            }
+        }
+        assert!(realized >= 3, "only {realized} stairwells in 289 regions");
     }
 
     #[test]

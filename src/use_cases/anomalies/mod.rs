@@ -13,12 +13,15 @@ use crate::domain::entities::anomaly::{AnomalyInstance, WorldBounds};
 use crate::domain::entities::architecture::AssemblyInstance;
 use crate::entities::models::Position;
 use crate::use_cases::generate_chunk::GeneratorConfig;
+use crate::use_cases::ports::NoiseProvider;
 use crate::use_cases::red_rooms::planning::plan_red_rooms;
 
 /// Returns every immutable anomaly instance whose footprint overlaps a region.
 ///
 /// Identity is independent of the query partition: callers may ask through
 /// adjacent regions or different voxel sizes and receive the same instance.
+/// The noise port feeds the macro `anomaly_pressure` field, which clusters
+/// candidates without ever placing one itself.
 pub fn plan_anomalies_for_region(
     seed: u32,
     region_origin: Position,
@@ -26,6 +29,7 @@ pub fn plan_anomalies_for_region(
     assemblies: &[AssemblyInstance],
     protected_point: Position,
     config: &GeneratorConfig,
+    noise: &dyn NoiseProvider,
 ) -> Vec<AnomalyInstance> {
     let query = WorldBounds::new(
         region_origin.x,
@@ -33,7 +37,8 @@ pub fn plan_anomalies_for_region(
         region_origin.x + region_size,
         region_origin.z + region_size,
     );
-    let mut instances = macro_planner::plan_macro_anomalies(seed, query, protected_point, config);
+    let mut instances =
+        macro_planner::plan_macro_anomalies(seed, query, protected_point, config, noise);
     instances.extend(plan_red_rooms(seed, region_origin, assemblies, config));
     instances.sort_by_key(|instance| instance.id);
     instances.dedup_by_key(|instance| instance.id);
@@ -90,6 +95,7 @@ mod tests {
                 &[],
                 Position::new(0.0, 0.0),
                 &config,
+                &crate::frameworks_drivers::simple_noise::SimpleNoiseProvider::new(),
             )
             .is_empty()
         );
@@ -107,6 +113,7 @@ mod tests {
             &[],
             Position::new(6.0, 40.0),
             &config,
+            &crate::frameworks_drivers::simple_noise::SimpleNoiseProvider::new(),
         );
         assert_eq!(plans.len(), 1);
         assert_eq!(plans[0].kind, AnomalyKind::PillarExpanse);
@@ -125,6 +132,7 @@ mod tests {
             &[red_assembly()],
             Position::new(6.0, 0.0),
             &config,
+            &crate::frameworks_drivers::simple_noise::SimpleNoiseProvider::new(),
         );
         assert_eq!(plans.len(), 1);
         assert_eq!(plans[0].kind, AnomalyKind::RedRoom);
@@ -136,6 +144,7 @@ mod tests {
         let mut config = GeneratorConfig::low_spec();
         config.anomalies.frequency = 4.0;
         let protected = Position::new(0.0, 0.0);
+        let noise = crate::frameworks_drivers::simple_noise::SimpleNoiseProvider::new();
         let mut shared = false;
         for region_z in 4..20 {
             for region_x in 4..20 {
@@ -146,6 +155,7 @@ mod tests {
                     &[],
                     protected,
                     &config,
+                    &noise,
                 );
                 let right = plan_anomalies_for_region(
                     42,
@@ -154,6 +164,7 @@ mod tests {
                     &[],
                     protected,
                     &config,
+                    &noise,
                 );
                 if let Some(one) = left
                     .iter()

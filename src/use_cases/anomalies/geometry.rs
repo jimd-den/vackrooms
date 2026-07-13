@@ -5,7 +5,9 @@
 //! remain a separate encounter feature because their geometry is coupled to a
 //! dedicated phase machine and recursive Level 0 destination.
 
-use crate::domain::entities::anomaly::{AnomalyInstance, AnomalyKind, ArchLayout, RealitySnapshot};
+use crate::domain::entities::anomaly::{
+    AnomalyInstance, AnomalyKind, ArchBehavior, ArchLayout, RealitySnapshot,
+};
 use crate::domain::entities::environment::{EnvironmentProfile, FloorState};
 use crate::domain::entities::voxel_grid::{VOXEL_FLUID, VOXEL_GLIMMER, VOXEL_LIGHT};
 use crate::use_cases::backrooms_level::{BackroomsLevel, ColumnPlan};
@@ -300,6 +302,12 @@ fn sample_pit_lattice(context: &SampleContext<'_>) -> ColumnPlan {
 
 /// Stable pale arch rooms never inspect `RealitySnapshot`, which keeps them a
 /// fixed landmark against every mutable anomaly family.
+///
+/// A `Transition` room is a *graph connector*: its `ArchBehavior` decides
+/// what its far half (local `z > 0`) belongs to. The seam is expressed only
+/// through legal architectural vocabulary — ceiling regime, floor finish,
+/// lintel height, fixture rhythm — never through impossible collision or a
+/// repainted wall, so the crossing is felt before it is understood.
 fn sample_archway_anchor(context: &SampleContext<'_>) -> ColumnPlan {
     let instance = context.instance;
     let tuning = &context.config.tuning;
@@ -308,19 +316,40 @@ fn sample_archway_anchor(context: &SampleContext<'_>) -> ColumnPlan {
     let profile = EnvironmentProfile::archway_room();
     let half_x = instance.footprint.half_x;
     let half_z = instance.footprint.half_z;
+
+    // The far half of a seam room disagrees with the near half.
+    let far_side = local_z > 0.0;
+    let (ceiling_units, floor_material) = match arch.behavior {
+        ArchBehavior::CultureSeam if far_side => {
+            (3.0, EnvironmentProfile::pillar_expanse().floor_voxel())
+        }
+        ArchBehavior::ScaleBreach if far_side => (4.4, profile.floor_voxel()),
+        _ => (3.6, profile.floor_voxel()),
+    };
     let mut plan = ColumnPlan {
         wall_material: profile.wall_voxel(),
-        floor_material: profile.floor_voxel(),
-        ..ColumnPlan::open(3.6)
+        floor_material,
+        ..ColumnPlan::open(ceiling_units)
     };
 
     let bay_index = ((local_x + half_x) / arch.bay).floor() as i64;
     let along = (local_x + half_x).rem_euclid(arch.bay);
-    let across_opening = (along - arch.bay * 0.5).abs() < arch.opening * 0.5;
+    // The far arcade of a scale breach broadens its openings; a culture
+    // seam presses its lintels lower. Both stay on the shared bay rhythm so
+    // the two walls visibly disagree about the same structure.
+    let effective_opening = match arch.behavior {
+        ArchBehavior::ScaleBreach if far_side => arch.opening * 1.5,
+        _ => arch.opening,
+    };
+    let head_drop = match arch.behavior {
+        ArchBehavior::CultureSeam if far_side => 0.4,
+        _ => 0.0,
+    };
+    let across_opening = (along - arch.bay * 0.5).abs() < effective_opening * 0.5;
     let blind = bay_index.rem_euclid(arch.blind_every as i64) == arch.blind_every as i64 - 1;
     let arch_head = {
-        let t = ((along - arch.bay * 0.5).abs() / (arch.opening * 0.5)).clamp(0.0, 1.0);
-        ((2.0 + 0.6 * (1.0 - t)) / 0.2).round() * 0.2
+        let t = ((along - arch.bay * 0.5).abs() / (effective_opening * 0.5)).clamp(0.0, 1.0);
+        (((2.0 - head_drop) + 0.6 * (1.0 - t)) / 0.2).round() * 0.2
     };
 
     if context.perimeter {
@@ -368,4 +397,86 @@ fn sample_archway_anchor(context: &SampleContext<'_>) -> ColumnPlan {
         && tuning.lights > 0.0;
     let _ = context.boundary;
     plan
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::entities::anomaly::{
+        ArchProfile, OrientedFootprint, OrthoBasis, QuarterTurn,
+    };
+    use crate::entities::models::Position;
+    use crate::frameworks_drivers::simple_noise::SimpleNoiseProvider;
+
+    fn arch_room(behavior: ArchBehavior) -> AnomalyInstance {
+        let basis = OrthoBasis {
+            turn: QuarterTurn::Zero,
+        };
+        AnomalyInstance {
+            id: 0xA5C4_0001,
+            kind: AnomalyKind::ArchwayRoom,
+            footprint: OrientedFootprint {
+                center: Position::new(0.0, 0.0),
+                half_x: 6.0,
+                half_z: 6.0,
+                basis,
+            },
+            basis,
+            macro_anchor: (0, 0),
+            pillar_lattice: None,
+            pit_lattice: None,
+            arch: Some(ArchProfile {
+                layout: ArchLayout::Transition,
+                behavior,
+                bay: 2.8,
+                opening: 1.6,
+                blind_every: 4,
+            }),
+            gates: Vec::new(),
+            skeleton_half_width: 0.0,
+            entry_band: 0.0,
+        }
+    }
+
+    fn interior(instance: &AnomalyInstance, local_z: f32) -> ColumnPlan {
+        sample_anomaly(
+            instance,
+            &SimpleNoiseProvider::new(),
+            42,
+            &crate::use_cases::generate_chunk::GeneratorConfig::low_spec(),
+            &RealitySnapshot::empty(),
+            1.0,
+            local_z,
+        )
+    }
+
+    /// A seam-bearing transition arch is a graph edge you can read: its far
+    /// half disagrees with its near half through legal architecture only.
+    #[test]
+    fn arch_behaviors_split_the_room_across_the_seam() {
+        let anchor = arch_room(ArchBehavior::Anchor);
+        assert_eq!(
+            interior(&anchor, -3.0).ceiling_units,
+            interior(&anchor, 3.0).ceiling_units,
+            "an anchor room must stay symmetric"
+        );
+
+        let culture = arch_room(ArchBehavior::CultureSeam);
+        let near = interior(&culture, -3.0);
+        let far = interior(&culture, 3.0);
+        assert!(
+            far.ceiling_units < near.ceiling_units,
+            "culture seam far side must change ceiling regime"
+        );
+        assert_ne!(
+            far.floor_material, near.floor_material,
+            "culture seam far side must change floor grammar"
+        );
+
+        let scale = arch_room(ArchBehavior::ScaleBreach);
+        assert!(
+            interior(&scale, 3.0).ceiling_units > interior(&scale, -3.0).ceiling_units,
+            "scale breach far side must lift its ceiling"
+        );
+    }
 }

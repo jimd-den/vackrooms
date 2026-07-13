@@ -97,6 +97,11 @@ pub struct BackroomsLevel;
 pub(crate) struct ColumnPlan {
     /// Whether the walkable floor slab exists under this column.
     pub floor: bool,
+    /// Raised solid floor above the base slab, world units (stair treads,
+    /// landings, plinths). `0.0` is the ordinary one-voxel slab. Raised
+    /// floor voxelizes as solid wall material so it collides — a tread the
+    /// player ghosts through would be worse than one that blocks.
+    pub floor_units: f32,
     /// Floor-to-ceiling solid (wall or pillar).
     pub solid: bool,
     /// Ceiling height in world units (top of the walkable space).
@@ -127,6 +132,7 @@ impl ColumnPlan {
     pub(crate) fn open(ceiling_units: f32) -> Self {
         Self {
             floor: true,
+            floor_units: 0.0,
             solid: false,
             ceiling_units,
             light: false,
@@ -350,6 +356,7 @@ impl BackroomsLevel {
 
         ColumnPlan {
             floor: true,
+            floor_units: 0.0,
             solid,
             ceiling_units,
             light,
@@ -690,8 +697,26 @@ impl BackroomsLevel {
                     continue;
                 }
                 let inside = a.footprint.contains(wx, wz);
-                let base =
+                let mut base =
                     Self::assembly_column(a, inside, renovator_structure.as_ref(), tuning, wx, wz);
+                // A stair assembly shapes its interior as a flight: the
+                // vertical link that reserved it decides whether the flight
+                // lands or climbs endlessly. Stairs are architecture, so a
+                // walls=0 debug world flattens them along with everything.
+                if a.program == SpaceProgram::Stair && inside && !base.solid && tuning.walls > 0.0 {
+                    let rx = region_index(plan.origin_world.x + 0.1);
+                    let rz = region_index(plan.origin_world.z + 0.1);
+                    let kind = crate::use_cases::world_topology::vertical_link_for_region(
+                        seed, noise, rx, rz,
+                    )
+                    .map(|link| link.kind)
+                    .unwrap_or(
+                        crate::domain::entities::world_topology::VerticalLinkKind::OrdinaryStair,
+                    );
+                    crate::use_cases::vertical_circulation::apply_stair_profile(
+                        a, kind, &mut base, wx, wz,
+                    );
+                }
                 if a.corruption.red_room
                     && let Some(red) = plan.anomalies.iter().find(|r| {
                         r.kind == AnomalyKind::RedRoom
@@ -1108,8 +1133,12 @@ mod tests {
                 let expect =
                     BackroomsLevel::plan_column(plan, &noise, 42, &LevelTuning::default(), wx, wz);
                 let got_solid = grid.get(lx, 1, z) == VOXEL_WALL;
+                // Raised floor (stair treads) also writes wall material at
+                // the walkable layer, so it counts as expected solid here.
+                let expect_solid =
+                    expect.solid || (expect.floor_units / config.voxel_scale).round() >= 1.0;
                 assert_eq!(
-                    got_solid, expect.solid,
+                    got_solid, expect_solid,
                     "column mismatch at world x={gx} z={z}"
                 );
             }
@@ -1395,6 +1424,84 @@ mod tests {
             }
         }
         assert!(found, "no abandoned expansion within 36 regions");
+    }
+
+    /// A planned stairwell samples through the full column pipeline as a
+    /// walkable flight: flat at the door, rising monotonically along the
+    /// walk axis, reaching its landing with headroom intact.
+    #[test]
+    fn stairwells_sample_as_rising_flights() {
+        use crate::use_cases::vertical_circulation::link_wants_geometry;
+        use crate::use_cases::world_topology::vertical_link_for_region;
+        let noise = SimpleNoiseProvider::new();
+        let config = GeneratorConfig::low_spec();
+        let tuning = LevelTuning::default();
+
+        let mut checked = 0usize;
+        for rz in -8i64..=8 {
+            for rx in -8i64..=8 {
+                let Some(link) = vertical_link_for_region(42, &noise, rx, rz) else {
+                    continue;
+                };
+                if !link_wants_geometry(&link) {
+                    continue;
+                }
+                let plans = BackroomsLevel::region_plans_for(
+                    Position::new(rx as f32 * REGION_SIZE, rz as f32 * REGION_SIZE),
+                    1.0,
+                    42,
+                    &config,
+                    &noise,
+                );
+                let plan = &plans.iter().find(|(k, _)| *k == (rx, rz)).unwrap().1;
+                let Some(stair) = plan
+                    .assemblies
+                    .iter()
+                    .find(|a| a.program == SpaceProgram::Stair)
+                else {
+                    continue;
+                };
+                let door = stair.entrances[0].center;
+                let b = stair.footprint.bounds();
+                let inward = if (door.z - b.1).abs() < (door.z - b.3).abs() {
+                    1.0
+                } else {
+                    -1.0
+                };
+
+                let at_door =
+                    BackroomsLevel::plan_column(plan, &noise, 42, &tuning, door.x, door.z);
+                assert!(!at_door.solid, "stair door is walled shut");
+                assert_eq!(at_door.floor_units, 0.0, "stair door is not flat");
+
+                let mut previous = 0.0f32;
+                let mut peak = 0.0f32;
+                let mut depth = 0.7;
+                while depth < (b.3 - b.1) - 0.6 {
+                    let wz = door.z + inward * depth;
+                    let c = BackroomsLevel::plan_column(plan, &noise, 42, &tuning, door.x, wz);
+                    if !c.solid {
+                        assert!(
+                            c.floor_units >= previous - 1e-6,
+                            "flight descends inside stair at region ({rx},{rz})"
+                        );
+                        assert!(
+                            c.ceiling_units - c.floor_units >= 2.2 - 1e-6,
+                            "flight headroom pinched at region ({rx},{rz})"
+                        );
+                        previous = c.floor_units;
+                        peak = peak.max(c.floor_units);
+                    }
+                    depth += 0.2;
+                }
+                assert!(
+                    peak >= 1.6 - 1e-6,
+                    "flight in ({rx},{rz}) peaked at {peak} u"
+                );
+                checked += 1;
+            }
+        }
+        assert!(checked >= 3, "only {checked} stairwells sampled");
     }
 
     /// The baseline is broad regular dropped ceiling, with enough expansive
@@ -1782,13 +1889,6 @@ mod tests {
         // ceiling lights.
         for (ox, oz) in [(0.0, 0.0), (30.0, 10.0), (-40.0, 70.0), (150.0, -90.0)] {
             let grid = generate(ox, oz);
-            let plans = BackroomsLevel::region_plans_for(
-                Position::new(ox, oz),
-                config.chunk_size,
-                42,
-                &config,
-                &noise,
-            );
             let scale = config.voxel_scale;
             for z in 0..grid.depth() {
                 for x in 0..grid.width() {
