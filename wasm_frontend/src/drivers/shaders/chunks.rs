@@ -37,7 +37,8 @@ float spotRange(float dist) {
     return 1.0 - smoothstep(SPOT_RANGE_FULL, SPOT_RANGE_END, dist);
 }
 
-// Full beam response at a surface point with normal N. Multiply by albedo.
+// Full beam response at a surface point with normal N. This returns the light
+// term; each renderer owns its final material/radiance composition.
 vec3 spotBeam(vec3 camPos, vec3 camForward, vec3 surfacePos, vec3 N) {
     vec3 lamp = spotLampPos(camPos, camForward);
     vec3 toSurf = surfacePos - lamp;

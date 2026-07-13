@@ -114,6 +114,8 @@ export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembl
 export interface InitOutput {
     readonly memory: WebAssembly.Memory;
     readonly start: () => void;
+    readonly set_face_weights: (a: number, b: number, c: number, d: number) => void;
+    readonly set_fov: (a: number) => void;
     readonly worker_generate: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number];
     readonly worker_init: (a: number, b: number, c: number) => void;
     readonly get_blueprint_svg: (a: number, b: number, c: number, d: number, e: number) => [number, number];
@@ -134,8 +136,6 @@ export interface InitOutput {
     readonly set_mouse_sensitivity: (a: number) => void;
     readonly set_render_scale: (a: number) => void;
     readonly set_cpu_shadows: (a: number) => void;
-    readonly set_face_weights: (a: number, b: number, c: number, d: number) => void;
-    readonly set_fov: (a: number) => void;
     readonly wasm_bindgen__convert__closures_____invoke__h4a98415c8f04dfea: (a: number, b: number, c: number) => void;
     readonly wasm_bindgen__convert__closures_____invoke__h00d81ef20398ee11: (a: number, b: number, c: any) => void;
     readonly wasm_bindgen__convert__closures_____invoke__h00d81ef20398ee11_2: (a: number, b: number, c: any) => void;

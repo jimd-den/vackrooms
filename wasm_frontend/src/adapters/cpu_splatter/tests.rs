@@ -451,6 +451,38 @@ fn test_trace_svo_basic_intersect() {
     assert!(miss.is_none());
 }
 
+/// REGRESSION (cone-light angles): a truly cardinal shadow ray must remain
+/// cardinal. The old slab workaround changed every tiny/zero component to
+/// +/-1e-4; by the time this +Z ray reached the voxel it had drifted across
+/// x=2, selected the neighboring octant, and made the flashlight flicker off
+/// as yaw crossed the axis.
+#[test]
+fn cardinal_secondary_ray_does_not_drift_across_an_octant_boundary() {
+    let (atlas, root) = one_voxel_atlas(0xFFFFFF, 15);
+    let chunks = [ChunkDraw {
+        origin: [0.0, 0.0, 0.0],
+        root_index: root as i32,
+        world_size: 4.0,
+    }];
+
+    for x_direction in [-5.0e-7, -0.0, 0.0, 5.0e-7] {
+        for front_to_back in [false, true] {
+            let hit = trace_svo(
+                &atlas,
+                &chunks,
+                [2.0 - 5.0e-5, 1.5, -1.0],
+                [x_direction, 0.0, 1.0],
+                10.0,
+                front_to_back,
+            )
+            .expect("a near-cardinal +Z ray must stay inside the voxel's x slab");
+
+            assert_eq!(hit.voxel_type, 1);
+            assert!((hit.t - 2.0).abs() < 1.0e-4);
+        }
+    }
+}
+
 /// REGRESSION (cone light): a ray crossing an empty *lower-Y* masked-out
 /// octant used to compute its exit plane from `center[1]` instead of the
 /// octant floor, stall until the step budget, and report "no hit". The

@@ -297,7 +297,12 @@ void main() {
         float grime = getGrime(vWorldPosition);
         vec3 modulatedAlbedo = albedo * grime;
 
-        color = totalDiffuseLight * modulatedAlbedo + directSpecular + modulatedAlbedo * flashlight;
+        // Keep the flashlight as its own additive radiance term. Diffuse and
+        // direct specular retain the material response; the beam tint itself
+        // must not disappear into a dark/grimy albedo.
+        color = totalDiffuseLight * modulatedAlbedo
+              + directSpecular * modulatedAlbedo
+              + flashlight;
     }
 
     // Fog with onset distance - pushed further back for large open spaces like the Atrium
