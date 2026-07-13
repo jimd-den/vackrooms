@@ -18,9 +18,7 @@ use crate::application::ports::{
 use crate::application::streaming::{
     ChunkKey, ChunkStore, LoadedChunk, StreamingPolicy, chunk_key,
 };
-use vackrooms::domain::entities::anomaly::{
-    AnomalyKind, RealitySnapshot, TraversalGateKind, WorldBounds,
-};
+use vackrooms::domain::entities::anomaly::{AnomalyKind, RealitySnapshot, TraversalGateKind};
 
 /// Static configuration chosen by the composition root.
 #[derive(Debug, Clone, Copy)]
@@ -182,9 +180,6 @@ const LEVEL_GRASSLAND: u32 = 34;
 const NOCLIP_PUSH_SECONDS: f32 = 1.2;
 /// ...then one roll per second of continued pushing, at this probability.
 const NOCLIP_CHANCE: f32 = 0.2;
-/// One coarse wall voxel around a red-room footprint joins the same rebuild.
-const PLAN_TRANSITION_MARGIN: f32 = 0.4;
-
 /// Flare lifetime in seconds (fade begins in the final tenth).
 const FLARE_LIFETIME_S: f32 = 90.0;
 /// Global active-flare cap; dropping past it silently retires the oldest.
@@ -479,7 +474,11 @@ impl Engine {
         let fwd = self.player.forward();
         let eye = self.player.position;
         let ahead = [eye[0] + fwd[0] * 0.9, eye[1], eye[2] + fwd[2] * 0.9];
-        let spot = if self.world.collides(ahead) { eye } else { ahead };
+        let spot = if self.world.collides(ahead) {
+            eye
+        } else {
+            ahead
+        };
         if self.flares.len() >= FLARE_CAP {
             // Oldest first by construction; no count UI, no modal — the
             // oldest flare simply retires.
@@ -504,11 +503,12 @@ impl Engine {
         }
         let world = &self.world;
         self.flares.retain(|flare| {
-            let probe = [flare.position[0], flare.position[1] + 0.2, flare.position[2]];
-            !world
-                .boxes()
-                .iter()
-                .any(|b| Self::point_in_aabb(probe, b))
+            let probe = [
+                flare.position[0],
+                flare.position[1] + 0.2,
+                flare.position[2],
+            ];
+            !world.boxes().iter().any(|b| Self::point_in_aabb(probe, b))
         });
     }
 
@@ -626,22 +626,20 @@ impl Engine {
             if gate.kind == TraversalGateKind::RedThreshold && direction != gate.forward {
                 continue;
             }
-            self.reality = self.reality.with_advanced_gate(&gate, direction);
+            let next_reality = self.reality.with_advanced_gate(&gate, direction);
+            if next_reality == self.reality {
+                continue;
+            }
+            self.reality = next_reality;
 
             if gate.anomaly_kind == AnomalyKind::RedRoom {
-                let bounds = gate.affected_bounds.expanded(PLAN_TRANSITION_MARGIN);
+                // A committed Red Room selects another infinite Level 0
+                // address. Every resident chunk belongs to the old address,
+                // so replacing only the vestibule would splice two realities
+                // at an arbitrary streaming boundary.
                 let targets: Vec<_> = self
                     .store
                     .iter_ordered()
-                    .filter(|chunk| {
-                        WorldBounds::new(
-                            chunk.origin.0,
-                            chunk.origin.1,
-                            chunk.origin.0 + self.config.chunk_size,
-                            chunk.origin.1 + self.config.chunk_size,
-                        )
-                        .intersects(bounds)
-                    })
                     .map(|chunk| chunk_key(chunk.origin.0, chunk.origin.1))
                     .collect();
                 for key in targets {
@@ -749,8 +747,10 @@ impl Engine {
                     .any(|solid| solid.intersects(&player))
                 {
                     // Safety beats the effect: keep the old resident reality
-                    // and let the closed topology take effect after eviction.
-                    self.forced_reloads.remove(&key);
+                    // but do not abandon the transition. Defer this chunk and
+                    // restore its pending status so we try again next tick.
+                    self.pending.insert(key, req.clone());
+                    deferred.push(done);
                     continue;
                 }
             }
@@ -1134,7 +1134,12 @@ impl Engine {
             self.completed_backlog.len(),
             self.forced_reloads.len(),
         );
-        let _ = writeln!(out, "flares {} | push {:.2}s", self.flares.len(), self.push_seconds);
+        let _ = writeln!(
+            out,
+            "flares {} | push {:.2}s",
+            self.flares.len(),
+            self.push_seconds
+        );
 
         let stamps = self.reality.stamps();
         let _ = writeln!(out, "reality: {} stamp(s)", stamps.len());
@@ -1166,10 +1171,7 @@ impl Engine {
                 vackrooms::domain::entities::anomaly::Axis2::X => (gate.plane - p[0]).abs(),
                 vackrooms::domain::entities::anomaly::Axis2::Z => (gate.plane - p[2]).abs(),
             };
-            let epoch = self
-                .reality
-                .lookup(gate.instance_id)
-                .map_or(0, |s| s.epoch);
+            let epoch = self.reality.lookup(gate.instance_id).map_or(0, |s| s.epoch);
             let _ = writeln!(
                 out,
                 "  {:?}/{:?} of {:?} {:08x}  plane {:.1} on {:?}  d={:.1}  epoch {}",
@@ -1727,7 +1729,7 @@ mod tests {
     }
 
     #[test]
-    fn red_threshold_advances_reality_and_targets_only_affected_residents() {
+    fn red_threshold_advances_reality_and_replaces_the_resident_world() {
         use vackrooms::domain::entities::anomaly::{
             AnomalyKind, Axis2, AxisDirection, TraversalGate, TraversalGateKind, WorldBounds,
         };
@@ -1754,10 +1756,23 @@ mod tests {
             chunk_key(0.0, 0.0),
             LoadedChunk::new((0.0, 0.0), 0, RealitySnapshot::empty(), payload),
         );
+        engine.store.insert(
+            chunk_key(20.0, 0.0),
+            LoadedChunk::new(
+                (20.0, 0.0),
+                0,
+                RealitySnapshot::empty(),
+                FlatChunkSource.load(20.0, 0.0, 0, 0),
+            ),
+        );
         engine.player.position = [6.0, 1.7, 5.0];
         engine.update_anomalies([4.0, 1.7, 5.0]);
         assert_eq!(engine.reality.lookup(99).unwrap().epoch, 1);
         assert!(engine.forced_reloads.contains(&chunk_key(0.0, 0.0)));
+        assert!(
+            engine.forced_reloads.contains(&chunk_key(20.0, 0.0)),
+            "a distant resident must not remain in the base Level 0 address"
+        );
 
         // Crossing the same directional threshold outward is not closure.
         let before = engine.reality.clone();

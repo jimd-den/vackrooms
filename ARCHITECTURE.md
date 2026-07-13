@@ -3,7 +3,7 @@
 A voxel-only rendering engine built on **Clean Architecture**, targeting
 low-spec hardware. The whole engine — procedural generation, lighting, sparse
 voxel octree (SVO) construction, chunk streaming, player physics, and
-rendering — compiles to a single ~410 KB WebAssembly module. The browser
+rendering — compiles to a single WebAssembly module. The browser
 runs it; a zero-dependency native HTTP server merely serves the files (or, on
 GitHub Pages, static files alone — the wasm engine generates chunks entirely
 client-side and needs no server).
@@ -23,6 +23,23 @@ implementations, selected at runtime by `create_renderer`
 
 `SurfaceRenderer` and `SplatRenderer` fall back (to CPU, or to surfaces)
 if WebGL2 or the requested backend fails to initialize.
+
+Renderer code is organized by lifetime and responsibility rather than by one
+backend-sized class:
+
+| Module | Responsibility |
+|---|---|
+| `drivers/surface_webgl/{mod,resources,draw}.rs` | surface composition, chunk GPU resources, staged frame pipeline |
+| `drivers/splat_webgl/{mod,resources,draw}.rs` | splat composition, instance/shadow resources, staged frame pipeline |
+| `drivers/webgl/{mod,atlas,draw}.rs` | raymarch composition, SVO texture lifecycle, fullscreen submission |
+| `adapters/cpu_splatter/` | atlas decode, camera, cone light, ray queries, shading, raster traversal, tests |
+| `drivers/gl/` | context/program setup, matrices, light selection, shadow targets, timers, visibility |
+| `drivers/shaders/` | one literate Rust module per GLSL program plus shared chunks |
+
+Optional shortcuts are plain data in `application::render_settings::RenderToggles`.
+Each driver snapshots that switchboard once per frame; inner algorithms never
+read browser globals. The same switches are available live in Settings →
+Optimize and as shareable `?rt_<name>=0|1` query parameters.
 
 Of the three classical voxel pipeline families (mesh/rasterized,
 SVO ray casting, hybrid), the `raymarch` backend implements a
@@ -124,7 +141,7 @@ application::atlas::build_atlas ─► merged atlas + per-chunk rebased roots
       ▼
 WebGl2Renderer ──────────────────► RGBA32UI texture + uniform chunk table
       ▼
-fragment shader (drivers/shaders.rs) — fullscreen quad, sorted chunk AABBs,
+fragment shader (drivers/shaders/raymarch.rs) — fullscreen quad, sorted chunk AABBs,
 stack-based SVO march, empty-space skipping ──► pixels
 ```
 
@@ -144,7 +161,7 @@ the SVO become single large collision boxes for free.
 
 The same layout is documented at its source of truth,
 `src/adapters/octree_gpu_serializer.rs`, and decoded in
-`wasm_frontend/src/drivers/shaders.rs` (`decodeNode`).
+`wasm_frontend/src/drivers/shaders/raymarch.rs` (`decodeNode`).
 
 ## Level 0: architecture first
 
@@ -177,6 +194,45 @@ All plan geometry snaps to a 0.4 u lattice (one coarse voxel) so every LOD
 of a chunk voxelizes the same architecture. Debug hook:
 `cargo run --example dump_plan` prints region plans as ASCII;
 `debug_region_ascii` renders any plan.
+
+### Infinite generation and anomalies
+
+The generation code is organized by the language of Level 0, rather than by
+delivery mechanism:
+
+```
+InfiniteRegionWindow ──► RegionPlan(s) ──► architectural ColumnPlan
+                                                │
+anomalies/{planning,geometry} ──────────────────┤
+red_rooms/{planning,geometry,recursive_level} ──┘
+                                                │
+                                      ColumnField (1-column halo)
+                                                │
+                                      voxelize_columns ──► VoxelGrid
+```
+
+- `domain/entities/anomaly/` contains only domain language: rectilinear
+  geometry, immutable anomaly instances, traversal semantics, and canonical
+  reality snapshots. The public `anomaly` namespace remains stable.
+- `use_cases/anomalies/` plans and samples macro anomaly families.
+  `use_cases/red_rooms/` owns the assembly-derived encounter and its recursive
+  Level 0 address. The old `anomaly_plan` module is only a compatibility
+  facade.
+- `InfiniteRegionWindow` is the finite query cache for an infinite region
+  lattice. A missing plan is an error instead of silently falling back to an
+  unrelated region.
+- A committed Red Room derives its branch seed and region-aligned translation
+  with integer hashes over the full 64-bit anomaly id. Planning and sampling
+  use that same address, so worker order, chunk boundaries, and floating-point
+  id precision cannot select different worlds.
+- `ColumnField` and `voxelize_columns` are resolution-dependent output stages.
+  World planning never reads the requested output extent; generating one 20 u
+  area or four 10 u areas produces the same voxels at matching coordinates.
+
+Reality is part of chunk identity. Entering a Red Room changes the active
+infinite Level 0 address, so all resident chunks are atomically scheduled for
+replacement; partially repainting only the vestibule would splice two worlds
+at a streaming boundary.
 
 ## Chunk streaming
 

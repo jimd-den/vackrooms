@@ -655,7 +655,7 @@ pub fn generate_region_plan(
         rx,
         rz,
         &dominant,
-        config.anomalies.frequency * config.anomalies.red_rooms,
+        config,
         &mut assemblies,
         &mut taken,
         &corridors,
@@ -689,7 +689,7 @@ fn corrupt(
     rx: i64,
     rz: i64,
     dominant: &ArchitectGenome,
-    red_room_scale: f32,
+    config: &GeneratorConfig,
     assemblies: &mut Vec<AssemblyInstance>,
     taken: &mut Vec<(f32, f32, f32, f32)>,
     spines: &[CirculationSpine],
@@ -771,7 +771,52 @@ fn corrupt(
     // the anomaly, and it belongs to a whole architectural space — never a
     // lone fixture, never red masonry. Applied last so it respects whatever
     // the earlier corruption passes decided (an abandoned shell stays dark).
-    if h(10) < (0.22 * red_room_scale.clamp(0.0, 4.0)).min(0.88) {
+    let red_room_scale = config.anomalies.frequency * config.anomalies.red_rooms;
+    let mut red_room_forced = false;
+    let sp = spawn_point(seed);
+    if config.anomalies.forced_kind == Some(AnomalyKind::RedRoom)
+        && rx == region_index(sp.x)
+        && rz == region_index(sp.z)
+    {
+        if let Some(a) = assemblies
+            .iter_mut()
+            .find(|a| !a.entrances.is_empty() && !a.corruption.abandoned)
+        {
+            a.corruption.red_room = true;
+            red_room_forced = true;
+        } else if let Some(spine) = spines
+            .iter()
+            .find(|s| s.spine_kind == SpaceProgram::MainCorridor)
+        {
+            if let Some(seg) = spine.path.windows(2).find(|seg| seg[0].z == seg[1].z) {
+                let lx0 = seg[0].x.min(seg[1].x);
+                let lz = seg[0].z;
+                let origin = Position::new(rx as f32 * REGION_SIZE, rz as f32 * REGION_SIZE);
+                if let Some(mut a) = place_suite(
+                    9999,
+                    SpaceProgram::PrivateOffice,
+                    dominant,
+                    0.5,
+                    0.5,
+                    lx0 + 12.0,
+                    lz,
+                    spine.width * 0.5 + PLAN_WALL_T,
+                    1.0,
+                    origin,
+                    REGION_SIZE,
+                    taken,
+                    spines,
+                ) {
+                    a.corruption.red_room = true;
+                    taken.push(a.footprint.bounds());
+                    assemblies.push(a);
+                    red_room_forced = true;
+                }
+            }
+        }
+    }
+
+    if !red_room_forced && h(10) < (0.22 * red_room_scale.clamp(0.0, 4.0)).min(0.88) {
         let k = pick_index(h(11), assemblies.len());
         let a = &mut assemblies[k];
         if !a.corruption.abandoned {

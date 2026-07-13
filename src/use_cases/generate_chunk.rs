@@ -1,4 +1,4 @@
-use crate::domain::entities::anomaly::{AnomalyKind, RealitySnapshot};
+use crate::domain::entities::anomaly::RealitySnapshot;
 use crate::domain::entities::grid::Grid;
 use crate::domain::entities::voxel_grid::{
     VOXEL_AIR, VOXEL_CEILING, VOXEL_FLOOR, VOXEL_LIGHT, VOXEL_RED_WALL, VOXEL_WALL, VoxelGrid,
@@ -7,7 +7,9 @@ use crate::domain::use_cases::generate_maze::{GrowingTreeGenerator, MazeGenerato
 use crate::entities::models::Position;
 use crate::use_cases::ports::{NULL_TELEMETRY, NoiseProvider, TelemetryPort};
 use rand::rngs::StdRng;
-use rand::{Rng, RngExt, SeedableRng};
+use rand::{RngExt, SeedableRng};
+
+pub use crate::use_cases::anomalies::config::AnomalyTuning;
 
 /// User-tunable knobs for the level generators. All values are multipliers
 /// around the defaults (1.0); 0 disables the feature, ~2 saturates it.
@@ -36,64 +38,6 @@ impl Default for LevelTuning {
             lights: 1.0,
             junction_density: 1.0,
             stairs_density: 1.0,
-        }
-    }
-}
-
-/// Level 0 anomaly controls, kept separate from the ordinary office-fabric
-/// tuning so increasing wall density never silently makes anomalies common.
-/// Multipliers are centered on 1.0; distances remain world units.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct AnomalyTuning {
-    /// Overall candidate frequency (0 disables every anomaly family).
-    pub frequency: f32,
-    /// Macro-footprint scale for region-spanning instances.
-    pub size: f32,
-    pub pillar_expanses: f32,
-    pub blackouts: f32,
-    pub red_rooms: f32,
-    pub pit_lattices: f32,
-    /// Strength/probability of epoch-dependent mutable infill.
-    pub remap_intensity: f32,
-    /// Minimum distance behind a crossed threshold before infill may differ.
-    pub remap_distance: f32,
-    /// Radius around the player protected from any resident transition.
-    pub safe_radius: f32,
-    /// Chance that a closed red-room loop exposes its authored escape branch
-    /// this epoch. The escape is deterministic per (instance, epoch), opens
-    /// only after full entry, and never restores the remembered entrance:
-    /// 0 seals every loop, 1 guarantees a breach each epoch. Default 0.12.
-    pub red_escape_bias: f32,
-    /// Stable archway anchor-room frequency multiplier.
-    pub archways: f32,
-    /// Fraction of blackout glimmers that are decoys one segment off the
-    /// recovery skeleton. Clamped to at most half so following cues stays a
-    /// meaningful strategy.
-    pub blackout_decoys: f32,
-    /// Debug: force one anomaly of this family onto the macro cell that
-    /// contains the spawn/protected point, bypassing the candidate roll and
-    /// the spawn keep-out. `None` (the default) changes nothing. Because it
-    /// travels inside the generator config it reaches every worker, so the
-    /// forced world stays deterministic across threads.
-    pub forced_kind: Option<AnomalyKind>,
-}
-
-impl Default for AnomalyTuning {
-    fn default() -> Self {
-        Self {
-            frequency: 1.0,
-            size: 1.0,
-            pillar_expanses: 1.0,
-            blackouts: 1.0,
-            red_rooms: 1.0,
-            pit_lattices: 1.0,
-            remap_intensity: 1.0,
-            remap_distance: 12.0,
-            safe_radius: 8.0,
-            red_escape_bias: 0.12,
-            archways: 1.0,
-            blackout_decoys: 0.25,
-            forced_kind: None,
         }
     }
 }
@@ -701,7 +645,7 @@ impl<'a> GenerateChunkArchitectureUseCase<'a> {
                         } else {
                             // Atrium ceiling and bright hanging light
                             grid.set(vx, wall_max_y, vz, VOXEL_CEILING);
-                            if (vx % 10 == 0 && vz % 10 == 0) {
+                            if vx % 10 == 0 && vz % 10 == 0 {
                                 grid.set(vx, wall_max_y - 1, vz, VOXEL_LIGHT);
                             }
                         }
