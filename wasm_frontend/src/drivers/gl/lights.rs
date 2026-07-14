@@ -3,15 +3,15 @@
 //!
 //! Inputs: fixture lights from every visible chunk (deduplicated by id —
 //! a fixture near a chunk border is listed by several chunks) plus the
-//! frame's dynamic lights (dropped flares). The four most important lights
-//! win the shader's uniform slots; the most important *fixture* light also
+//! frame's dynamic lights (dropped flares). The most important lights fill
+//! the bounded shader slots; the most important *fixture* light also
 //! wins the hero shadow map (a flare at ankle height would collapse the
 //! top-down shadow frustum, so dynamic lights never own it).
 //!
 //! Importance = radius * sqrt(intensity) / (distance² + 0.1): bigger and
 //! brighter lights reach farther, nearby lights dominate.
 
-use crate::application::ports::{FrameParams, LightSource};
+use crate::application::ports::{FrameParams, LightSource, MAX_DYNAMIC_LIGHTS};
 
 /// Maximum shader light slots (matches the GLSL uniform arrays).
 pub const MAX_SHADER_LIGHTS: usize = crate::application::ports::MAX_SCENE_LIGHTS;
@@ -112,16 +112,16 @@ pub fn select_lights<'a>(
 pub struct FlareCores {
     pub count: i32,
     /// xyz = position, w = pre-flickered intensity.
-    pub pos_intensity: [f32; MAX_SHADER_LIGHTS * 4],
-    pub colors: [f32; MAX_SHADER_LIGHTS * 3],
+    pub pos_intensity: [f32; MAX_DYNAMIC_LIGHTS * 4],
+    pub colors: [f32; MAX_DYNAMIC_LIGHTS * 3],
 }
 
 pub fn flare_cores(frame: &FrameParams) -> FlareCores {
     let cores = frame.active_dynamic_lights();
     let mut packed = FlareCores {
         count: cores.len() as i32,
-        pos_intensity: [0.0; MAX_SHADER_LIGHTS * 4],
-        colors: [0.0; MAX_SHADER_LIGHTS * 3],
+        pos_intensity: [0.0; MAX_DYNAMIC_LIGHTS * 4],
+        colors: [0.0; MAX_DYNAMIC_LIGHTS * 3],
     };
     for (i, c) in cores.iter().enumerate() {
         packed.pos_intensity[i * 4..i * 4 + 3].copy_from_slice(&c.position);

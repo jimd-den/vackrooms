@@ -1,10 +1,8 @@
 import { test } from '@playwright/test';
-import * as fs from 'fs';
-import * as path from 'path';
 
 const gpuRenderers = [
   {
-    query: 'renderer=surface&rt_cull=0&rt_shadows=0&rt_dither=0',
+    query: 'renderer=surface&rt_cull=0&rt_shadows=0&rt_dither=0&rt_bake=0',
     name: 'gpu_surface',
   },
   {
@@ -12,13 +10,13 @@ const gpuRenderers = [
     name: 'gpu_splat',
   },
   {
-    query: 'renderer=raymarch&rt_f2b=1&rt_dither=0',
+    query: 'renderer=raymarch&rt_f2b=1&rt_dither=0&rt_bake=0&rt_skip=0',
     name: 'gpu_raymarch',
   },
 ];
 
 for (const renderer of gpuRenderers) {
-  test(`Render ${renderer.name} at 1080p`, async ({ page }) => {
+  test(`Render ${renderer.name} at 1080p`, async ({ page }, testInfo) => {
     test.setTimeout(120_000); // Higher timeout for CI/server runs
     
     page.on('console', msg => {
@@ -48,15 +46,12 @@ for (const renderer of gpuRenderers) {
       { timeout: 90_000 },
     );
 
-    // Take screenshot and write it directly to the native test golden directory
+    // Keep diagnostic captures in Playwright's per-run output. Tests must never
+    // approve or overwrite their own reference images.
     const screenshot = await page.locator('#view').screenshot();
-    const goldenPath = path.join(
-      __dirname,
-      '../wasm_frontend/tests/golden',
-      `single_ceiling_fixture_${renderer.name}.png`
-    );
-    
-    fs.mkdirSync(path.dirname(goldenPath), { recursive: true });
-    fs.writeFileSync(goldenPath, screenshot);
+    await testInfo.attach(`single_ceiling_fixture_${renderer.name}`, {
+      body: screenshot,
+      contentType: 'image/png',
+    });
   });
 }

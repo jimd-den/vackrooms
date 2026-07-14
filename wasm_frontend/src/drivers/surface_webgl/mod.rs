@@ -4,16 +4,18 @@
 //!
 //! Split by responsibility:
 //! * this file — the renderer struct, program setup, uniform locations;
-//! * [`resources`] — per-chunk GPU resource lifecycle (VAO/VBO/IBO + baked
+//! * [`upload_world_surface_chunks`] — per-chunk GPU resource lifecycle (VAO/VBO/IBO + baked
 //!   light volume), incremental upload/removal;
-//! * [`draw`] — the per-frame `RendererPort::draw`: shadow pass, light
+//! * [`draw_lit_world_surfaces`] — the per-frame `RendererPort::draw`: shadow pass, light
 //!   selection, and the visible-mesh loop.
 //!
 //! Cross-driver plumbing (context creation, program linking, GPU timing,
 //! matrices, light selection, shadow target) lives in [`crate::drivers::gl`].
 
-mod draw;
-mod resources;
+#[path = "draw.rs"]
+mod draw_lit_world_surfaces;
+#[path = "resources.rs"]
+mod upload_world_surface_chunks;
 
 use std::collections::HashMap;
 
@@ -26,9 +28,10 @@ use crate::application::ports::SurfaceChunkKey;
 use crate::drivers::gl::program::{ContextOptions, create_context, link_program};
 use crate::drivers::gl::shadow_target::{ShadowTarget, create_shadow_target};
 use crate::drivers::gl::timer::GpuFrameTimer;
+use crate::drivers::gl::upload_scene_lights::SceneLightTexture;
 use crate::drivers::shaders::{shadow, surface};
 
-use resources::GpuMesh;
+use upload_world_surface_chunks::GpuMesh;
 
 /// Uniform locations resolved once at link time.
 pub(crate) struct Uniforms {
@@ -41,12 +44,15 @@ pub(crate) struct Uniforms {
     pub dither: Option<WebGlUniformLocation>,
     pub baked_lighting: Option<WebGlUniformLocation>,
     pub light_volume: Option<WebGlUniformLocation>,
+    pub light_volume_origin: Option<WebGlUniformLocation>,
     pub voxel_size: Option<WebGlUniformLocation>,
     pub light_count: Option<WebGlUniformLocation>,
-    pub light_positions: Option<WebGlUniformLocation>,
-    pub light_colors: Option<WebGlUniformLocation>,
-    pub light_params: Option<WebGlUniformLocation>,
-    pub light_kinds: Option<WebGlUniformLocation>,
+    pub light_first: Option<WebGlUniformLocation>,
+    pub scene_light_texture: Option<WebGlUniformLocation>,
+    pub scene_light_texture_width: Option<WebGlUniformLocation>,
+    pub dynamic_light_count: Option<WebGlUniformLocation>,
+    pub dynamic_pos_radius: Option<WebGlUniformLocation>,
+    pub dynamic_color_intensity: Option<WebGlUniformLocation>,
     pub core_count: Option<WebGlUniformLocation>,
     pub cores: Option<WebGlUniformLocation>,
     pub core_colors: Option<WebGlUniformLocation>,
@@ -75,6 +81,7 @@ pub struct SurfaceRenderer {
     pub(crate) width: i32,
     pub(crate) height: i32,
     pub(crate) timer: GpuFrameTimer,
+    pub(crate) scene_lights: SceneLightTexture,
     pub(crate) shadow_program: WebGlProgram,
     pub(crate) shadow_uniforms: ShadowUniforms,
     pub(crate) shadow: ShadowTarget,
@@ -95,12 +102,15 @@ impl SurfaceRenderer {
             dither: gl.get_uniform_location(&program, "uDitherEnabled"),
             baked_lighting: gl.get_uniform_location(&program, "uBakedLightingEnabled"),
             light_volume: gl.get_uniform_location(&program, "uLightVolume"),
+            light_volume_origin: gl.get_uniform_location(&program, "uLightVolumeOrigin"),
             voxel_size: gl.get_uniform_location(&program, "uVoxelSize"),
             light_count: gl.get_uniform_location(&program, "uLightCount"),
-            light_positions: gl.get_uniform_location(&program, "uLightPositions"),
-            light_colors: gl.get_uniform_location(&program, "uLightColors"),
-            light_params: gl.get_uniform_location(&program, "uLightParams"),
-            light_kinds: gl.get_uniform_location(&program, "uLightKinds"),
+            light_first: gl.get_uniform_location(&program, "uLightFirst"),
+            scene_light_texture: gl.get_uniform_location(&program, "uSceneLightTexture"),
+            scene_light_texture_width: gl.get_uniform_location(&program, "uSceneLightTextureWidth"),
+            dynamic_light_count: gl.get_uniform_location(&program, "uDynamicLightCount"),
+            dynamic_pos_radius: gl.get_uniform_location(&program, "uDynamicPosRadius"),
+            dynamic_color_intensity: gl.get_uniform_location(&program, "uDynamicColorIntensity"),
             core_count: gl.get_uniform_location(&program, "uCoreCount"),
             cores: gl.get_uniform_location(&program, "uCores"),
             core_colors: gl.get_uniform_location(&program, "uCoreColors"),
@@ -114,6 +124,7 @@ impl SurfaceRenderer {
             fog_start: gl.get_uniform_location(&program, "uFogStart"),
         };
         let timer = GpuFrameTimer::new(&gl);
+        let scene_lights = SceneLightTexture::create(&gl)?;
 
         let shadow_program = link_program(&gl, shadow::VERTEX_SHADER, shadow::FRAGMENT_SHADER)?;
         let shadow_uniforms = ShadowUniforms {
@@ -130,6 +141,7 @@ impl SurfaceRenderer {
             width: canvas.width() as i32,
             height: canvas.height() as i32,
             timer,
+            scene_lights,
             shadow_program,
             shadow_uniforms,
             shadow,

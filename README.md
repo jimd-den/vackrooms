@@ -2,7 +2,7 @@
 
 A voxel-only rendering engine in Rust, structured with documented Clean
 Architecture and compiled to WebAssembly. Procedural "backrooms" world
-generation, BFS lighting, sparse voxel octree (SVO) construction, chunk
+generation, finite-range voxel irradiance, sparse voxel octree (SVO) construction, chunk
 streaming and sliding player collision all run inside one wasm
 module — built to hold up on low-spec hardware. Rendering is pluggable:
 a greedy-meshed WebGL2 rasterizer by default, with an instanced face-splat
@@ -22,8 +22,10 @@ generation worker:
    from `(chunk position, seed, config)`. Level 0 is the office backrooms;
    level 34 is an open grassland. Both tile seamlessly because geometry is
    derived from world-space coordinates, never chunk-local ones.
-2. **BFS lighting** — light sources placed by the generator flood-fill
-   through open voxels to produce per-voxel RGB light levels.
+2. **Lighting preparation** — exposed emissive faces seed an air-only,
+   finite-range RGB diffuse field; solids receive it but never propagate it.
+   Runtime panels are separately derived from exposed emissive undersides and
+   remain analytic area lights in both GPU renderers.
 3. **SVO build + serialize** — the lit grid is packed into a sparse voxel
    octree and serialized into the GPU texel encoding the renderer expects
    (`src/adapters/octree_gpu_serializer.rs`).
@@ -90,6 +92,7 @@ combinable:
 | Parameter | Values | Effect |
 |---|---|---|
 | `spec` | `high` | Switches to the high-spec profile (finer voxels, wider streaming radius). Default is low-spec. |
+| `voxel_size` | `0.4`, `0.2`, `0.1`, `0.05` | Overrides scene voxel size after seam, progressive-LOD, SVO-depth, and dense-memory validation. `0.4` is high-profile-only; `0.05` is standard-profile-only. |
 | `seed` | number or text | World seed. Non-numeric text is hashed (FNV-1a) so words work too. |
 | `pillars` | `0`–`4` | Structural column density multiplier (`0` = none). Default `1`. |
 | `walls` | `0`–`4` | Office wall density multiplier (`0` = open plan). Default `1`. |
@@ -101,13 +104,15 @@ combinable:
 | `force_anomaly` | `pillars`, `blackout`, `pits`, `archway`, `redroom` | Debug: guarantees one anomaly of that family near spawn, bypassing organic frequency and the spawn keep-out. |
 | `rt_hiz` | `0`, `1` | CPU hierarchical-Z rejection. |
 | `rt_f2b` | `0`, `1` | CPU/raymarch near-to-far traversal. |
+| `rt_skip` | `0`, `1` | Raymarch empty-SVO-leaf skipping; `0` selects finest-cell diagnostic DDA. |
 | `rt_mips` | `0`, `1` | CPU projected-size MIP/LOD collapse. |
 | `rt_beam_occlusion` | `0`, `1` | CPU cone-light occlusion rays. |
-| `rt_shadows` | `0`, `1` | GPU hero-light shadow pass. |
+| `rt_shadows` | `0`, `1` | GPU direct-light visibility: exact SVO segments in raymarch, raster shadow maps on surface/splat. |
 | `rt_cells` | `0`, `1` | GPU splat cell-range culling. |
 | `rt_budget` | `0`, `1` | GPU splat far-chunk face budget. |
 | `rt_cull` | `0`, `1` | CPU and raster-GPU chunk visibility culling. |
 | `rt_dither` | `0`, `1` | GPU dither/grain effects. |
+| `rt_bake` | `0`, `1` | Optional approximate surface-renderer voxel diffuse fill. Analytic panel lights remain enabled; default `0`. |
 | `rt_timer` | `0`, `1` | Asynchronous GPU timing queries. |
 
 The top-right HUD names the section you are in (level, zone, region), and

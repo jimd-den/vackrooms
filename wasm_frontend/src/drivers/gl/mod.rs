@@ -15,10 +15,12 @@
 //! | [`shadow_target`]| depth-only FBO + texture for the hero light      |
 //! | [`visibility`]   | conservative sphere visibility tests             |
 
+pub mod cluster_scene_lights;
 pub mod light_volume;
 pub mod lights;
 pub mod math;
 pub mod program;
 pub mod shadow_target;
 pub mod timer;
+pub mod upload_scene_lights;
 pub mod visibility;

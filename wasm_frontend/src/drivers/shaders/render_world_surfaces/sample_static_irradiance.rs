@@ -17,7 +17,7 @@ vec3 sampleStaticIrradiance(vec3 worldPosition, vec3 normal) {
 
     vec3 worldExtent = vec3(dimensions) * uVoxelSize;
     vec3 adjacentAirCenter = worldPosition + normal * (0.5 * uVoxelSize);
-    vec3 uvw = (adjacentAirCenter - uChunkOrigin) / worldExtent;
+    vec3 uvw = (adjacentAirCenter - uLightVolumeOrigin) / worldExtent;
     if (any(lessThan(uvw, vec3(0.0))) || any(greaterThan(uvw, vec3(1.0)))) {
         return vec3(0.0);
     }

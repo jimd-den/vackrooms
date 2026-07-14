@@ -1,6 +1,6 @@
 //! In-wasm chunk source: implements the application's [`ChunkSourcePort`] by
 //! driving the core engine use cases directly. There is no server round-trip;
-//! the entire pipeline — procedural generation, BFS lighting, SVO build, GPU
+//! the entire pipeline — procedural generation, voxel diffuse bake, SVO build, GPU
 //! serialization, collision extraction — runs inside the wasm module.
 //!
 //! Pipeline per chunk:
@@ -264,6 +264,30 @@ mod tests {
             !payload.collision.is_empty(),
             "a maze chunk must have walls"
         );
+    }
+
+    #[test]
+    fn generated_ceiling_panels_reach_the_runtime_light_contract() {
+        let source =
+            LocalChunkSource::new(SimpleNoiseProvider::new(), 42, GeneratorConfig::low_spec());
+        // Seed 42's main-spine chunk contains the fixtures visible from the
+        // deterministic browser spawn used by the GPU regression tests.
+        let payload = source.load(0.0, 30.0, 0, 0);
+
+        assert!(
+            !payload.surface.lights.is_empty(),
+            "voxelized emissive panels must not disappear before frame lighting"
+        );
+        for light in &payload.surface.lights {
+            assert!(light.enabled);
+            assert!(light.position[1] > payload.voxel_size);
+            assert!(light.half_size.into_iter().all(|extent| extent > 0.0));
+            assert!(
+                light.intensity > 1.0,
+                "panel radiance was normalized to darkness"
+            );
+            assert_ne!(light.kind, crate::application::ports::LightKind::Point);
+        }
     }
 
     #[test]

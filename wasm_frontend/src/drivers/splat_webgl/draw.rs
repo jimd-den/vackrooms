@@ -4,7 +4,7 @@
 //!
 //! 1. clear and establish fixed-function state;
 //! 2. select visible chunks near-to-far;
-//! 3. select the four most important lights;
+//! 3. select the bounded set of most important lights;
 //! 4. optionally render the hero-light shadow map;
 //! 5. bind frame uniforms once;
 //! 6. draw whole instance pages or coalesced visible cell ranges.

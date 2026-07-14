@@ -22,6 +22,7 @@ pub(crate) struct GpuMesh {
     pub origin: [f32; 3],
     pub bounds_max: [f32; 3],
     pub voxel_size: f32,
+    pub light_volume_origin: [f32; 3],
     pub light_texture: web_sys::WebGlTexture,
 }
 
@@ -75,6 +76,8 @@ impl SurfaceRenderer {
 
         let light_texture = upload_light_volume(gl, chunk.mesh).expect("upload light volume");
 
+        let light_padding_world =
+            f32::from(chunk.mesh.light_volume_padding) * chunk.mesh.voxel_scale;
         self.meshes.insert(
             chunk.key,
             GpuMesh {
@@ -85,6 +88,11 @@ impl SurfaceRenderer {
                 origin: chunk.origin,
                 bounds_max: chunk.mesh.bounds.max,
                 voxel_size: chunk.mesh.voxel_scale,
+                light_volume_origin: [
+                    chunk.origin[0] - light_padding_world,
+                    chunk.origin[1],
+                    chunk.origin[2] - light_padding_world,
+                ],
                 light_texture,
             },
         );

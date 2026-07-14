@@ -13,7 +13,8 @@ const int LIGHT_STRIP = 2;
 const int LIGHT_EMERGENCY = 3;
 
 float finiteRangeInverseSquare(float distanceSquared, float range) {
-    float rangeSquared = max(range * range, 1e-6);
+    if (!(range > 0.0) || !(distanceSquared >= 0.0)) return 0.0;
+    float rangeSquared = range * range;
     float normalizedSquared = distanceSquared / rangeSquared;
     float window = max(1.0 - normalizedSquared * normalizedSquared, 0.0);
     return (window * window) / max(distanceSquared, 0.04);
@@ -42,7 +43,7 @@ vec3 evaluatePointLight(
     float distanceSquared = dot(delta, delta);
     vec3 surfaceToLight = delta * inversesqrt(max(distanceSquared, 1e-8));
     float geometry = receiverCosine(normal, surfaceToLight);
-    return lightColor * intensity
+    return max(lightColor, vec3(0.0)) * max(intensity, 0.0)
         * finiteRangeInverseSquare(distanceSquared, range) * geometry;
 }
 
@@ -72,8 +73,10 @@ vec3 evaluateRectangleLight(
             * emitterCosine(kind, surfaceToLight);
         integral += finiteRangeInverseSquare(distanceSquared, range) * geometry;
     }
-    float area = max(4.0 * halfSize.x * halfSize.y, 0.01);
-    return lightColor * intensity * area * (integral * 0.25);
+    float area = 4.0 * max(halfSize.x, 0.0) * max(halfSize.y, 0.0);
+    if (!(area > 0.0)) return vec3(0.0);
+    return max(lightColor, vec3(0.0)) * max(intensity, 0.0)
+        * area * (integral * 0.25);
 }
 
 vec3 evaluateSceneLight(

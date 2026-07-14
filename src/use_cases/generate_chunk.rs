@@ -13,13 +13,18 @@ pub use crate::use_cases::anomalies::config::AnomalyTuning;
 /// bounds, and GPU texture limits all need to be reviewed together.
 pub const MAX_SUPPORTED_SVO_DEPTH: u32 = 8;
 
+/// The streaming engine always requests one half-resolution proxy before a
+/// fine chunk. A valid user resolution must therefore divide the chunk at
+/// both LOD 0 and LOD 1; otherwise the proxy silently grows past the shared
+/// chunk seam after rounding.
+const PROGRESSIVE_LOD_DIVISOR: u32 = 2;
+
 /// Maximum number of dense X/Z voxel columns generated for one chunk.
 ///
-/// The existing high-detail profile is 200 x 200 = 40,000 columns. Keeping
-/// the user override inside that measured budget prevents a seemingly small
-/// voxel-size change from allocating an unbounded dense scene before it is
-/// compressed into an SVO.
-pub const MAX_DENSE_CHUNK_COLUMNS: u64 = 40_000;
+/// The finest supported logical chunk is 200 x 200 cells. Browser generation
+/// retains one seam/light-sampling cell on every lateral side, so the actual
+/// measured allocation is 202 x 202 = 40,804 columns.
+pub const MAX_DENSE_CHUNK_COLUMNS: u64 = 40_804;
 
 /// Tallest authored interior in the current generator catalog. Two boundary
 /// layers are added below when estimating the dense grid allocation.
@@ -27,9 +32,9 @@ const MAX_GENERATED_HEIGHT_WORLD_UNITS: f64 = 12.0;
 
 /// Maximum dense voxel samples allocated before SVO compression.
 ///
-/// This admits the standard 10u profile at 0.05u resolution, including the
-/// tallest legacy atrium: 200 x 200 x 242 = 9,680,000 samples.
-pub const MAX_DENSE_CHUNK_VOXELS: u64 = 9_680_000;
+/// This admits the standard 10u profile at 0.05u resolution, its one-cell
+/// lateral halo, and the tallest modeled interior: 202 x 202 x 242.
+pub const MAX_DENSE_CHUNK_VOXELS: u64 = 9_874_568;
 
 /// Why a requested scene voxel size cannot be used by a generator profile.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -41,6 +46,10 @@ pub enum VoxelSizeError {
     DoesNotTileChunk {
         chunk_size: f32,
         voxel_size: f32,
+    },
+    DoesNotTileProgressiveLod {
+        fine_axis_voxels: u32,
+        divisor: u32,
     },
     SvoDepthExceedsLimit {
         required: u32,
@@ -67,6 +76,13 @@ impl std::fmt::Display for VoxelSizeError {
             } => write!(
                 f,
                 "voxel size {voxel_size} does not divide chunk size {chunk_size} into whole cells"
+            ),
+            Self::DoesNotTileProgressiveLod {
+                fine_axis_voxels,
+                divisor,
+            } => write!(
+                f,
+                "fine axis has {fine_axis_voxels} cells, which cannot be divided by the required {divisor}x progressive LOD"
             ),
             Self::SvoDepthExceedsLimit { required, maximum } => write!(
                 f,
@@ -203,6 +219,12 @@ impl GeneratorConfig {
         }
 
         let axis_voxels = axis_voxels as u32;
+        if axis_voxels % PROGRESSIVE_LOD_DIVISOR != 0 {
+            return Err(VoxelSizeError::DoesNotTileProgressiveLod {
+                fine_axis_voxels: axis_voxels,
+                divisor: PROGRESSIVE_LOD_DIVISOR,
+            });
+        }
         let required_depth = axis_voxels
             .checked_next_power_of_two()
             .map(u32::trailing_zeros)
@@ -214,7 +236,11 @@ impl GeneratorConfig {
             });
         }
 
-        let required_columns = u64::from(axis_voxels) * u64::from(axis_voxels);
+        // LocalChunkSource generates one lateral cell on each side for seam
+        // visibility and boundary light-volume samples. Validate the real
+        // dense allocation rather than only the cropped payload.
+        let allocated_axis = u64::from(axis_voxels) + 2;
+        let required_columns = allocated_axis * allocated_axis;
         if required_columns > MAX_DENSE_CHUNK_COLUMNS {
             return Err(VoxelSizeError::DenseChunkBudgetExceeded {
                 required_columns,
@@ -327,7 +353,6 @@ impl<'a> GenerateChunkArchitectureUseCase<'a> {
                 )
                 .expect("GeneratorConfig voxel_scale must be finite and greater than zero");
             crate::use_cases::bake_voxel_lighting::bake_voxel_lighting(&mut grid, lighting);
-            crate::domain::use_cases::path_tracer::bake_face_occlusion(&mut grid);
 
             let elapsed_micros = self.telemetry.now_micros().saturating_sub(start_micros);
             self.telemetry.log(&format!(
@@ -375,7 +400,7 @@ mod tests {
 
     #[test]
     fn voxel_size_override_accepts_supported_profile_resolutions() {
-        for voxel_size in [0.4, 0.2, 0.1, 0.05] {
+        for voxel_size in [0.2, 0.1, 0.05] {
             let config = GeneratorConfig::low_spec()
                 .try_with_voxel_size(voxel_size)
                 .unwrap();
@@ -411,6 +436,13 @@ mod tests {
             base.try_with_voxel_size(0.3),
             Err(VoxelSizeError::DoesNotTileChunk { .. })
         ));
+        assert_eq!(
+            base.try_with_voxel_size(0.4).unwrap_err(),
+            VoxelSizeError::DoesNotTileProgressiveLod {
+                fine_axis_voxels: 25,
+                divisor: 2,
+            }
+        );
     }
 
     #[test]
@@ -426,13 +458,13 @@ mod tests {
         );
 
         let oversized_dense_chunk = GeneratorConfig {
-            chunk_size: 201.0,
+            chunk_size: 202.0,
             ..GeneratorConfig::low_spec()
         };
         assert_eq!(
             oversized_dense_chunk.try_with_voxel_size(1.0).unwrap_err(),
             VoxelSizeError::DenseChunkBudgetExceeded {
-                required_columns: 40_401,
+                required_columns: 41_616,
                 maximum_columns: MAX_DENSE_CHUNK_COLUMNS,
             }
         );

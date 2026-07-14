@@ -3,7 +3,7 @@
 //! Each worker (`static/worker.js`) is a second instance of this same wasm
 //! module running on its own OS thread. The main thread posts small
 //! `{gen, requestId, ox, oz, level, lod, reality}` messages round-robin; workers run the full
-//! chunk pipeline (generation, BFS lighting, greedy mesh + face instances,
+//! chunk pipeline (generation, voxel diffuse bake, greedy mesh + face instances,
 //! SVO build/serialize, collision) and transfer one encoded byte buffer
 //! back (`adapters::chunk_codec`). No WebGL object ever leaves the main
 //! thread, and the frame loop never blocks on generation.

@@ -110,7 +110,7 @@ pub fn parse_generation_params(query: &str, default_seed: u32) -> GenerationPara
 /// so all of them voxelize the identical world by construction.
 pub fn generator_setup_from_query(query: &str, default_seed: u32) -> (u32, GeneratorConfig) {
     let params = parse_generation_params(query, default_seed);
-    let base = if query.contains("spec=high") {
+    let base = if has_exact_pair(query, "spec", "high") {
         GeneratorConfig::high_spec()
     } else {
         GeneratorConfig::low_spec()
@@ -123,6 +123,14 @@ pub fn generator_setup_from_query(query: &str, default_seed: u32) -> (u32, Gener
         .and_then(|voxel_size| configured.try_with_voxel_size(voxel_size).ok())
         .unwrap_or(configured);
     (params.seed, configured)
+}
+
+fn has_exact_pair(query: &str, expected_key: &str, expected_value: &str) -> bool {
+    query
+        .trim_start_matches('?')
+        .split('&')
+        .filter_map(|pair| pair.split_once('='))
+        .any(|(key, value)| key == expected_key && value == expected_value)
 }
 
 /// Non-numeric seeds ("?seed=kitten") hash to a stable u32 (FNV-1a).
@@ -190,12 +198,23 @@ mod tests {
     }
 
     #[test]
+    fn profile_selection_requires_an_exact_query_key() {
+        let (_, config) = generator_setup_from_query("?not_spec=high&voxel_size=0.2", 42);
+        assert_eq!(config.chunk_size, GeneratorConfig::low_spec().chunk_size);
+    }
+
+    #[test]
     fn generator_setup_keeps_profile_default_for_unsupported_voxel_size() {
         let (_, non_tiling) = generator_setup_from_query("?voxel_size=0.3", 42);
+        let (_, odd_progressive_lod) = generator_setup_from_query("?voxel_size=0.4", 42);
         let (_, over_budget) = generator_setup_from_query("?spec=high&voxel_size=0.05", 42);
         let (_, non_positive) = generator_setup_from_query("?voxel_size=-0.1", 42);
         assert_eq!(
             non_tiling.voxel_scale,
+            GeneratorConfig::low_spec().voxel_scale
+        );
+        assert_eq!(
+            odd_progressive_lod.voxel_scale,
             GeneratorConfig::low_spec().voxel_scale
         );
         assert_eq!(

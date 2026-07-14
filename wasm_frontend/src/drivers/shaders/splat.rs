@@ -30,9 +30,9 @@ uniform int uFlashlightEnabled;
 uniform sampler3D uLightVolume;
 
 uniform int uLightCount;
-uniform vec3 uLightPositions[8];
-uniform vec3 uLightColors[8];
-uniform vec4 uLightParams[8];
+uniform vec3 uLightPositions[16];
+uniform vec3 uLightColors[16];
+uniform vec4 uLightParams[16];
 
 uniform sampler2D uShadowMap;
 uniform mat4 uLightViewProjection;
@@ -187,7 +187,7 @@ void main() {
     vec3 ambient = mix(ambientDown, ambientUp, N.y * 0.5 + 0.5) * ao * faceResponse * uAmbientScale;
 
     vec3 directDiffuse = vec3(0.0);
-    for (int i = 0; i < 8; ++i) {
+    for (int i = 0; i < 16; ++i) {
         if (i >= uLightCount) break;
         vec3 toLight = uLightPositions[i] - center;
         float d2 = dot(toLight, toLight);

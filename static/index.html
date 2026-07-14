@@ -350,7 +350,7 @@
                 <label for="setting-voxel-size">Scene voxel size <span class="value">reload</span></label>
                 <select id="setting-voxel-size">
                     <option value="">Profile default</option>
-                    <option value="0.4">0.4u — coarse</option>
+                    <option value="0.4">0.4u — coarse (high profile only)</option>
                     <option value="0.2">0.2u — balanced</option>
                     <option value="0.1">0.1u — fine</option>
                     <option value="0.05">0.05u — ultra (standard profile only)</option>
@@ -425,7 +425,7 @@
                 <input type="checkbox" id="setting-rt-dither" checked>
             </div>
             <div class="setting-row inline-switch">
-                <label for="setting-rt-bake">Static irradiance bake</label>
+                <label for="setting-rt-bake">Surface: approx. voxel diffuse fill</label>
                 <input type="checkbox" id="setting-rt-bake">
             </div>
             <div class="setting-row inline-switch">
@@ -643,13 +643,18 @@
         );
         $('setting-voxel-size').value = selectedVoxelSize || '';
         const syncVoxelSizeAvailability = () => {
+            const coarse = $('setting-voxel-size').querySelector('option[value="0.4"]');
             const ultra = $('setting-voxel-size').querySelector('option[value="0.05"]');
             const highProfile = $('setting-quality').value === 'high';
+            coarse.disabled = !highProfile;
             ultra.disabled = highProfile;
-            if (highProfile && $('setting-voxel-size').value === '0.05') {
-                // 20u / 0.05u needs a depth-nine SVO. Return to the validated
-                // high-profile default instead of promising a value the
-                // generator will reject.
+            const invalidForProfile = highProfile
+                ? $('setting-voxel-size').value === '0.05'
+                : $('setting-voxel-size').value === '0.4';
+            if (invalidForProfile) {
+                // Keep the menu aligned with the central validator: high +
+                // 0.05 needs depth nine, while standard + 0.4 has an odd 25
+                // fine cells and cannot produce the required half-res proxy.
                 $('setting-voxel-size').value = '';
             }
         };

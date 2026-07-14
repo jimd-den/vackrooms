@@ -37,7 +37,7 @@ pub fn camera_matrices(
         1.0,
     ];
     let near = 0.03;
-    let far = max_draw_distance + 10.0;
+    let far = max_draw_distance;
     let f = 1.0 / crate::drivers::webgl::fov_tan();
     let aspect = width as f32 / height.max(1) as f32;
     let projection = [

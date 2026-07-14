@@ -55,22 +55,24 @@ vec3 spotBeam(vec3 camPos, vec3 camForward, vec3 surfacePos, vec3 N) {
 /// rasterizers color a wall identically.
 pub const MATERIAL_COLOR_GLSL: &str = r#"
 vec3 materialColor(float material) {
-    if (material < 1.5) return vec3(0.87, 0.80, 0.40); // wall
-    if (material < 2.5) return vec3(0.60, 0.53, 0.07); // floor
-    if (material < 3.5) return vec3(0.80, 0.78, 0.67); // ceiling
-    if (material < 4.5) return vec3(1.00, 0.97, 0.78); // fluorescent
-    if (material < 5.5) return vec3(0.53, 0.00, 0.00); // red wall
-    if (material < 6.5) return vec3(0.31, 0.60, 0.24); // grass
-    if (material < 7.5) return vec3(0.18, 0.42, 0.72); // water
-    if (material < 8.5) return vec3(0.42, 0.29, 0.18); // tree
-    if (material < 9.5) return vec3(1.00, 0.27, 0.20);  // red light
-    if (material < 10.5) return vec3(0.85, 0.82, 0.75); // pale arch wall
-    if (material < 11.5) return vec3(0.54, 0.50, 0.36); // rough damaged wall
-    if (material < 12.5) return vec3(0.76, 0.72, 0.42); // dry shallow carpet
-    if (material < 13.5) return vec3(0.42, 0.37, 0.13); // deep wet carpet
-    if (material < 14.5) return vec3(0.48, 0.29, 0.15); // sticky red carpet
-    if (material < 15.5) return vec3(0.18, 0.16, 0.13); // dark pooled fluid
-    return vec3(0.62, 0.77, 0.91);                      // cool glimmer
+    // Exact bytes from domain::voxel_grid::MATERIAL_COLORS. Keeping the
+    // integer numerators visible makes palette drift reviewable.
+    if (material < 1.5) return vec3(221.0, 204.0, 102.0) / 255.0;
+    if (material < 2.5) return vec3(153.0, 136.0,  17.0) / 255.0;
+    if (material < 3.5) return vec3(204.0, 204.0, 204.0) / 255.0;
+    if (material < 4.5) return vec3(255.0, 248.0, 214.0) / 255.0;
+    if (material < 5.5) return vec3(136.0,   0.0,   0.0) / 255.0;
+    if (material < 6.5) return vec3( 79.0, 154.0,  61.0) / 255.0;
+    if (material < 7.5) return vec3( 58.0, 111.0, 184.0) / 255.0;
+    if (material < 8.5) return vec3(107.0,  74.0,  47.0) / 255.0;
+    if (material < 9.5) return vec3(255.0,  68.0,  51.0) / 255.0;
+    if (material < 10.5) return vec3(216.0, 210.0, 192.0) / 255.0;
+    if (material < 11.5) return vec3(138.0, 127.0,  92.0) / 255.0;
+    if (material < 12.5) return vec3(194.0, 183.0, 107.0) / 255.0;
+    if (material < 13.5) return vec3(107.0,  94.0,  34.0) / 255.0;
+    if (material < 14.5) return vec3(122.0,  74.0,  38.0) / 255.0;
+    if (material < 15.5) return vec3( 46.0,  42.0,  34.0) / 255.0;
+    return vec3(159.0, 196.0, 232.0) / 255.0;
 }
 "#;
 
@@ -104,7 +106,12 @@ vec3 toneMap(vec3 color) {
 /// `uCoreColors` uniforms to be declared before this chunk is spliced in
 /// (both programs declare them identically).
 pub const FLARE_CORES_GLSL: &str = r#"
-vec3 flareCores(vec3 worldPos, vec3 camPos) {
+vec3 flareCoresThroughMedium(
+    vec3 worldPos,
+    vec3 camPos,
+    float fogStart,
+    float sigmaExtinction
+) {
     vec3 toFrag = worldPos - camPos;
     float fragDist = length(toFrag);
     vec3 rd = toFrag / max(fragDist, 1e-4);
@@ -116,8 +123,14 @@ vec3 flareCores(vec3 worldPos, vec3 camPos) {
         float perp = length(toLight - rd * along);
         float coreSize = 0.06 + along * 0.004;
         float core = 1.0 - smoothstep(coreSize * 0.4, coreSize, perp);
-        sum += uCoreColors[i] * uCores[i].w * core * 1.4;
+        float mediumDistance = max(along - max(fogStart, 0.0), 0.0);
+        float transmittance = exp(-max(sigmaExtinction, 0.0) * mediumDistance);
+        sum += uCoreColors[i] * uCores[i].w * core * 1.4 * transmittance;
     }
     return sum;
+}
+
+vec3 flareCores(vec3 worldPos, vec3 camPos) {
+    return flareCoresThroughMedium(worldPos, camPos, 0.0, 0.0);
 }
 "#;

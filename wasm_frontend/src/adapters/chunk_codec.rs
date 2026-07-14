@@ -15,8 +15,8 @@ use crate::application::ports::{
 };
 use vackrooms::domain::entities::anomaly::{PitHazard, TraversalGate};
 
-/// "VKC" + version 4. Version 4 carries exact SVO metrics and light shape.
-const MAGIC: u32 = 0x564B_4304;
+/// "VKC" + version 5. Version 5 retains the baked light-volume halo.
+const MAGIC: u32 = 0x564B_4305;
 
 pub fn encode_chunk_payload(payload: &ChunkPayload) -> Vec<u8> {
     let mut out = Vec::with_capacity(
@@ -58,6 +58,7 @@ pub fn encode_chunk_payload(payload: &ChunkPayload) -> Vec<u8> {
     for d in s.light_volume_size {
         put_u32(&mut out, d);
     }
+    out.push(s.light_volume_padding);
     put_u32(&mut out, s.light_volume.len() as u32);
     out.extend_from_slice(&s.light_volume);
 
@@ -161,6 +162,7 @@ pub fn decode_chunk_payload(bytes: &[u8]) -> Option<ChunkPayload> {
     let lod = r.u8()?;
     let voxel_scale = r.f32()?;
     let light_volume_size = [r.u32()?, r.u32()?, r.u32()?];
+    let light_volume_padding = r.u8()?;
     let volume_len = r.len(1)?;
     let light_volume = r.slice(volume_len)?.to_vec();
 
@@ -244,6 +246,7 @@ pub fn decode_chunk_payload(bytes: &[u8]) -> Option<ChunkPayload> {
             lod,
             light_volume,
             light_volume_size,
+            light_volume_padding,
             lights,
             faces: FaceInstanceSet {
                 instances,

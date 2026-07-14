@@ -2,7 +2,7 @@ use crate::adapters::cpu_splatter::atlas::{decode_node, is_emissive};
 use crate::adapters::cpu_splatter::camera::Camera;
 use crate::adapters::cpu_splatter::settings::CpuRenderSettings;
 use crate::adapters::cpu_splatter::shading::{SplatSurface, shade};
-use crate::application::ports::{ChunkDraw, Environment, FrameParams};
+use crate::application::ports::{ChunkDraw, Environment};
 use crate::core::ports::reference_renderer::{
     ReferenceRenderSettings, ReferenceRendererPort, RenderSceneSnapshot, RenderedImage,
 };
@@ -234,18 +234,14 @@ impl ReferenceRendererPort for RaymarchReferenceRenderer {
         settings: &ReferenceRenderSettings,
     ) -> RenderedImage {
         let mut rgba = vec![0u8; (settings.width * settings.height * 4) as usize];
-
-        let mut frame_params = FrameParams::default();
-        frame_params.camera_pos = settings.camera.position;
-        frame_params.yaw = settings.camera.yaw;
-        frame_params.pitch = settings.camera.pitch;
-        frame_params.environment = settings.environment;
+        let frame_params = settings.frame_params();
+        let cpu_settings = settings.effective_cpu_settings();
 
         let camera = Camera::new(
             &frame_params,
             settings.width as usize,
             settings.height as usize,
-            &settings.cpu,
+            &cpu_settings,
         );
 
         for y in 0..settings.height {
@@ -283,7 +279,7 @@ impl ReferenceRendererPort for RaymarchReferenceRenderer {
                 let color = raymarch_pixel(
                     &camera,
                     &settings.environment,
-                    &settings.cpu,
+                    &cpu_settings,
                     &scene.atlas,
                     &scene.chunks,
                     settings.camera.position,

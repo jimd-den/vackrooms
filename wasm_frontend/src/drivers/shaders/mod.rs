@@ -24,6 +24,7 @@ pub mod encode_display_color;
 pub mod evaluate_scene_lighting;
 #[path = "trace_voxel_scene/mod.rs"]
 pub mod raymarch;
+pub mod sample_scene_lights;
 pub mod shadow;
 pub mod splat;
 #[path = "render_world_surfaces/mod.rs"]

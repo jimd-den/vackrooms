@@ -8,6 +8,9 @@ use web_sys::WebGl2RenderingContext as Gl;
 
 use crate::application::atlas::MAX_CHUNKS;
 use crate::application::ports::{ChunkDraw, FrameParams, RendererPort};
+use crate::application::rendering::encode_display_color;
+use crate::drivers::gl::cluster_scene_lights::{LightRange, append_lights_reaching_bounds};
+use crate::drivers::gl::upload_scene_lights::SceneLightTexture;
 
 use super::{Uniforms, WebGl2Renderer, fov_tan};
 
@@ -19,6 +22,8 @@ pub(super) struct ChunkUniformBuffers {
     sizes: Vec<f32>,
     voxel_sizes: Vec<f32>,
     depths: Vec<i32>,
+    light_first: Vec<i32>,
+    light_counts: Vec<i32>,
 }
 
 impl ChunkUniformBuffers {
@@ -29,6 +34,8 @@ impl ChunkUniformBuffers {
             sizes: Vec::with_capacity(chunks),
             voxel_sizes: Vec::with_capacity(chunks),
             depths: Vec::with_capacity(chunks),
+            light_first: Vec::with_capacity(chunks),
+            light_counts: Vec::with_capacity(chunks),
         }
     }
 }
@@ -53,16 +60,13 @@ fn camera_basis(frame: &FrameParams) -> CameraBasis {
 fn clear_target(gl: &Gl, frame: &FrameParams, width: i32, height: i32) {
     gl.viewport(0, 0, width, height);
     let environment = frame.environment;
-    if environment.outdoor {
-        gl.clear_color(
-            environment.sky_color[0],
-            environment.sky_color[1],
-            environment.sky_color[2],
-            1.0,
-        );
+    let atmosphere = if environment.outdoor {
+        environment.sky_color
     } else {
-        gl.clear_color(0.0, 0.0, 0.0, 1.0);
-    }
+        environment.fog_color
+    };
+    let clear = encode_display_color(atmosphere);
+    gl.clear_color(clear[0], clear[1], clear[2], 1.0);
     gl.clear(Gl::COLOR_BUFFER_BIT);
 }
 
@@ -97,26 +101,36 @@ fn upload_environment(gl: &Gl, uniforms: &Uniforms, frame: &FrameParams) {
     gl.uniform1f(uniforms.fog_start.as_ref(), environment.fog_start);
 }
 
-fn upload_scene_lights(gl: &Gl, uniforms: &Uniforms, frame: &FrameParams) {
-    let lights = frame.active_scene_lights();
-    let mut positions = [0.0f32; 24];
-    let mut colors = [0.0f32; 24];
-    let mut params = [0.0f32; 32];
-    let mut kinds = [0i32; 8];
-    for (index, light) in lights.iter().enumerate() {
-        positions[index * 3..index * 3 + 3].copy_from_slice(&light.position);
-        colors[index * 3..index * 3 + 3].copy_from_slice(&light.color);
-        params[index * 4] = light.radius;
-        params[index * 4 + 1] = light.intensity;
-        params[index * 4 + 2] = light.half_size[0];
-        params[index * 4 + 3] = light.half_size[1];
-        kinds[index] = light.kind as i32;
-    }
-    gl.uniform1i(uniforms.light_count.as_ref(), lights.len() as i32);
-    gl.uniform3fv_with_f32_array(uniforms.light_positions.as_ref(), &positions);
-    gl.uniform3fv_with_f32_array(uniforms.light_colors.as_ref(), &colors);
-    gl.uniform4fv_with_f32_array(uniforms.light_params.as_ref(), &params);
-    gl.uniform1iv_with_i32_array(uniforms.light_kinds.as_ref(), &kinds);
+fn bind_scene_lights(gl: &Gl, uniforms: &Uniforms, texture: &SceneLightTexture) {
+    gl.active_texture(Gl::TEXTURE1);
+    texture.bind(gl);
+    gl.uniform1i(uniforms.scene_light_texture.as_ref(), 1);
+    gl.uniform1i(uniforms.scene_light_texture_width.as_ref(), texture.width());
+}
+
+fn cluster_scene_lights(
+    frame: &FrameParams,
+    chunks: &[ChunkDraw],
+) -> (Vec<crate::application::ports::LightSource>, Vec<LightRange>) {
+    let mut clustered = Vec::new();
+    let ranges = chunks
+        .iter()
+        .take(MAX_CHUNKS)
+        .map(|chunk| {
+            let bounds_max = [
+                chunk.origin[0] + chunk.world_size,
+                chunk.origin[1] + chunk.world_size,
+                chunk.origin[2] + chunk.world_size,
+            ];
+            append_lights_reaching_bounds(
+                frame.active_scene_lights(),
+                chunk.origin,
+                bounds_max,
+                &mut clustered,
+            )
+        })
+        .collect();
+    (clustered, ranges)
 }
 
 fn upload_dynamic_lights(gl: &Gl, uniforms: &Uniforms, frame: &FrameParams) {
@@ -140,6 +154,7 @@ fn upload_chunks(
     uniforms: &Uniforms,
     buffers: &mut ChunkUniformBuffers,
     chunks: &[ChunkDraw],
+    light_ranges: &[LightRange],
 ) {
     let chunks = &chunks[..chunks.len().min(MAX_CHUNKS)];
     gl.uniform1i(uniforms.num_chunks.as_ref(), chunks.len() as i32);
@@ -152,18 +167,28 @@ fn upload_chunks(
     buffers.sizes.clear();
     buffers.voxel_sizes.clear();
     buffers.depths.clear();
-    for chunk in chunks {
+    buffers.light_first.clear();
+    buffers.light_counts.clear();
+    for (index, chunk) in chunks.iter().enumerate() {
         buffers.origins.extend_from_slice(&chunk.origin);
         buffers.roots.push(chunk.root_index);
         buffers.sizes.push(chunk.world_size);
         buffers.voxel_sizes.push(chunk.voxel_size);
         buffers.depths.push(chunk.svo_depth as i32);
+        let range = light_ranges
+            .get(index)
+            .copied()
+            .unwrap_or(LightRange { first: 0, count: 0 });
+        buffers.light_first.push(range.first);
+        buffers.light_counts.push(range.count);
     }
     gl.uniform3fv_with_f32_array(uniforms.chunk_origins.as_ref(), &buffers.origins);
     gl.uniform1iv_with_i32_array(uniforms.chunk_root_indices.as_ref(), &buffers.roots);
     gl.uniform1fv_with_f32_array(uniforms.chunk_world_sizes.as_ref(), &buffers.sizes);
     gl.uniform1fv_with_f32_array(uniforms.chunk_voxel_sizes.as_ref(), &buffers.voxel_sizes);
     gl.uniform1iv_with_i32_array(uniforms.chunk_depths.as_ref(), &buffers.depths);
+    gl.uniform1iv_with_i32_array(uniforms.chunk_light_first.as_ref(), &buffers.light_first);
+    gl.uniform1iv_with_i32_array(uniforms.chunk_light_counts.as_ref(), &buffers.light_counts);
 }
 
 impl RendererPort for WebGl2Renderer {
@@ -183,6 +208,16 @@ impl RendererPort for WebGl2Renderer {
         let toggles = crate::get_render_toggles();
         self.timer.poll(&self.gl);
         let timer_started = self.timer.begin(&self.gl, toggles.gpu_timer);
+        let (clustered_lights, mut light_ranges) = cluster_scene_lights(frame, chunks);
+        if self
+            .scene_lights
+            .upload(&self.gl, &clustered_lights)
+            .is_err()
+        {
+            for range in &mut light_ranges {
+                range.count = 0;
+            }
+        }
 
         {
             let gl = &self.gl;
@@ -202,8 +237,8 @@ impl RendererPort for WebGl2Renderer {
                 if toggles.empty_space_skip { 1 } else { 0 },
             );
             gl.uniform1i(
-                self.uniforms.baked_lighting.as_ref(),
-                if toggles.baked_lighting { 1 } else { 0 },
+                self.uniforms.direct_visibility.as_ref(),
+                if toggles.shadow_pass { 1 } else { 0 },
             );
             // OPTIMIZATION (rt_dither): optional noise hides color banding.
             gl.uniform1i(
@@ -211,9 +246,15 @@ impl RendererPort for WebGl2Renderer {
                 if toggles.dither { 1 } else { 0 },
             );
             upload_environment(gl, &self.uniforms, frame);
-            upload_scene_lights(gl, &self.uniforms, frame);
+            bind_scene_lights(gl, &self.uniforms, &self.scene_lights);
             upload_dynamic_lights(gl, &self.uniforms, frame);
-            upload_chunks(gl, &self.uniforms, &mut self.chunk_uniforms, chunks);
+            upload_chunks(
+                gl,
+                &self.uniforms,
+                &mut self.chunk_uniforms,
+                chunks,
+                &light_ranges,
+            );
 
             gl.active_texture(Gl::TEXTURE0);
             self.atlas.bind(gl);

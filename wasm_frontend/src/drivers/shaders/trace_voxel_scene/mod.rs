@@ -7,8 +7,11 @@
 mod decode_voxel_atlas;
 mod intersect_voxel_scene;
 mod shade_voxel_hit;
+mod trace_direct_light_visibility;
 
-use super::{apply_distance_fog, chunks, encode_display_color, evaluate_scene_lighting};
+use super::{
+    apply_distance_fog, chunks, encode_display_color, evaluate_scene_lighting, sample_scene_lights,
+};
 
 pub const VERTEX_SHADER: &str = r#"#version 300 es
 in vec2 position;
@@ -37,7 +40,7 @@ uniform float uFovTan;
 uniform int uFlashlightEnabled;
 uniform int uFrontToBackEnabled;
 uniform int uEmptySpaceSkipEnabled;
-uniform int uBakedLightingEnabled;
+uniform int uDirectVisibilityEnabled;
 uniform int uDitherEnabled;
 
 uniform int uOutdoor;
@@ -47,11 +50,8 @@ uniform float uAmbientScale;
 uniform float uFogDensity;
 uniform float uFogStart;
 
-uniform int uLightCount;
-uniform vec3 uLightPositions[8];
-uniform vec3 uLightColors[8];
-uniform vec4 uLightParams[8];
-uniform int uLightKinds[8];
+uniform sampler2D uSceneLightTexture;
+uniform int uSceneLightTextureWidth;
 
 uniform int uDynamicLightCount;
 uniform vec4 uDynamicPosRadius[4];
@@ -64,6 +64,8 @@ uniform int uChunkRootIndices[25];
 uniform float uChunkWorldSizes[25];
 uniform float uChunkVoxelSizes[25];
 uniform int uChunkDepths[25];
+uniform int uChunkLightFirst[25];
+uniform int uChunkLightCounts[25];
 "#;
 
 pub fn fragment_source() -> String {
@@ -73,9 +75,11 @@ pub fn fragment_source() -> String {
         chunks::SPOT_CONE_GLSL,
         encode_display_color::GLSL,
         evaluate_scene_lighting::GLSL,
+        sample_scene_lights::GLSL,
         apply_distance_fog::GLSL,
         decode_voxel_atlas::GLSL,
         intersect_voxel_scene::GLSL,
+        trace_direct_light_visibility::GLSL,
         shade_voxel_hit::GLSL,
     ]
     .concat()
@@ -91,6 +95,7 @@ mod tests {
         assert!(source.contains("traceChunkDda"));
         assert!(source.contains("traceChunkSkippingEmptyLeaves"));
         assert!(source.contains("uEmptySpaceSkipEnabled"));
+        assert!(source.contains("directSampleIsVisible"));
         assert!(!source.contains("worldSize > 20.0"));
         assert!(!source.contains("vec2 cell_center"));
     }
@@ -99,6 +104,7 @@ mod tests {
     fn fog_is_not_multiplied_by_a_vignette() {
         let source = fragment_source();
         assert!(source.contains("applyDistanceFog"));
+        assert!(source.contains("isDownwardEmittingFace"));
         assert!(!source.contains("vignette"));
     }
 }

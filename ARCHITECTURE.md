@@ -29,30 +29,43 @@ backend-sized class:
 
 | Module | Responsibility |
 |---|---|
-| `drivers/surface_webgl/{mod,resources,draw}.rs` | surface composition, chunk GPU resources, staged frame pipeline |
+| `drivers/surface_webgl/` | `draw_lit_world_surfaces`, `upload_world_surface_chunks`, and renderer composition |
 | `drivers/splat_webgl/{mod,resources,draw}.rs` | splat composition, instance/shadow resources, staged frame pipeline |
-| `drivers/webgl/{mod,atlas,draw}.rs` | raymarch composition, SVO texture lifecycle, fullscreen submission |
+| `drivers/webgl/` | `draw_voxel_scene`, `upload_voxel_atlas`, and raymarch composition |
 | `adapters/cpu_splatter/` | atlas decode, camera, cone light, ray queries, shading, raster traversal, tests |
 | `drivers/gl/` | context/program setup, matrices, light selection, shadow targets, timers, visibility |
-| `drivers/shaders/` | one literate Rust module per GLSL program plus shared chunks |
+| `drivers/shaders/render_world_surfaces/` | reconstruct surfaces → sample optional diffuse field → shade visible surface |
+| `drivers/shaders/trace_voxel_scene/` | decode atlas → intersect voxel scene → shade nearest hit |
+| `drivers/shaders/{evaluate_scene_lighting,apply_distance_fog,encode_display_color}.rs` | shared linear-light, Beer–Lambert, and display equations |
 
 Optional shortcuts are plain data in `application::render_settings::RenderToggles`.
 Each driver snapshots that switchboard once per frame; inner algorithms never
 read browser globals. The same switches are available live in Settings →
 Optimize and as shareable `?rt_<name>=0|1` query parameters.
 
-Of the three classical voxel pipeline families (mesh/rasterized,
-SVO ray casting, hybrid), the `raymarch` backend implements a
-**hybrid SVO raymarcher**:
+The `raymarch` backend is a correctness-first SVO ray caster with two explicit
+stepping policies over the same stateless point lookup and hit record:
 
-1. **Chunk-level coarse pass** — each resident chunk's AABB is slab-tested
-   per fragment and the hits are insertion-sorted by entry distance, so rays
-   march the nearest chunk first and exit on the first solid hit.
-2. **Fragment SVO traversal** — stack-based descent through the octree with
-   **empty-space skipping**: an air leaf or masked-out octant is exited in a
-   single step via its AABB exit plane, never voxel-by-voxel.
-3. **Shading** — packed 24-bit leaf color × BFS-propagated light level,
-   face normal from the hit box, exponential distance fog.
+1. **Chunk intervals** — robust parallel-safe slabs produce entry/exit
+   intervals. Near-to-far traversal may stop only when every remaining AABB
+   starts beyond the nearest solid hit; padded chunk cubes may overlap.
+2. **Reference traversal (`rt_skip=0`)** — exact finest-cell 3-D DDA. Voxel
+   size and SVO depth come from each payload; neither is inferred from its
+   power-of-two padded world size.
+3. **Empty-leaf traversal (`rt_skip=1`)** — restart from the root for each
+   sample, then jump to the exact exit of a masked octant or empty leaf. No
+   mutable descent stack survives a jump.
+4. **Shading** — sRGB material values are decoded to linear RGB, ceiling
+   panels use a downward one-sided rectangular-emitter integral. The
+   raymarcher intentionally rejects the bake's face-independent leaf value;
+   Beer–Lambert fog is composed in linear space before one shared
+   tone-map/sRGB conversion.
+
+The default surface renderer evaluates the same analytic fixture list. Static
+fixtures and runtime flares use separate uniform arrays, so dropping a flare
+cannot evict a ceiling panel. `rt_bake` defaults off and never removes analytic
+lights; on the surface renderer it enables the deliberately approximate,
+quantized diffuse-fill field.
 
 Low-spec strategy: no depth buffer, no MSAA, nearest-filtered integer
 textures, and an **adaptive internal-resolution governor** (0.5×–1.0× backing
@@ -141,8 +154,8 @@ application::atlas::build_atlas ─► merged atlas + per-chunk rebased roots
       ▼
 WebGl2Renderer ──────────────────► RGBA32UI texture + uniform chunk table
       ▼
-fragment shader (drivers/shaders/raymarch.rs) — fullscreen quad, sorted chunk AABBs,
-stack-based SVO march, empty-space skipping ──► pixels
+fragment shader (drivers/shaders/trace_voxel_scene/) — fullscreen quad,
+robust chunk intervals, DDA or empty-leaf stepping ──► pixels
 ```
 
 Collision geometry is derived **from the same SVO** (solid WALL/RED_WALL
@@ -157,11 +170,11 @@ the SVO become single large collision boxes for free.
 | R | 0 | 1 |
 | G | `child_base_index` (children contiguous at +0..+7) | `voxel_type` |
 | B | `child_mask` (bit *i* set = child *i* non-empty) | 24-bit `0xRRGGBB` color |
-| A | 0 | light level 0–15 |
+| A | 0 | scalar light 0–15, face-occlusion bits, and RGB light 0–15/channel |
 
 The same layout is documented at its source of truth,
 `src/adapters/octree_gpu_serializer.rs`, and decoded in
-`wasm_frontend/src/drivers/shaders/raymarch.rs` (`decodeNode`).
+`wasm_frontend/src/drivers/shaders/trace_voxel_scene/decode_voxel_atlas.rs`.
 
 ## Level 0: architecture first
 
@@ -353,6 +366,17 @@ Profiles (selected by URL, `?spec=high`):
 |---|---|---|---|---|---|
 | low (default) | 10 u | 1 (3×3) | 0.2 / 0.4 u | 6 / 5 | 15 u (all 9) |
 | high | 20 u | 2 (5×5) | 0.1 / 0.2 u | 8 / 7 | 25 u (~9 of 25) |
+
+`?voxel_size=` overrides the fine voxel edge independently of the streaming
+profile. `GeneratorConfig::try_with_voxel_size` is the single validator used
+by the browser and every worker: the value must be finite and positive, tile
+the chunk edge at both fine and progressive half-resolution LOD, fit the
+renderer-wide depth-eight SVO contract, and remain
+inside the measured dense-grid budget including the lateral halo. The UI
+offers 0.4, 0.2, 0.1, and 0.05 u. The 10 u profile rejects 0.4 u because its
+25-cell axis cannot be halved exactly; the 20 u profile rejects 0.05 u because
+it would require depth nine. Every chunk payload transports its exact voxel size
+and depth, so neither renderer reverse-engineers them from padded bounds.
 
 The shader's chunk table is fixed at 25 entries — exactly the 5×5 high-spec
 worst case (`application::atlas::MAX_CHUNKS`).

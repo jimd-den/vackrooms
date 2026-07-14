@@ -7,7 +7,12 @@ bool isEmissiveMaterial(float material) {
         || abs(material - 16.0) < 0.1;
 }
 
-vec3 emittedRadiance(float material, vec3 albedo) {
+bool isDownwardEmittingFace(vec3 normal) {
+    return normal.y < -0.5;
+}
+
+vec3 emittedRadiance(float material, vec3 albedo, vec3 normal) {
+    if (!isDownwardEmittingFace(normal)) return vec3(0.0);
     if (abs(material - 4.0) < 0.1) return albedo * 10.0;
     if (abs(material - 9.0) < 0.1) return albedo * 8.0;
     if (abs(material - 16.0) < 0.1) return albedo * 0.9;
@@ -49,33 +54,52 @@ void main() {
     float distanceToCamera = length(uCameraPosition - vWorldPosition);
 
     vec3 radiance;
-    if (isEmissiveMaterial(vMaterial)) {
-        radiance = emittedRadiance(vMaterial, albedo);
+    if (isEmissiveMaterial(vMaterial) && isDownwardEmittingFace(normal)) {
+        radiance = emittedRadiance(vMaterial, albedo, normal);
     } else {
         float ambientOcclusion = mix(1.0, 0.62, clamp(vAo, 0.0, 1.0));
-        vec3 irradiance = ambientIrradiance()
-            + sampleStaticIrradiance(vWorldPosition, normal) * 0.34;
+        vec3 ambient = ambientIrradiance();
+        // The voxel field is deliberately a restrained diffuse-fill term.
+        // It never substitutes for the analytic fixtures below.
+        vec3 cachedStatic = sampleStaticIrradiance(vWorldPosition, normal) * 0.12;
+        vec3 analyticDirect = vec3(0.0);
 
-        for (int lightIndex = 0; lightIndex < 8; ++lightIndex) {
-            if (lightIndex >= uLightCount) break;
-            vec3 delta = uLightPositions[lightIndex] - vWorldPosition;
+        for (int lightIndex = 0; lightIndex < uLightCount; ++lightIndex) {
+            SceneLight light = readSceneLight(uLightFirst + lightIndex);
+            vec3 delta = light.position - vWorldPosition;
             vec3 surfaceToLight = normalize(delta);
             float visibility = lightIndex == uShadowedLightIndex
                 ? shadowVisibility(vWorldPosition, normal, surfaceToLight)
                 : 1.0;
-            irradiance += evaluateSceneLight(
+            analyticDirect += evaluateSceneLight(
                 vWorldPosition,
                 normal,
-                uLightPositions[lightIndex],
-                uLightParams[lightIndex].zw,
-                uLightColors[lightIndex],
-                uLightParams[lightIndex].x,
-                uLightParams[lightIndex].y,
-                uLightKinds[lightIndex]
+                light.position,
+                light.halfSize,
+                light.color,
+                light.range,
+                light.intensity,
+                light.kind
             ) * visibility;
         }
+        for (int lightIndex = 0; lightIndex < 4; ++lightIndex) {
+            if (lightIndex >= uDynamicLightCount) break;
+            analyticDirect += evaluatePointLight(
+                vWorldPosition,
+                normal,
+                uDynamicPosRadius[lightIndex].xyz,
+                uDynamicColorIntensity[lightIndex].rgb,
+                uDynamicPosRadius[lightIndex].w,
+                uDynamicColorIntensity[lightIndex].a
+            );
+        }
 
-        radiance = albedo * (irradiance * ambientOcclusion) * (1.0 / PI);
+        // Screen-space/voxel AO is only a model of indirect sky/room
+        // visibility. Applying it to analytic or already-occluded cached
+        // fixture light darkens corners twice and violates the light model.
+        radiance = albedo * (
+            ambient * ambientOcclusion + cachedStatic + analyticDirect
+        ) * (1.0 / PI);
         if (uFlashlightEnabled == 1) {
             radiance += albedo * spotBeam(
                 uCameraPosition, uCamForward, vWorldPosition, normal
@@ -83,9 +107,14 @@ void main() {
         }
     }
 
-    radiance += flareCores(vWorldPosition, uCameraPosition);
     radiance = applyDistanceFog(
         radiance, uFogColor, distanceToCamera, uFogStart, uFogDensity
+    );
+    // Core sprites lie between the camera and the receiver. Attenuate each
+    // at its own along-ray distance rather than fogging it as if it were on
+    // the receiver surface.
+    radiance += flareCoresThroughMedium(
+        vWorldPosition, uCameraPosition, uFogStart, uFogDensity
     );
 
     vec3 displayColor = encodeDisplayColor(radiance);

@@ -17,10 +17,10 @@ impl ArtifactSinkPort for FsArtifactSink {
             image.height,
             image::ExtendedColorType::Rgba8,
         )
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))
+        .map_err(|error| std::io::Error::other(error.to_string()))
     }
 
-    fn write_obj(&self, path: &Path, chunks: &[SurfaceChunk]) -> Result<(), std::io::Error> {
+    fn write_obj(&self, path: &Path, chunks: &[SurfaceChunk<'_>]) -> Result<(), std::io::Error> {
         let mut file = fs::File::create(path)?;
 
         writeln!(file, "o backrooms_scene")?;

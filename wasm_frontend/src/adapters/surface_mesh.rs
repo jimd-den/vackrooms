@@ -34,29 +34,31 @@ pub fn build_surface_mesh(
             depth as f32 * voxel_scale,
         ],
     );
-    let lights = collect_emissive_lights(
-        halo_grid,
-        voxel_scale,
-        halo_world_origin,
-        lateral_padding,
-    );
+    let lights =
+        collect_emissive_lights(halo_grid, voxel_scale, halo_world_origin, lateral_padding);
 
     let mut mesh = SurfaceMeshPayload {
         vertices: Vec::with_capacity(quads.len() * 4),
         indices: Vec::with_capacity(quads.len() * 6),
         bounds,
         lod,
-        light_volume: Vec::with_capacity(width * halo_grid.height() * depth * 3),
-        light_volume_size: [width as u32, halo_grid.height() as u32, depth as u32],
+        light_volume: Vec::with_capacity(
+            halo_grid.width() * halo_grid.height() * halo_grid.depth() * 3,
+        ),
+        light_volume_size: [
+            halo_grid.width() as u32,
+            halo_grid.height() as u32,
+            halo_grid.depth() as u32,
+        ],
+        light_volume_padding: lateral_padding.min(u8::MAX as usize) as u8,
         lights,
         faces: crate::adapters::face_instances::build_face_instances(&quads, voxel_scale),
         voxel_scale,
     };
-    for z in 0..depth {
+    for z in 0..halo_grid.depth() {
         for y in 0..halo_grid.height() {
-            for x in 0..width {
-                let [r, g, b] =
-                    halo_grid.get_light_rgb(x + lateral_padding, y, z + lateral_padding);
+            for x in 0..halo_grid.width() {
+                let [r, g, b] = halo_grid.get_light_rgb(x, y, z);
                 // The grid light is 0-15, WebGL expects 0-255 for gl.UNSIGNED_BYTE RGB textures.
                 mesh.light_volume.push(r * 17);
                 mesh.light_volume.push(g * 17);
@@ -189,5 +191,19 @@ mod tests {
         let mesh = build_surface_mesh(&grid, 1.0, 0, 1, [0.0; 3]);
         assert_eq!(mesh.vertices.len(), 24);
         assert_eq!(mesh.indices.len(), 36);
+    }
+
+    #[test]
+    fn baked_volume_retains_the_air_halo_needed_by_boundary_faces() {
+        let mut grid = VoxelGrid::new(4, 2, 4);
+        grid.set(1, 0, 1, VOXEL_WALL);
+        grid.set_light_rgb(0, 0, 1, [7, 5, 3]);
+
+        let mesh = build_surface_mesh(&grid, 1.0, 0, 1, [-1.0, 0.0, -1.0]);
+
+        assert_eq!(mesh.light_volume_padding, 1);
+        assert_eq!(mesh.light_volume_size, [4, 2, 4]);
+        let texel = ((grid.height() * grid.width()) + 0) * 3;
+        assert_eq!(&mesh.light_volume[texel..texel + 3], &[119, 85, 51]);
     }
 }

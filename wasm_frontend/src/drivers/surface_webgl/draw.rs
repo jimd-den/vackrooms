@@ -18,22 +18,28 @@ use crate::application::ports::{
     ChunkDraw, FrameParams, RendererPort, SurfaceChunk, SurfaceChunkKey,
 };
 use crate::application::render_settings::RenderToggles;
-use crate::drivers::gl::lights::{
-    SelectedLights, dynamic_light_sources, flare_cores, select_lights,
-};
+use crate::application::rendering::encode_display_color;
+use crate::drivers::gl::cluster_scene_lights::{LightRange, append_lights_reaching_bounds};
+use crate::drivers::gl::lights::flare_cores;
 use crate::drivers::gl::math::{
     camera_matrices, look_at_matrix_down, multiply_matrices, ortho_matrix,
 };
 use crate::drivers::gl::visibility::{MAX_DRAW_DISTANCE, chunk_bounding_sphere, sphere_visible};
 
 use super::SurfaceRenderer;
-use super::resources::GpuMesh;
+use super::upload_world_surface_chunks::GpuMesh;
 
 /// Shadow uniforms always receive a complete state. The default disables the
 /// lookup and supplies a deterministic matrix when no hero pass ran.
 struct ShadowState {
     light_index: i32,
     light_view_projection: [f32; 16],
+}
+
+struct VisibleDraw {
+    key: SurfaceChunkKey,
+    lights: LightRange,
+    hero_local_index: i32,
 }
 
 impl Default for ShadowState {
@@ -90,26 +96,31 @@ impl RendererPort for SurfaceRenderer {
     }
 }
 
-fn render_frame(renderer: &SurfaceRenderer, frame: &FrameParams, toggles: RenderToggles) {
+fn render_frame(renderer: &mut SurfaceRenderer, frame: &FrameParams, toggles: RenderToggles) {
     begin_main_frame(renderer, frame);
+    let (mut visible, clustered_lights) =
+        prepare_visible_draws(renderer, frame, toggles.distance_cull);
+    if renderer
+        .scene_lights
+        .upload(&renderer.gl, &clustered_lights)
+        .is_err()
+    {
+        for draw in &mut visible {
+            draw.lights.count = 0;
+            draw.hero_local_index = -1;
+        }
+    }
 
-    let resident: Vec<&GpuMesh> = renderer.meshes.values().collect();
-    let visible = collect_visible_meshes(&resident, frame, toggles.distance_cull);
-    // OPTIMIZATION (rt_bake): the bake replaces static analytic fixtures; it
-    // is never added on top of them. Runtime flares stay analytic in both
-    // paths. This prevents the former direct-light double count.
-    let lights = select_frame_lights(frame, !toggles.baked_lighting);
-    let shadow = render_shadow_pass(renderer, &resident, &lights, toggles.shadow_pass);
+    let shadow = render_shadow_pass(renderer, frame, toggles.shadow_pass);
 
     bind_frame_uniforms(
         renderer,
         frame,
-        &lights,
         &shadow,
         toggles.dither,
         toggles.baked_lighting,
     );
-    draw_visible_meshes(renderer, &visible);
+    draw_visible_meshes(renderer, &visible, &shadow);
 }
 
 /// Establishes every fixed-function state relied on by either raster pass.
@@ -120,16 +131,13 @@ fn begin_main_frame(renderer: &SurfaceRenderer, frame: &FrameParams) {
     // Match unloaded space to the level atmosphere so generated chunk edges
     // disappear into fog rather than exposing the canvas clear color.
     let environment = frame.environment;
-    if environment.outdoor {
-        gl.clear_color(
-            environment.sky_color[0],
-            environment.sky_color[1],
-            environment.sky_color[2],
-            1.0,
-        );
+    let atmosphere = if environment.outdoor {
+        environment.sky_color
     } else {
-        gl.clear_color(0.15, 0.125, 0.055, 1.0);
-    }
+        environment.fog_color
+    };
+    let clear = encode_display_color(atmosphere);
+    gl.clear_color(clear[0], clear[1], clear[2], 1.0);
     gl.clear_depth(1.0);
     gl.clear(Gl::COLOR_BUFFER_BIT | Gl::DEPTH_BUFFER_BIT);
     gl.enable(Gl::DEPTH_TEST);
@@ -141,34 +149,53 @@ fn begin_main_frame(renderer: &SurfaceRenderer, frame: &FrameParams) {
 
 /// OPTIMIZATION (rt_cull): conservative distance and behind-camera sphere
 /// rejection. The disabled reference path submits every resident mesh.
-fn collect_visible_meshes<'a>(
-    resident: &[&'a GpuMesh],
+fn prepare_visible_draws(
+    renderer: &SurfaceRenderer,
     frame: &FrameParams,
     culling_enabled: bool,
-) -> Vec<&'a GpuMesh> {
-    resident
-        .iter()
-        .copied()
-        .filter(|mesh| {
+) -> (
+    Vec<VisibleDraw>,
+    Vec<crate::application::ports::LightSource>,
+) {
+    let mut draws = Vec::new();
+    let mut clustered = Vec::new();
+    let hero_id = frame.active_scene_lights().first().map(|light| light.id);
+    for (&key, mesh) in &renderer.meshes {
+        let visible = {
             if !culling_enabled {
-                return true;
+                true
+            } else {
+                let (center, radius) = chunk_bounding_sphere(mesh.origin, mesh.bounds_max);
+                sphere_visible(center, radius, frame, MAX_DRAW_DISTANCE).is_some()
             }
-            let (center, radius) = chunk_bounding_sphere(mesh.origin, mesh.bounds_max);
-            sphere_visible(center, radius, frame, MAX_DRAW_DISTANCE).is_some()
-        })
-        .collect()
-}
-
-/// Selects analytic fixtures when the reference path needs them and always
-/// adds frame-local dynamic lights.
-fn select_frame_lights(frame: &FrameParams, include_static_fixtures: bool) -> SelectedLights {
-    let dynamic = dynamic_light_sources(frame);
-    let fixtures = if include_static_fixtures {
-        frame.active_scene_lights()
-    } else {
-        &[]
-    };
-    select_lights(fixtures.iter(), &dynamic, frame)
+        };
+        if !visible {
+            continue;
+        }
+        let bounds_max = [
+            mesh.origin[0] + mesh.bounds_max[0],
+            mesh.origin[1] + mesh.bounds_max[1],
+            mesh.origin[2] + mesh.bounds_max[2],
+        ];
+        let lights = append_lights_reaching_bounds(
+            frame.active_scene_lights(),
+            mesh.origin,
+            bounds_max,
+            &mut clustered,
+        );
+        let hero_local_index =
+            if lights.count > 0 && hero_id == Some(clustered[lights.first as usize].id) {
+                0
+            } else {
+                -1
+            };
+        draws.push(VisibleDraw {
+            key,
+            lights,
+            hero_local_index,
+        });
+    }
+    (draws, clustered)
 }
 
 /// FEATURE (rt_shadows): renders every resident greedy mesh into the selected
@@ -177,25 +204,29 @@ fn select_frame_lights(frame: &FrameParams, include_static_fixtures: bool) -> Se
 /// disabled, the returned state makes the main shader skip shadow sampling.
 fn render_shadow_pass(
     renderer: &SurfaceRenderer,
-    casters: &[&GpuMesh],
-    lights: &SelectedLights,
+    frame: &FrameParams,
     enabled: bool,
 ) -> ShadowState {
-    if !enabled || lights.hero_slot < 0 {
+    let Some(hero) = frame.active_scene_lights().first() else {
+        return ShadowState::default();
+    };
+    if !enabled {
         return ShadowState::default();
     }
 
-    let range = lights.hero_radius;
-    let ortho_half = range * 0.75;
+    let range = hero.radius;
+    let emitter_half_diagonal =
+        (hero.half_size[0] * hero.half_size[0] + hero.half_size[1] * hero.half_size[1]).sqrt();
+    let ortho_half = range + emitter_half_diagonal;
     let projection = ortho_matrix(
         -ortho_half,
         ortho_half,
         -ortho_half,
         ortho_half,
         0.1,
-        range * 1.2,
+        range + emitter_half_diagonal,
     );
-    let view = look_at_matrix_down(lights.hero_position);
+    let view = look_at_matrix_down(hero.position);
     let light_view_projection = multiply_matrices(&projection, &view);
 
     let gl = &renderer.gl;
@@ -211,7 +242,7 @@ fn render_shadow_pass(
         &light_view_projection,
     );
 
-    for mesh in casters {
+    for mesh in renderer.meshes.values() {
         gl.uniform3f(
             renderer.shadow_uniforms.chunk_origin.as_ref(),
             mesh.origin[0],
@@ -229,7 +260,7 @@ fn render_shadow_pass(
     gl.color_mask(true, true, true, true);
 
     ShadowState {
-        light_index: lights.hero_slot,
+        light_index: 0,
         light_view_projection,
     }
 }
@@ -238,7 +269,6 @@ fn render_shadow_pass(
 fn bind_frame_uniforms(
     renderer: &SurfaceRenderer,
     frame: &FrameParams,
-    lights: &SelectedLights,
     shadow: &ShadowState,
     dither_enabled: bool,
     baked_lighting_enabled: bool,
@@ -285,7 +315,34 @@ fn bind_frame_uniforms(
     gl.uniform1f(uniforms.fog_density.as_ref(), environment.fog_density);
     gl.uniform1f(uniforms.fog_start.as_ref(), environment.fog_start);
 
-    bind_light_uniforms(renderer, frame, lights, shadow);
+    bind_light_uniforms(renderer, frame, shadow);
+    bind_dynamic_light_uniforms(renderer, frame);
+}
+
+fn bind_dynamic_light_uniforms(renderer: &SurfaceRenderer, frame: &FrameParams) {
+    let gl = &renderer.gl;
+    let lights = frame.active_dynamic_lights();
+    let mut position_radius = [0.0f32; 16];
+    let mut color_intensity = [0.0f32; 16];
+    for (index, light) in lights.iter().enumerate() {
+        let offset = index * 4;
+        position_radius[offset..offset + 3].copy_from_slice(&light.position);
+        position_radius[offset + 3] = light.radius;
+        color_intensity[offset..offset + 3].copy_from_slice(&light.color);
+        color_intensity[offset + 3] = light.intensity;
+    }
+    gl.uniform1i(
+        renderer.uniforms.dynamic_light_count.as_ref(),
+        lights.len() as i32,
+    );
+    gl.uniform4fv_with_f32_array(
+        renderer.uniforms.dynamic_pos_radius.as_ref(),
+        &position_radius,
+    );
+    gl.uniform4fv_with_f32_array(
+        renderer.uniforms.dynamic_color_intensity.as_ref(),
+        &color_intensity,
+    );
 }
 
 fn camera_forward(frame: &FrameParams) -> [f32; 3] {
@@ -294,21 +351,16 @@ fn camera_forward(frame: &FrameParams) -> [f32; 3] {
     [-cos_pitch * sin_yaw, sin_pitch, -cos_pitch * cos_yaw]
 }
 
-fn bind_light_uniforms(
-    renderer: &SurfaceRenderer,
-    frame: &FrameParams,
-    lights: &SelectedLights,
-    shadow: &ShadowState,
-) {
+fn bind_light_uniforms(renderer: &SurfaceRenderer, frame: &FrameParams, shadow: &ShadowState) {
     let gl = &renderer.gl;
     let uniforms = &renderer.uniforms;
-    gl.uniform1i(uniforms.light_count.as_ref(), lights.count as i32);
-    if lights.count > 0 {
-        gl.uniform3fv_with_f32_array(uniforms.light_positions.as_ref(), &lights.positions);
-        gl.uniform3fv_with_f32_array(uniforms.light_colors.as_ref(), &lights.colors);
-        gl.uniform4fv_with_f32_array(uniforms.light_params.as_ref(), &lights.params);
-        gl.uniform1iv_with_i32_array(uniforms.light_kinds.as_ref(), &lights.kinds);
-    }
+    gl.active_texture(Gl::TEXTURE2);
+    renderer.scene_lights.bind(gl);
+    gl.uniform1i(uniforms.scene_light_texture.as_ref(), 2);
+    gl.uniform1i(
+        uniforms.scene_light_texture_width.as_ref(),
+        renderer.scene_lights.width(),
+    );
 
     // Flare cores are independent from the selected shading-light slots, so
     // an unselected flare still renders its small emissive ember.
@@ -327,21 +379,33 @@ fn bind_light_uniforms(
         false,
         &shadow.light_view_projection,
     );
-    gl.uniform1i(uniforms.shadowed_light_index.as_ref(), shadow.light_index);
 }
 
-fn draw_visible_meshes(renderer: &SurfaceRenderer, visible: &[&GpuMesh]) {
-    for mesh in visible {
-        draw_mesh(renderer, mesh);
+fn draw_visible_meshes(renderer: &SurfaceRenderer, visible: &[VisibleDraw], shadow: &ShadowState) {
+    for draw in visible {
+        let Some(mesh) = renderer.meshes.get(&draw.key) else {
+            continue;
+        };
+        draw_mesh(renderer, mesh, draw, shadow);
     }
     renderer.gl.bind_vertex_array(None);
 }
 
 /// Binds the only per-mesh state: local transform bounds, baked light volume,
 /// and indexed geometry.
-fn draw_mesh(renderer: &SurfaceRenderer, mesh: &GpuMesh) {
+fn draw_mesh(renderer: &SurfaceRenderer, mesh: &GpuMesh, draw: &VisibleDraw, shadow: &ShadowState) {
     let gl = &renderer.gl;
     let uniforms = &renderer.uniforms;
+    gl.uniform1i(uniforms.light_first.as_ref(), draw.lights.first);
+    gl.uniform1i(uniforms.light_count.as_ref(), draw.lights.count);
+    gl.uniform1i(
+        uniforms.shadowed_light_index.as_ref(),
+        if shadow.light_index >= 0 {
+            draw.hero_local_index
+        } else {
+            -1
+        },
+    );
     gl.uniform3f(
         uniforms.chunk_origin.as_ref(),
         mesh.origin[0],
@@ -349,6 +413,10 @@ fn draw_mesh(renderer: &SurfaceRenderer, mesh: &GpuMesh) {
         mesh.origin[2],
     );
     gl.uniform1f(uniforms.voxel_size.as_ref(), mesh.voxel_size);
+    gl.uniform3fv_with_f32_array(
+        uniforms.light_volume_origin.as_ref(),
+        &mesh.light_volume_origin,
+    );
     gl.active_texture(Gl::TEXTURE0);
     gl.bind_texture(Gl::TEXTURE_3D, Some(&mesh.light_texture));
     gl.uniform1i(uniforms.light_volume.as_ref(), 0);
