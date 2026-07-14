@@ -141,12 +141,7 @@ fn face_frame(quad: &MergedQuad, s: f32) -> FaceFrame {
     }
 }
 
-fn emit_capped(
-    quad: &MergedQuad,
-    s: f32,
-    max_cells: u32,
-    out: &mut Vec<PackedFaceInstance>,
-) {
+fn emit_capped(quad: &MergedQuad, s: f32, max_cells: u32, out: &mut Vec<PackedFaceInstance>) {
     let frame = face_frame(quad, s);
     let material = material_id(quad.v_type);
     let flags = if vackrooms::domain::entities::voxel_grid::EMISSIVE_MATERIALS.contains(&material) {

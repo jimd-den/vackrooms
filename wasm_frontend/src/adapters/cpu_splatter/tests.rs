@@ -45,6 +45,8 @@ fn voxel_in_front_of_camera_covers_center_pixel() {
         origin: [0.0, 0.0, 0.0],
         root_index: root as i32,
         world_size: 4.0,
+        voxel_size: 1.0,
+        svo_depth: 2,
     }];
     r.draw(&frame_at([1.5, 1.5, -2.0], std::f32::consts::PI), &chunks);
 
@@ -66,6 +68,8 @@ fn camera_facing_away_sees_nothing() {
         origin: [0.0, 0.0, 0.0],
         root_index: root as i32,
         world_size: 4.0,
+        voxel_size: 1.0,
+        svo_depth: 2,
     }];
     // yaw = 0 looks toward -z; the voxel is at +z relative to the camera.
     r.draw(&frame_at([1.5, 1.5, -2.0], 0.0), &chunks);
@@ -94,11 +98,15 @@ fn nearer_voxel_wins_depth_test() {
             origin: [0.0, 0.0, 6.0],
             root_index: (red_nodes + white_root) as i32,
             world_size: 4.0,
+            voxel_size: 1.0,
+            svo_depth: 2,
         },
         ChunkDraw {
             origin: [0.0, 0.0, 0.0],
             root_index: red_root as i32,
             world_size: 4.0,
+            voxel_size: 1.0,
+            svo_depth: 2,
         },
     ];
     r.draw(&frame_at([1.5, 1.5, -2.0], std::f32::consts::PI), &chunks);
@@ -130,11 +138,15 @@ fn depth_test_holds_even_without_front_to_back_sorting() {
             origin: [0.0, 0.0, 6.0],
             root_index: (red_nodes + white_root) as i32,
             world_size: 4.0,
+            voxel_size: 1.0,
+            svo_depth: 2,
         },
         ChunkDraw {
             origin: [0.0, 0.0, 0.0],
             root_index: red_root as i32,
             world_size: 4.0,
+            voxel_size: 1.0,
+            svo_depth: 2,
         },
     ];
     r.draw(&frame_at([1.5, 1.5, -2.0], std::f32::consts::PI), &chunks);
@@ -194,6 +206,8 @@ fn distant_geometry_lods_to_single_splats() {
         origin: [0.0, 0.0, 0.0],
         root_index: root as i32,
         world_size: 4.0,
+        voxel_size: 1.0,
+        svo_depth: 2,
     }];
     // Very far away: the voxel projects to well under a pixel, and the
     // root's occupancy (1/64) is below min_mip_occupancy -> no draw,
@@ -393,6 +407,8 @@ fn camera_inside_large_solid_leaf_terminates_under_budget() {
         origin: [0.0, 0.0, 0.0],
         root_index: 0,
         world_size: 16.0, // Very large leaf
+        voxel_size: 16.0,
+        svo_depth: 0,
     }];
 
     // Camera inside the bounding sphere of the root chunk.
@@ -423,6 +439,8 @@ fn test_trace_svo_basic_intersect() {
         origin: [0.0, 0.0, 0.0],
         root_index: root as i32,
         world_size: 4.0,
+        voxel_size: 1.0,
+        svo_depth: 2,
     }];
 
     // Ray passing through the center of the voxel (1.5, 1.5, 1.5).
@@ -463,6 +481,8 @@ fn cardinal_secondary_ray_does_not_drift_across_an_octant_boundary() {
         origin: [0.0, 0.0, 0.0],
         root_index: root as i32,
         world_size: 4.0,
+        voxel_size: 1.0,
+        svo_depth: 2,
     }];
 
     for x_direction in [-5.0e-7, -0.0, 0.0, 5.0e-7] {
@@ -497,6 +517,8 @@ fn trace_through_empty_lower_octant_still_finds_the_wall() {
         origin: [0.0, 0.0, 0.0],
         root_index: svo.root as i32,
         world_size: 4.0,
+        voxel_size: 1.0,
+        svo_depth: 2,
     }];
 
     // Start in the empty lower-half cell (0,0,1) and head +x with a
@@ -522,6 +544,8 @@ fn hits_beyond_max_t_are_ignored() {
         origin: [0.0, 0.0, 0.0],
         root_index: root as i32,
         world_size: 4.0,
+        voxel_size: 1.0,
+        svo_depth: 2,
     }];
     // The voxel face is at t = 2.0 along this ray; a trace capped at 1.0
     // must come back clear.
@@ -546,11 +570,15 @@ fn secondary_ray_reference_order_still_returns_the_nearest_chunk() {
             origin: [0.0, 0.0, 8.0],
             root_index: root as i32,
             world_size: 4.0,
+            voxel_size: 1.0,
+            svo_depth: 2,
         },
         ChunkDraw {
             origin: [0.0, 0.0, 0.0],
             root_index: root as i32,
             world_size: 4.0,
+            voxel_size: 1.0,
+            svo_depth: 2,
         },
     ];
 
@@ -572,6 +600,8 @@ fn test_draw_distance_culling() {
         origin: [0.0, 0.0, 0.0],
         root_index: root as i32,
         world_size: 4.0,
+        voxel_size: 1.0,
+        svo_depth: 2,
     }];
     // Draw with large draw distance
     r.settings.max_draw_distance = 100.0;
@@ -594,6 +624,8 @@ fn test_flashlight_illuminates_voxel() {
         origin: [0.0, 0.0, 0.0],
         root_index: root as i32,
         world_size: 4.0,
+        voxel_size: 1.0,
+        svo_depth: 2,
     }];
 
     // yaw = PI faces +z, toward the voxel (yaw = 0 would face away — the
@@ -633,6 +665,8 @@ fn flashlight_is_blocked_by_a_wall() {
         origin: [0.0, 0.0, 0.0],
         root_index: svo.root as i32,
         world_size: 4.0,
+        voxel_size: 1.0,
+        svo_depth: 2,
     }];
 
     // The beam from the camera toward the far voxel's center is blocked by

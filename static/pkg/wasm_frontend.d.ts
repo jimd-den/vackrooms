@@ -61,12 +61,6 @@ export function set_cpu_shadows(mode: number): void;
 export function set_doom_controls(enabled: boolean): void;
 
 /**
- * Updates the directional face-lighting response shared by every raymarch
- * fragment. The values are sampled once when a frame is submitted.
- */
-export function set_face_weights(top: number, bottom: number, x: number, z: number): void;
-
-/**
  * Sets the vertical field of view in degrees, clamped to a usable range.
  */
 export function set_fov(degrees: number): void;
@@ -113,9 +107,8 @@ export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembl
 
 export interface InitOutput {
     readonly memory: WebAssembly.Memory;
-    readonly start: () => void;
-    readonly set_face_weights: (a: number, b: number, c: number, d: number) => void;
     readonly set_fov: (a: number) => void;
+    readonly start: () => void;
     readonly worker_generate: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number];
     readonly worker_init: (a: number, b: number, c: number) => void;
     readonly get_blueprint_svg: (a: number, b: number, c: number, d: number, e: number) => [number, number];
@@ -136,13 +129,13 @@ export interface InitOutput {
     readonly set_mouse_sensitivity: (a: number) => void;
     readonly set_render_scale: (a: number) => void;
     readonly set_cpu_shadows: (a: number) => void;
-    readonly wasm_bindgen__convert__closures_____invoke__h4a98415c8f04dfea: (a: number, b: number, c: number) => void;
-    readonly wasm_bindgen__convert__closures_____invoke__h00d81ef20398ee11: (a: number, b: number, c: any) => void;
-    readonly wasm_bindgen__convert__closures_____invoke__h00d81ef20398ee11_2: (a: number, b: number, c: any) => void;
-    readonly wasm_bindgen__convert__closures_____invoke__h00d81ef20398ee11_3: (a: number, b: number, c: any) => void;
-    readonly wasm_bindgen__convert__closures_____invoke__h00d81ef20398ee11_4: (a: number, b: number, c: any) => void;
-    readonly wasm_bindgen__convert__closures_____invoke__h00d81ef20398ee11_5: (a: number, b: number, c: any) => void;
-    readonly wasm_bindgen__convert__closures_____invoke__ha60c758f5c18d619: (a: number, b: number) => void;
+    readonly wasm_bindgen__convert__closures_____invoke__h4f7fded1a540d94c: (a: number, b: number, c: number) => void;
+    readonly wasm_bindgen__convert__closures_____invoke__h23ea99ea78eeb43b: (a: number, b: number, c: any) => void;
+    readonly wasm_bindgen__convert__closures_____invoke__h23ea99ea78eeb43b_2: (a: number, b: number, c: any) => void;
+    readonly wasm_bindgen__convert__closures_____invoke__h23ea99ea78eeb43b_3: (a: number, b: number, c: any) => void;
+    readonly wasm_bindgen__convert__closures_____invoke__h23ea99ea78eeb43b_4: (a: number, b: number, c: any) => void;
+    readonly wasm_bindgen__convert__closures_____invoke__h23ea99ea78eeb43b_5: (a: number, b: number, c: any) => void;
+    readonly wasm_bindgen__convert__closures_____invoke__h221902240c9adaa9: (a: number, b: number) => void;
     readonly __wbindgen_malloc: (a: number, b: number) => number;
     readonly __wbindgen_realloc: (a: number, b: number, c: number, d: number) => number;
     readonly __wbindgen_exn_store: (a: number) => void;

@@ -30,9 +30,9 @@ uniform int uFlashlightEnabled;
 uniform sampler3D uLightVolume;
 
 uniform int uLightCount;
-uniform vec3 uLightPositions[4];
-uniform vec3 uLightColors[4];
-uniform vec4 uLightParams[4];
+uniform vec3 uLightPositions[8];
+uniform vec3 uLightColors[8];
+uniform vec4 uLightParams[8];
 
 uniform sampler2D uShadowMap;
 uniform mat4 uLightViewProjection;
@@ -160,8 +160,9 @@ void main() {
     // while the 3D volume supplies the actual warm/red chroma.
     float baked = aFaceMeta.z * (1.0 / 15.0);
     vec3 bakedWarm = vec3(baked, baked * 0.94, baked * 0.72);
-    irradiance = max(irradiance, bakedWarm);
-    irradiance = max(irradiance, vec3(0.035, 0.03, 0.015));
+    vec3 roomAmbient = vec3(0.16, 0.145, 0.075);
+    vec3 bouncedLight = irradiance * 0.75;
+    irradiance = max(roomAmbient, bouncedLight);
     if (uOutdoor == 1) {
         irradiance = max(irradiance, vec3(0.30, 0.32, 0.36));
     }
@@ -186,7 +187,7 @@ void main() {
     vec3 ambient = mix(ambientDown, ambientUp, N.y * 0.5 + 0.5) * ao * faceResponse * uAmbientScale;
 
     vec3 directDiffuse = vec3(0.0);
-    for (int i = 0; i < 4; ++i) {
+    for (int i = 0; i < 8; ++i) {
         if (i >= uLightCount) break;
         vec3 toLight = uLightPositions[i] - center;
         float d2 = dot(toLight, toLight);
@@ -197,7 +198,8 @@ void main() {
         float d = sqrt(d2);
         vec3 L = toLight / max(d, 0.001);
         float ndotl = max(dot(N, L), 0.0);
-        float falloff = pow(max(1.0 - d2 / range2, 0.0), 2.0) / (1.0 + 0.05 * d2);
+        float x = clamp(d2 / range2, 0.0, 1.0);
+        float falloff = (1.0 - x) * (1.0 - x);
 
         float visible = 1.0;
         if (i == uShadowedLightIndex) {

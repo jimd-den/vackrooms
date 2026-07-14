@@ -29,19 +29,8 @@ use atlas::AtlasTexture;
 use draw::ChunkUniformBuffers;
 
 thread_local! {
-    static FACE_WEIGHTS: RefCell<(f32, f32, f32, f32)> =
-        RefCell::new((0.55, 1.0, 0.8, 0.7));
     /// `tan(vertical_fov / 2)`. `0.767` is the 75-degree default.
     static FOV_TAN: RefCell<f32> = RefCell::new(0.767);
-}
-
-/// Updates the directional face-lighting response shared by every raymarch
-/// fragment. The values are sampled once when a frame is submitted.
-#[wasm_bindgen]
-pub fn set_face_weights(top: f32, bottom: f32, x: f32, z: f32) {
-    FACE_WEIGHTS.with(|weights| {
-        *weights.borrow_mut() = (top, bottom, x, z);
-    });
 }
 
 /// Sets the vertical field of view in degrees, clamped to a usable range.
@@ -56,10 +45,6 @@ pub(crate) fn fov_tan() -> f32 {
     FOV_TAN.with(|fov| *fov.borrow())
 }
 
-fn face_weights() -> (f32, f32, f32, f32) {
-    FACE_WEIGHTS.with(|weights| *weights.borrow())
-}
-
 /// Uniform locations are resolved once, immediately after program linking.
 struct Uniforms {
     camera_position: Option<WebGlUniformLocation>,
@@ -68,17 +53,22 @@ struct Uniforms {
     cam_forward: Option<WebGlUniformLocation>,
     aspect: Option<WebGlUniformLocation>,
     fov_tan: Option<WebGlUniformLocation>,
-    face_weight_top: Option<WebGlUniformLocation>,
-    face_weight_bottom: Option<WebGlUniformLocation>,
-    face_weight_x: Option<WebGlUniformLocation>,
-    face_weight_z: Option<WebGlUniformLocation>,
     flashlight: Option<WebGlUniformLocation>,
     front_to_back: Option<WebGlUniformLocation>,
+    empty_space_skip: Option<WebGlUniformLocation>,
+    baked_lighting: Option<WebGlUniformLocation>,
     dither: Option<WebGlUniformLocation>,
     outdoor: Option<WebGlUniformLocation>,
     sky_color: Option<WebGlUniformLocation>,
     fog_color: Option<WebGlUniformLocation>,
     ambient_scale: Option<WebGlUniformLocation>,
+    fog_density: Option<WebGlUniformLocation>,
+    fog_start: Option<WebGlUniformLocation>,
+    light_count: Option<WebGlUniformLocation>,
+    light_positions: Option<WebGlUniformLocation>,
+    light_colors: Option<WebGlUniformLocation>,
+    light_params: Option<WebGlUniformLocation>,
+    light_kinds: Option<WebGlUniformLocation>,
     dynamic_light_count: Option<WebGlUniformLocation>,
     dynamic_pos_radius: Option<WebGlUniformLocation>,
     dynamic_color_intensity: Option<WebGlUniformLocation>,
@@ -87,6 +77,8 @@ struct Uniforms {
     chunk_origins: Option<WebGlUniformLocation>,
     chunk_root_indices: Option<WebGlUniformLocation>,
     chunk_world_sizes: Option<WebGlUniformLocation>,
+    chunk_voxel_sizes: Option<WebGlUniformLocation>,
+    chunk_depths: Option<WebGlUniformLocation>,
 }
 
 impl Uniforms {
@@ -99,17 +91,22 @@ impl Uniforms {
             cam_forward: uniform("uCamForward"),
             aspect: uniform("uAspect"),
             fov_tan: uniform("uFovTan"),
-            face_weight_top: uniform("uFaceWeightTop"),
-            face_weight_bottom: uniform("uFaceWeightBottom"),
-            face_weight_x: uniform("uFaceWeightX"),
-            face_weight_z: uniform("uFaceWeightZ"),
             flashlight: uniform("uFlashlightEnabled"),
             front_to_back: uniform("uFrontToBackEnabled"),
+            empty_space_skip: uniform("uEmptySpaceSkipEnabled"),
+            baked_lighting: uniform("uBakedLightingEnabled"),
             dither: uniform("uDitherEnabled"),
             outdoor: uniform("uOutdoor"),
             sky_color: uniform("uSkyColor"),
             fog_color: uniform("uFogColor"),
             ambient_scale: uniform("uAmbientScale"),
+            fog_density: uniform("uFogDensity"),
+            fog_start: uniform("uFogStart"),
+            light_count: uniform("uLightCount"),
+            light_positions: uniform("uLightPositions"),
+            light_colors: uniform("uLightColors"),
+            light_params: uniform("uLightParams"),
+            light_kinds: uniform("uLightKinds"),
             dynamic_light_count: uniform("uDynamicLightCount"),
             dynamic_pos_radius: uniform("uDynamicPosRadius"),
             dynamic_color_intensity: uniform("uDynamicColorIntensity"),
@@ -118,6 +115,8 @@ impl Uniforms {
             chunk_origins: uniform("uChunkOrigins"),
             chunk_root_indices: uniform("uChunkRootIndices"),
             chunk_world_sizes: uniform("uChunkWorldSizes"),
+            chunk_voxel_sizes: uniform("uChunkVoxelSizes"),
+            chunk_depths: uniform("uChunkDepths"),
         }
     }
 }

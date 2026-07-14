@@ -21,13 +21,13 @@
 //! the RGBA buffer (`drivers::cpu_canvas`). All geometry/shading logic is
 //! natively unit-tested in [`tests`].
 
-mod atlas;
-mod camera;
+pub mod atlas;
+pub mod camera;
 mod flashlight;
-mod rasterizer;
+pub mod rasterizer;
 mod raycast;
-mod settings;
-mod shading;
+pub mod settings;
+pub mod shading;
 #[cfg(test)]
 mod tests;
 

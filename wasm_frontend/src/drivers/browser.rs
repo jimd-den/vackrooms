@@ -15,11 +15,10 @@ use web_sys::{
 };
 
 use vackrooms::frameworks_drivers::simple_noise::SimpleNoiseProvider;
-use vackrooms::use_cases::generate_chunk::GeneratorConfig;
 
 use crate::adapters::input::InputCollector;
 use crate::adapters::local_chunk_source::LocalChunkSource;
-use crate::adapters::query_config::parse_generation_params;
+use crate::adapters::query_config::generator_setup_from_query;
 use crate::adapters::section_locator::SectionLocator;
 use crate::application::engine::{Engine, EngineConfig};
 use crate::application::ports::{
@@ -264,12 +263,15 @@ pub fn boot() -> Result<(), JsValue> {
     // Renderer optimization switchboard (?rt_<name>=0|1); see
     // application::render_settings for the catalog of switches.
     crate::init_render_toggles(&query);
-    let gen_params = parse_generation_params(&query, WORLD_SEED);
+    // This resolver is also called inside every worker. Keeping the actual
+    // GeneratorConfig behind one adapter prevents a rejected voxel override
+    // from producing different worlds on the main and worker threads.
+    let (resolved_seed, generator_config) = generator_setup_from_query(&query, WORLD_SEED);
     let high_spec = query.contains("spec=high");
     // Spawn on the main corridor of region (0,0), looking east down its
     // west leg: the first frame is a lit, walled corridor receding into
     // fog — the player knows immediately that this is the Backrooms.
-    let spawn_at = vackrooms::use_cases::region_plan::spawn_point(gen_params.seed);
+    let spawn_at = vackrooms::use_cases::region_plan::spawn_point(resolved_seed);
     let spawn = [spawn_at.x, 1.7, spawn_at.z];
     let spawn_yaw = -std::f32::consts::FRAC_PI_2; // face +X
     // ?level=34 boots straight into the grassland (debugging any level in
@@ -280,37 +282,28 @@ pub fn boot() -> Result<(), JsValue> {
         .find_map(|pair| pair.strip_prefix("level="))
         .and_then(|v| v.parse::<u32>().ok())
         .unwrap_or(0);
-    let (generator_config, engine_config) = if high_spec {
-        (
-            GeneratorConfig::high_spec()
-                .with_tuning(gen_params.tuning)
-                .with_anomalies(gen_params.anomalies),
-            EngineConfig {
-                chunk_size: 20.0,
-                chunk_radius: 2,
-                seed: gen_params.seed,
-                spawn,
-                spawn_yaw,
-                // 5x5 footprint: the outer ring (>= 20 units away) stays at
-                // the coarse LOD, so high spec pays for ~9 fine chunks, not 25.
-                fine_distance: 25.0,
-                initial_level,
-                ..EngineConfig::default()
-            },
-        )
+    let engine_config = if high_spec {
+        EngineConfig {
+            chunk_size: generator_config.chunk_size,
+            chunk_radius: 2,
+            seed: resolved_seed,
+            spawn,
+            spawn_yaw,
+            // 5x5 footprint: the outer ring (>= 20 units away) stays at
+            // the coarse LOD, so high spec pays for ~9 fine chunks, not 25.
+            fine_distance: 25.0,
+            initial_level,
+            ..EngineConfig::default()
+        }
     } else {
-        (
-            GeneratorConfig::low_spec()
-                .with_tuning(gen_params.tuning)
-                .with_anomalies(gen_params.anomalies),
-            EngineConfig {
-                seed: gen_params.seed,
-                spawn,
-                spawn_yaw,
-                initial_level,
-                ..EngineConfig::default()
-            },
-        )
+        EngineConfig {
+            chunk_size: generator_config.chunk_size,
+            seed: resolved_seed,
+            spawn,
+            spawn_yaw,
+            initial_level,
+            ..EngineConfig::default()
+        }
     };
 
     let renderer = Rc::new(RefCell::new(create_renderer(&canvas, &query)?));
@@ -320,7 +313,7 @@ pub fn boot() -> Result<(), JsValue> {
     // Names the section the player is standing in (top-right HUD). The
     // locator re-derives the deterministic region plan, cached per region.
     let locator = Rc::new(RefCell::new(SectionLocator::new(
-        gen_params.seed,
+        resolved_seed,
         generator_config,
     )));
     // Chunk generation runs on a Web Worker pool so crossing a streaming
@@ -330,7 +323,7 @@ pub fn boot() -> Result<(), JsValue> {
     {
         Box::new(LocalChunkSource::with_telemetry(
             SimpleNoiseProvider::new(),
-            gen_params.seed,
+            resolved_seed,
             generator_config,
             &CONSOLE_TELEMETRY,
         ))
@@ -351,7 +344,7 @@ pub fn boot() -> Result<(), JsValue> {
                 );
                 Box::new(LocalChunkSource::with_telemetry(
                     SimpleNoiseProvider::new(),
-                    gen_params.seed,
+                    resolved_seed,
                     generator_config,
                     &CONSOLE_TELEMETRY,
                 ))

@@ -22,8 +22,8 @@
 
 pub mod adapters;
 pub mod application;
+pub mod core;
 
-#[cfg(target_arch = "wasm32")]
 pub mod drivers;
 
 #[cfg(target_arch = "wasm32")]
@@ -165,8 +165,9 @@ pub fn set_cpu_shadows(mode: u32) {
 pub static RENDER_TOGGLE_BITS: AtomicU32 = AtomicU32::new(u32::MAX);
 
 /// Flips one renderer optimization switch by name (`"hiz"`, `"f2b"`,
-/// `"mips"`, `"beam_occlusion"`, `"shadows"`, `"cells"`, `"cull"`,
-/// `"budget"`, `"dither"`, `"timer"`). Unknown names are ignored.
+/// `"skip"`, `"mips"`, `"beam_occlusion"`, `"shadows"`, `"cells"`,
+/// `"cull"`, `"budget"`, `"dither"`, `"bake"`, `"timer"`). Unknown names
+/// are ignored.
 #[cfg(target_arch = "wasm32")]
 #[wasm_bindgen::prelude::wasm_bindgen]
 pub fn set_render_toggle(name: &str, enabled: bool) {

@@ -83,14 +83,11 @@ pub(crate) fn place_stairwell(
     corridor_clearance: impl Fn(f32, f32, f32) -> bool,
 ) -> Option<AssemblyInstance> {
     // The leg whose axis passes closest to the anchor hosts the stair.
-    let (lx0, lx1, lz, lw) = legs
-        .iter()
-        .copied()
-        .min_by(|a, b| {
-            let da = (link.anchor.z - a.2).abs();
-            let db = (link.anchor.z - b.2).abs();
-            da.total_cmp(&db)
-        })?;
+    let (lx0, lx1, lz, lw) = legs.iter().copied().min_by(|a, b| {
+        let da = (link.anchor.z - a.2).abs();
+        let db = (link.anchor.z - b.2).abs();
+        da.total_cmp(&db)
+    })?;
     if lx1 - lx0 < STAIR_WIDTH + 8.0 {
         return None;
     }

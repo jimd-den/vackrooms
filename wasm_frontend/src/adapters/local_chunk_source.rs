@@ -79,17 +79,22 @@ impl<N: NoiseProvider> LocalChunkSource<N> {
             chunk_size: config.chunk_size + config.voxel_scale * 2.0,
             ..config
         };
+        let halo_world_origin = [
+            origin_x - config.voxel_scale,
+            0.0,
+            origin_z - config.voxel_scale,
+        ];
         let halo_grid = generator.execute_with_reality(
-            Position::new(origin_x - config.voxel_scale, origin_z - config.voxel_scale),
+            Position::new(halo_world_origin[0], halo_world_origin[2]),
             self.seed,
             halo_config,
             reality,
         );
         let grid = crop_lateral_halo(&halo_grid, 1);
-        let surface = build_surface_mesh(&halo_grid, config.voxel_scale, lod, 1);
+        let surface = build_surface_mesh(&halo_grid, config.voxel_scale, lod, 1, halo_world_origin);
 
-        let svo =
-            BuildOctreeUseCase::new().execute(&grid, config.svo_depth(), config.svo_world_size());
+        let svo_depth = config.svo_depth();
+        let svo = BuildOctreeUseCase::new().execute(&grid, svo_depth, config.svo_world_size());
 
         let gpu = OctreeGpuSerializer::serialize_to_gpu_data(&svo);
         let collision = extract_collision_boxes(&svo, origin_x, origin_z, config.voxel_scale);
@@ -98,6 +103,8 @@ impl<N: NoiseProvider> LocalChunkSource<N> {
             root: svo.root as u32,
             nodes: gpu.texel_data,
             world_size: config.svo_world_size(),
+            voxel_size: config.voxel_scale,
+            svo_depth: svo_depth as u8,
             surface,
             collision,
             traversal_gates: halo_grid.traversal_gates.clone(),

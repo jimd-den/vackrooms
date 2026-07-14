@@ -18,8 +18,13 @@
 //! `OctreeGpuSerializer`; the compact vertex/instance formats in
 //! `application::ports`.
 
+pub mod apply_distance_fog;
 pub mod chunks;
+pub mod encode_display_color;
+pub mod evaluate_scene_lighting;
+#[path = "trace_voxel_scene/mod.rs"]
 pub mod raymarch;
 pub mod shadow;
 pub mod splat;
+#[path = "render_world_surfaces/mod.rs"]
 pub mod surface;

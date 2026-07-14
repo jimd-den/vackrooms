@@ -9,6 +9,7 @@ use vackrooms::domain::entities::voxel_grid::{
     VOXEL_RED_WALL, VOXEL_STICKY_CARPET, VOXEL_TREE, VOXEL_WALL, VOXEL_WATER, VoxelGrid,
 };
 
+use crate::adapters::collect_emissive_lights::collect_emissive_lights;
 use crate::application::collision::Aabb;
 use crate::application::ports::{POSITION_FIXED_SCALE, PackedVertex, SurfaceMeshPayload};
 
@@ -19,6 +20,7 @@ pub fn build_surface_mesh(
     voxel_scale: f32,
     lod: u8,
     lateral_padding: usize,
+    halo_world_origin: [f32; 3],
 ) -> SurfaceMeshPayload {
     let mapper = VoxelMapper::new(voxel_scale);
     let quads = mapper.map_voxel_grid_with_padding(halo_grid, lateral_padding);
@@ -32,19 +34,12 @@ pub fn build_surface_mesh(
             depth as f32 * voxel_scale,
         ],
     );
-    let mut lights = Vec::new();
-    for rl in &halo_grid.runtime_lights {
-        lights.push(crate::application::ports::LightSource {
-            id: ((rl.world_pos[0].to_bits() as u64) << 32) | rl.world_pos[2].to_bits() as u64,
-            position: rl.world_pos,
-            half_size: rl.half_size,
-            color: rl.rgb,
-            radius: rl.range,
-            intensity: rl.intensity,
-            flicker_mode: 0,
-            enabled: rl.enabled,
-        });
-    }
+    let lights = collect_emissive_lights(
+        halo_grid,
+        voxel_scale,
+        halo_world_origin,
+        lateral_padding,
+    );
 
     let mut mesh = SurfaceMeshPayload {
         vertices: Vec::with_capacity(quads.len() * 4),
@@ -60,7 +55,8 @@ pub fn build_surface_mesh(
     for z in 0..depth {
         for y in 0..halo_grid.height() {
             for x in 0..width {
-                let [r, g, b] = halo_grid.get_light_rgb(x + lateral_padding, y, z + lateral_padding);
+                let [r, g, b] =
+                    halo_grid.get_light_rgb(x + lateral_padding, y, z + lateral_padding);
                 // The grid light is 0-15, WebGL expects 0-255 for gl.UNSIGNED_BYTE RGB textures.
                 mesh.light_volume.push(r * 17);
                 mesh.light_volume.push(g * 17);
@@ -190,7 +186,7 @@ mod tests {
     fn isolated_voxel_becomes_indexed_closed_surface() {
         let mut grid = VoxelGrid::new(3, 2, 3);
         grid.set(1, 0, 1, VOXEL_WALL);
-        let mesh = build_surface_mesh(&grid, 1.0, 0, 1);
+        let mesh = build_surface_mesh(&grid, 1.0, 0, 1, [0.0; 3]);
         assert_eq!(mesh.vertices.len(), 24);
         assert_eq!(mesh.indices.len(), 36);
     }

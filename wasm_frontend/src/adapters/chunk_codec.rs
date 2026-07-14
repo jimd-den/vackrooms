@@ -10,13 +10,13 @@
 
 use crate::application::collision::Aabb;
 use crate::application::ports::{
-    ChunkPayload, FaceCellRange, FaceInstanceSet, LightSource, PackedFaceInstance, PackedVertex,
-    SurfaceMeshPayload,
+    ChunkPayload, FaceCellRange, FaceInstanceSet, LightKind, LightSource, PackedFaceInstance,
+    PackedVertex, SurfaceMeshPayload,
 };
 use vackrooms::domain::entities::anomaly::{PitHazard, TraversalGate};
 
-/// "VKC" + version 3. Version 3 adds anomaly traversal/hazard semantics.
-const MAGIC: u32 = 0x564B_4303;
+/// "VKC" + version 4. Version 4 carries exact SVO metrics and light shape.
+const MAGIC: u32 = 0x564B_4304;
 
 pub fn encode_chunk_payload(payload: &ChunkPayload) -> Vec<u8> {
     let mut out = Vec::with_capacity(
@@ -32,6 +32,8 @@ pub fn encode_chunk_payload(payload: &ChunkPayload) -> Vec<u8> {
     put_u32(&mut out, MAGIC);
     put_u32(&mut out, payload.root);
     put_f32(&mut out, payload.world_size);
+    put_f32(&mut out, payload.voxel_size);
+    out.push(payload.svo_depth);
 
     put_u32(&mut out, payload.nodes.len() as u32);
     for &n in &payload.nodes {
@@ -73,6 +75,7 @@ pub fn encode_chunk_payload(payload: &ChunkPayload) -> Vec<u8> {
         }
         put_f32(&mut out, l.radius);
         put_f32(&mut out, l.intensity);
+        out.push(l.kind as u8);
         out.push(l.flicker_mode);
         out.push(u8::from(l.enabled));
     }
@@ -129,6 +132,8 @@ pub fn decode_chunk_payload(bytes: &[u8]) -> Option<ChunkPayload> {
     }
     let root = r.u32()?;
     let world_size = r.f32()?;
+    let voxel_size = r.f32()?;
+    let svo_depth = r.u8()?;
 
     let node_count = r.len(4)?;
     let mut nodes = Vec::with_capacity(node_count);
@@ -159,7 +164,7 @@ pub fn decode_chunk_payload(bytes: &[u8]) -> Option<ChunkPayload> {
     let volume_len = r.len(1)?;
     let light_volume = r.slice(volume_len)?.to_vec();
 
-    let light_count = r.len(39)?;
+    let light_count = r.len(51)?;
     let mut lights = Vec::with_capacity(light_count);
     for _ in 0..light_count {
         lights.push(LightSource {
@@ -169,6 +174,7 @@ pub fn decode_chunk_payload(bytes: &[u8]) -> Option<ChunkPayload> {
             color: [r.f32()?, r.f32()?, r.f32()?],
             radius: r.f32()?,
             intensity: r.f32()?,
+            kind: LightKind::from_u8(r.u8()?)?,
             flicker_mode: r.u8()?,
             enabled: r.u8()? != 0,
         });
@@ -229,6 +235,8 @@ pub fn decode_chunk_payload(bytes: &[u8]) -> Option<ChunkPayload> {
         root,
         nodes,
         world_size,
+        voxel_size,
+        svo_depth,
         surface: SurfaceMeshPayload {
             vertices,
             indices,

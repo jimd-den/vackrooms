@@ -12,6 +12,7 @@
         module and binds the settings menu to the engine's exported setters.
 
         Query flags:  ?spec=high          -> 20u chunks, 5x5 streaming, 0.1u voxels
+                      ?voxel_size=0.1     -> override scene voxel size (validated)
                       ?renderer=splat     -> instanced GPU face splats
                       ?renderer=raymarch  -> fullscreen SVO raymarcher (debug)
                       ?renderer=cpu       -> CPU microvoxel splatting (no GPU/WebGL;
@@ -346,6 +347,16 @@
                 </select>
             </div>
             <div class="setting-row">
+                <label for="setting-voxel-size">Scene voxel size <span class="value">reload</span></label>
+                <select id="setting-voxel-size">
+                    <option value="">Profile default</option>
+                    <option value="0.4">0.4u — coarse</option>
+                    <option value="0.2">0.2u — balanced</option>
+                    <option value="0.1">0.1u — fine</option>
+                    <option value="0.05">0.05u — ultra (standard profile only)</option>
+                </select>
+            </div>
+            <div class="setting-row">
                 <label for="setting-renderer">Renderer <span class="value">reload</span></label>
                 <select id="setting-renderer">
                     <option value="surface">GPU surfaces (default)</option>
@@ -382,6 +393,10 @@
                 <input type="checkbox" id="setting-rt-f2b" checked>
             </div>
             <div class="setting-row inline-switch">
+                <label for="setting-rt-skip">Raymarch empty-SVO skipping</label>
+                <input type="checkbox" id="setting-rt-skip" checked>
+            </div>
+            <div class="setting-row inline-switch">
                 <label for="setting-rt-mips">CPU MIP/LOD collapse</label>
                 <input type="checkbox" id="setting-rt-mips" checked>
             </div>
@@ -408,6 +423,10 @@
             <div class="setting-row inline-switch">
                 <label for="setting-rt-dither">Dither and surface grain</label>
                 <input type="checkbox" id="setting-rt-dither" checked>
+            </div>
+            <div class="setting-row inline-switch">
+                <label for="setting-rt-bake">Static irradiance bake</label>
+                <input type="checkbox" id="setting-rt-bake">
             </div>
             <div class="setting-row inline-switch">
                 <label for="setting-rt-timer">Asynchronous GPU timer</label>
@@ -525,6 +544,7 @@
         const defaultRenderToggles = {
             hiz: true,
             f2b: true,
+            skip: true,
             mips: true,
             beam_occlusion: true,
             shadows: true,
@@ -532,6 +552,7 @@
             budget: true,
             cull: true,
             dither: true,
+            bake: false,
             timer: true,
         };
         const defaults = {
@@ -615,6 +636,25 @@
 
         // URL parameters overrides (link sharing)
         $('setting-quality').value = urlParams.get('spec') === 'high' ? 'high' : 'low';
+        const supportedVoxelSizes = ['0.4', '0.2', '0.1', '0.05'];
+        const requestedVoxelSize = Number(urlParams.get('voxel_size'));
+        const selectedVoxelSize = supportedVoxelSizes.find(
+            (value) => Math.abs(Number(value) - requestedVoxelSize) < 1e-6,
+        );
+        $('setting-voxel-size').value = selectedVoxelSize || '';
+        const syncVoxelSizeAvailability = () => {
+            const ultra = $('setting-voxel-size').querySelector('option[value="0.05"]');
+            const highProfile = $('setting-quality').value === 'high';
+            ultra.disabled = highProfile;
+            if (highProfile && $('setting-voxel-size').value === '0.05') {
+                // 20u / 0.05u needs a depth-nine SVO. Return to the validated
+                // high-profile default instead of promising a value the
+                // generator will reject.
+                $('setting-voxel-size').value = '';
+            }
+        };
+        syncVoxelSizeAvailability();
+        $('setting-quality').addEventListener('change', syncVoxelSizeAvailability);
         const RENDERERS = ['surface', 'splat', 'raymarch', 'cpu'];
         const urlRenderer = urlParams.get('renderer');
         $('setting-renderer').value = RENDERERS.includes(urlRenderer) ? urlRenderer : 'surface';
@@ -786,6 +826,8 @@
                 if (v !== '' && Number(v) !== 1.0) params.set(knob === 'redrooms' ? 'red_rooms' : knob, v);
             }
             if ($('setting-quality').value === 'high') params.set('spec', 'high');
+            const voxelSize = $('setting-voxel-size').value;
+            if (voxelSize) params.set('voxel_size', voxelSize);
             const renderer = $('setting-renderer').value;
             if (renderer !== 'surface') params.set('renderer', renderer);
             const forcedAnomaly = $('setting-force-anomaly').value;

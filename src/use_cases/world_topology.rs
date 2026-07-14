@@ -23,8 +23,8 @@
 //! size. Determinism is testable: see the 5×5 snapshot test at the bottom.
 
 use crate::domain::entities::world_topology::{
-    MACRO_CELL_SIZE, MacroCell, MacroCellId, MacroFields, PlaceKind, Portal, REGIONS_PER_MACRO_CELL,
-    RedRoomEvent, VerticalLink, VerticalLinkKind, WorldNode,
+    MACRO_CELL_SIZE, MacroCell, MacroCellId, MacroFields, PlaceKind, Portal,
+    REGIONS_PER_MACRO_CELL, RedRoomEvent, VerticalLink, VerticalLinkKind, WorldNode,
 };
 use crate::entities::models::Position;
 use crate::use_cases::anomalies::determinism::{hash, unit};
@@ -128,21 +128,59 @@ fn field(
 /// regardless of which cell, region, or chunk asked.
 pub fn sample_fields(noise: &dyn NoiseProvider, seed: u32, wx: f32, wz: f32) -> MacroFields {
     MacroFields {
-        openness: field(noise, seed, 0xF1E1_0001, wx, wz, [350.0, 130.0, 45.0], [1.0, 0.5, 0.2]),
+        openness: field(
+            noise,
+            seed,
+            0xF1E1_0001,
+            wx,
+            wz,
+            [350.0, 130.0, 45.0],
+            [1.0, 0.5, 0.2],
+        ),
         vertical_pressure: field(
-            noise, seed, 0xF1E1_0002, wx, wz, [520.0, 170.0, 60.0], [1.0, 0.4, 0.15],
+            noise,
+            seed,
+            0xF1E1_0002,
+            wx,
+            wz,
+            [520.0, 170.0, 60.0],
+            [1.0, 0.4, 0.15],
         ),
         institution_age: field(
-            noise, seed, 0xF1E1_0003, wx, wz, [260.0, 90.0, 30.0], [1.0, 0.5, 0.25],
+            noise,
+            seed,
+            0xF1E1_0003,
+            wx,
+            wz,
+            [260.0, 90.0, 30.0],
+            [1.0, 0.5, 0.25],
         ),
         anomaly_pressure: field(
-            noise, seed, 0xF1E1_0004, wx, wz, [620.0, 210.0, 70.0], [1.0, 0.35, 0.1],
+            noise,
+            seed,
+            0xF1E1_0004,
+            wx,
+            wz,
+            [620.0, 210.0, 70.0],
+            [1.0, 0.35, 0.1],
         ),
         redroom_pressure: field(
-            noise, seed, 0xF1E1_0005, wx, wz, [700.0, 230.0, 80.0], [1.0, 0.3, 0.1],
+            noise,
+            seed,
+            0xF1E1_0005,
+            wx,
+            wz,
+            [700.0, 230.0, 80.0],
+            [1.0, 0.3, 0.1],
         ),
         style_blend: field(
-            noise, seed, 0xF1E1_0006, wx, wz, [420.0, 140.0, 50.0], [1.0, 0.45, 0.2],
+            noise,
+            seed,
+            0xF1E1_0006,
+            wx,
+            wz,
+            [420.0, 140.0, 50.0],
+            [1.0, 0.45, 0.2],
         ),
     }
 }
@@ -558,8 +596,7 @@ mod tests {
                             cx * REGIONS_PER_MACRO_CELL + dx,
                             cz * REGIONS_PER_MACRO_CELL + dz,
                         );
-                        let hit =
-                            red_room_event_for_region(SEED, &noise, region.0, region.1, 1.0);
+                        let hit = red_room_event_for_region(SEED, &noise, region.0, region.1, 1.0);
                         match (&event, hit) {
                             (Some(e), Some(h)) => {
                                 assert_eq!(e.region, region);
