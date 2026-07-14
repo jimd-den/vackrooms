@@ -58,19 +58,29 @@ stepping policies over the same stateless point lookup and hit record:
 4. **Shading** — sRGB material values are decoded to linear RGB, ceiling
    panels use a downward one-sided rectangular-emitter integral. The
    raymarcher intentionally rejects the bake's face-independent leaf value;
-   Beer–Lambert fog is composed in linear space before one shared
-   tone-map/sRGB conversion.
+   when `rt_shadows=1`, each of the rectangle integral's four samples traces
+   an SVO visibility segment through every resident chunk. Beer–Lambert fog
+   is composed in linear space before one shared tone-map/sRGB conversion.
 
 The default surface renderer evaluates the same analytic fixture list. Static
 fixtures and runtime flares use separate uniform arrays, so dropping a flare
 cannot evict a ceiling panel. `rt_bake` defaults off and never removes analytic
 lights; on the surface renderer it enables the deliberately approximate,
-quantized diffuse-fill field.
+quantized diffuse-fill field. Surface visibility is also an explicit raster
+approximation: `rt_shadows=1` provides one shadow map for the highest-priority
+fixture. The raymarcher is the strict all-fixture visibility reference.
 
-Low-spec strategy: no depth buffer, no MSAA, nearest-filtered integer
-textures, and an **adaptive internal-resolution governor** (0.5×–1.0× backing
-store, hysteresis + cooldown) instead of temporal checkerboarding — simpler,
-and it degrades smoothly on weak GPUs.
+There is no global fixture budget in either rewritten GPU path. The complete,
+deduplicated fixture list lives in an RGBA32F texture; a conservative
+finite-support intersection builds contiguous per-surface or per-chunk
+clusters. Clustering changes only which provably zero-contribution lights are
+skipped, not the lighting equation or the set of contributing fixtures.
+
+Low-spec strategy: the raymarcher uses one fullscreen pass, the surface path
+uses the hardware depth buffer, neither requests MSAA, SVO data stays in
+nearest-filtered integer textures, and an **adaptive internal-resolution
+governor** (0.5×–1.0× backing store, hysteresis + cooldown) replaces temporal
+checkerboarding.
 
 ## The dependency rule
 
@@ -395,14 +405,17 @@ through a wall.
 
 Ports make the interesting logic natively testable — no browser, no GPU:
 
-- `cargo test --workspace` runs 212 tests: entities, generation (including
-  the macro-graph snapshot, red-room separation, stair-flight, and arch-seam
-  invariants), lighting, octree build/serialize, plus the front end's player
-  physics, sliding collision, streaming policy/eviction, atlas rebasing,
-  input mapping, and the resolution governor.
+- `cargo test --workspace` covers entities, generation (including the
+  macro-graph snapshot, red-room separation, stair-flight, and arch-seam
+  invariants), lighting equations and bake invariants, octree build/serialize,
+  plus the front end's player physics, sliding collision, streaming policy,
+  atlas rebasing, input mapping, and the resolution governor.
 - Renderer/chunk-source **test doubles** verify the engine's contract with
   its ports (upload counts, draw-table sizes) rather than pixels.
-- The drivers layer is deliberately thin: translation only, no decisions.
+- Playwright GPU references require visible panel emission and lit room
+  geometry, exercise exact raymarched occlusion, and compare every decoded
+  pixel when correctness-preserving traversal/culling optimizations are
+  toggled live over the same resident scene.
 
 ## Native dev server
 

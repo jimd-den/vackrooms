@@ -398,7 +398,7 @@ fn camera_inside_large_solid_leaf_terminates_under_budget() {
     atlas[0] = 1; // Leaf
     atlas[1] = 1; // Solid voxel type
     atlas[2] = 0xFFFFFF; // White color
-    atlas[3] = 15; // BFS light
+    atlas[3] = 15; // quantized diffuse fill
 
     let mut r = SoftwareRasterizer::new(64, 64);
     r.upload_atlas(&atlas);

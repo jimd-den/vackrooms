@@ -107,7 +107,7 @@ combinable:
 | `rt_skip` | `0`, `1` | Raymarch empty-SVO-leaf skipping; `0` selects finest-cell diagnostic DDA. |
 | `rt_mips` | `0`, `1` | CPU projected-size MIP/LOD collapse. |
 | `rt_beam_occlusion` | `0`, `1` | CPU cone-light occlusion rays. |
-| `rt_shadows` | `0`, `1` | GPU direct-light visibility: exact SVO segments in raymarch, raster shadow maps on surface/splat. |
+| `rt_shadows` | `0`, `1` | GPU direct-light visibility: per-emitter-sample SVO segments in raymarch; a highest-priority-fixture shadow map on surface/splat. |
 | `rt_cells` | `0`, `1` | GPU splat cell-range culling. |
 | `rt_budget` | `0`, `1` | GPU splat far-chunk face budget. |
 | `rt_cull` | `0`, `1` | CPU and raster-GPU chunk visibility culling. |

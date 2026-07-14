@@ -2,7 +2,7 @@
 //! per light term. Because it runs per *splat* (not per pixel), it can
 //! afford to be richer than the GPU paths:
 //!
-//! * BFS-propagated static light (same atlas data as the GPU),
+//! * quantized voxel diffuse fill (same atlas data as the surface GPU path),
 //! * per-face directional response (tops bright, bottoms dark),
 //! * contact AO from octant crowding,
 //! * the flashlight cone ([`super::flashlight`]),
@@ -31,7 +31,7 @@ pub struct SplatSurface {
     pub dist: f32,
     /// Albedo, 0..255 per channel.
     pub base_color: [f32; 3],
-    /// BFS light level, 0..15.
+    /// Quantized diffuse-fill level, 0..15.
     pub light_level: f32,
     pub is_emissive: bool,
     /// Number of occupied siblings in the parent octant (contact AO).

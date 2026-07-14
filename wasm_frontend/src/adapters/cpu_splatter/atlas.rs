@@ -32,7 +32,7 @@ pub struct DecodedNode {
     pub voxel_type: u32,
     /// Leaf albedo in the renderer's 0..255 working range.
     pub color: [f32; 3],
-    /// Leaf scalar BFS light level, 0..15.
+    /// Leaf scalar diffuse-fill level, 0..15.
     pub light: f32,
 }
 
@@ -76,7 +76,7 @@ pub fn decode_node(atlas: &[u32], node_idx: usize) -> Option<DecodedNode> {
 pub struct MipNode {
     /// Occupancy-weighted average RGB of the subtree, 0..255 per channel.
     pub color: [f32; 3],
-    /// Max BFS light level in the subtree (0..15).
+    /// Max diffuse-fill level in the subtree (0..15).
     pub light: f32,
     /// Fraction of the subtree volume that is solid, 0..1.
     pub occupancy: f32,
