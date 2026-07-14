@@ -193,6 +193,34 @@ const FLARE_CULL_DISTANCE: f32 = 40.0;
 /// Local warm glow radius of one flare.
 const FLARE_LIGHT_RADIUS: f32 = 9.0;
 
+/// Per-frame intensity gain of one fixture's authored flicker mode.
+/// Deterministic in (id, time): every machine shows the same buzz.
+/// Mode 1 is a tired ballast — a fast shallow shimmer with slow beats.
+/// Mode 2 is a dying tube — mostly lit, with hard sputtering dropouts.
+fn fixture_flicker_gain(id: u64, mode: u8, time: f32) -> f32 {
+    let phase = (id % 977) as f32 * 0.61;
+    match mode {
+        1 => {
+            let t = time * 47.0 + phase;
+            (0.86 + 0.10 * t.sin() * (t * 0.093).cos() + 0.04 * (time * 3.1 + phase).sin())
+                .clamp(0.7, 1.0)
+        }
+        2 => {
+            // Coarse deterministic gate: ~9 decisions per second per tube.
+            let step = (time * 9.0 + phase) as u64;
+            let mut h = id ^ step.wrapping_mul(0x9E37_79B9_7F4A_7C15);
+            h ^= h >> 31;
+            h = h.wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            if (h >> 40) % 100 < 24 {
+                0.06
+            } else {
+                0.92
+            }
+        }
+        _ => 1.0,
+    }
+}
+
 /// Inside a blackout, drift cells closer than this may still be revealed by
 /// a flare or the flashlight cone, so the rear shift never touches them.
 const BLACKOUT_HIDE_DISTANCE: f32 = 14.0;
@@ -474,12 +502,19 @@ impl Engine {
             d2(a).total_cmp(&d2(b))
         });
 
-        let scene_lights = select_scene_lights(
+        let mut scene_lights = select_scene_lights(
             self.store
                 .iter_ordered()
                 .flat_map(|chunk| chunk.payload.surface.lights.iter()),
             self.player.position,
         );
+        // Fluorescent flicker is applied here, once, CPU-side — exactly like
+        // flare flicker — so every renderer sees the same fluctuating world
+        // and no shader needs a clock.
+        let flicker_time = self.time_seconds as f32;
+        for light in &mut scene_lights {
+            light.intensity *= fixture_flicker_gain(light.id, light.flicker_mode, flicker_time);
+        }
         let frame = FrameParams {
             camera_pos: self.player.position,
             yaw: self.player.yaw,

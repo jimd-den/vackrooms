@@ -206,8 +206,9 @@ fn light_from_component(
         LightKind::CeilingPanel
     };
 
+    let id = stable_id(key);
     LightSource {
-        id: stable_id(key),
+        id,
         position: [
             origin[0] + (component.min_x + component.max_x_exclusive) as f32 * voxel_size * 0.5,
             origin[1] + component.y as f32 * voxel_size,
@@ -218,8 +219,28 @@ fn light_from_component(
         radius: DEFAULT_MAX_LIGHT_RANGE_WORLD_UNITS,
         intensity: profile.radiance,
         kind,
-        flicker_mode: 0,
+        flicker_mode: flicker_mode_for(component.material, id),
         enabled: true,
+    }
+}
+
+/// "The lights buzz and fluctuate severely and randomly at a constant rate."
+/// A deterministic share of the warm office panels carry a flicker mode the
+/// application animates CPU-side each frame: most hum steadily, some shimmer
+/// on a tired ballast, and a few are actively dying. Red pressure fixtures
+/// and cold glimmers hold perfectly steady — their wrongness is composure.
+fn flicker_mode_for(material: u8, id: u64) -> u8 {
+    if material != VOXEL_LIGHT {
+        return 0;
+    }
+    // The id is already an FNV hash of world-space identity; fold it once
+    // more so the low bits used here are decorrelated from dedup ordering.
+    let mut h = id ^ (id >> 33);
+    h = h.wrapping_mul(0xFF51_AFD7_ED55_8CCD);
+    match (h >> 40) % 100 {
+        0..=11 => 1, // tired ballast shimmer
+        12..=15 => 2, // dying tube: hard dropouts
+        _ => 0,
     }
 }
 
@@ -417,4 +438,43 @@ mod tests {
         }
         assert_near(emergency.intensity, 0.9);
     }
+
+    #[test]
+    fn warm_panels_flicker_deterministically_but_cold_and_red_hold_steady() {
+        let mut grid = VoxelGrid::new(64, 3, 64);
+        for z in (1..63).step_by(2) {
+            for x in (1..63).step_by(2) {
+                grid.set(x, 2, z, VOXEL_LIGHT);
+            }
+        }
+        grid.set(0, 2, 0, VOXEL_RED_LIGHT);
+        grid.set(63, 2, 63, VOXEL_GLIMMER);
+
+        let lights = collect_emissive_lights(&grid, 0.5, [0.0; 3], 0);
+        let again = collect_emissive_lights(&grid, 0.5, [0.0; 3], 0);
+        assert_eq!(lights, again, "flicker authoring must be deterministic");
+
+        let warm: Vec<_> = lights
+            .iter()
+            .filter(|l| l.kind != LightKind::Emergency && l.color[0] >= l.color[2])
+            .collect();
+        assert!(warm.len() > 500);
+        let buzzing = warm.iter().filter(|l| l.flicker_mode == 1).count();
+        let dying = warm.iter().filter(|l| l.flicker_mode == 2).count();
+        let steady = warm.iter().filter(|l| l.flicker_mode == 0).count();
+        assert!(buzzing > 0, "no tired ballasts in {} panels", warm.len());
+        assert!(dying > 0, "no dying tubes in {} panels", warm.len());
+        assert!(
+            steady * 2 > warm.len(),
+            "most panels must hold steady ({steady}/{})",
+            warm.len()
+        );
+
+        for light in &lights {
+            if light.kind == LightKind::Emergency {
+                assert_eq!(light.flicker_mode, 0, "glimmers hold steady");
+            }
+        }
+    }
+
 }

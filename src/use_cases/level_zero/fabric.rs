@@ -261,14 +261,21 @@ impl BackroomsLevel {
             let lz = (wz - panel_period * 0.5).rem_euclid(panel_period);
             let cell_x = (wx / panel_period).floor() as i64;
             let cell_z = (wz / panel_period).floor() as i64;
-            let keep = if expanse { 0.66 } else { 0.78 } * tuning.lights;
+            let anchor_x = (cell_x as f32 + 0.5) * panel_period;
+            let anchor_z = (cell_z as f32 + 0.5) * panel_period;
+            // Old territory keeps fewer of its tubes alive: institution age
+            // scales the survival ratio from ~1.15x (new wings feel almost
+            // maintained) down to ~0.6x (ancient wings run on remnants).
+            // Sampled at the panel's own anchor so one fixture never splits
+            // into half-lit columns.
+            let age = crate::use_cases::world_topology::institution_age_at(
+                noise, seed, anchor_x, anchor_z,
+            );
+            let keep = if expanse { 0.66 } else { 0.78 } * tuning.lights * (1.15 - 0.55 * age);
             // Which panels burned out is cosmetic memory, so the Peripheral
             // Shift re-deals it: the light that guided you out may be dead
             // when you walk back in.
-            let epoch = reality.fabric_drift_epoch(
-                (cell_x as f32 + 0.5) * panel_period,
-                (cell_z as f32 + 0.5) * panel_period,
-            );
+            let epoch = reality.fabric_drift_epoch(anchor_x, anchor_z);
             let salt = 0xE900 ^ epoch.wrapping_mul(0x9E37_79B9);
             let alive = Self::cell_hash(noise, seed, salt, cell_x, cell_z) < keep;
             lx < 0.45 && lz < 0.45 && alive

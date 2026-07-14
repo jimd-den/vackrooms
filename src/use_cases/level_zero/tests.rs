@@ -1497,6 +1497,49 @@ fn blackout_substrate_drifts_but_its_recovery_skeleton_never_does() {
     );
 }
 
+/// Institution age steers decay: old territory keeps meaningfully fewer of
+/// its fluorescents alive than young territory. The wiki's endless hum is
+/// not uniform — some wings are almost maintained, some run on remnants.
+#[test]
+fn old_territory_has_more_dead_lights_than_young_territory() {
+    use crate::use_cases::world_topology::institution_age_at;
+    let noise = SimpleNoiseProvider::new();
+    let tuning = LevelTuning::default();
+    let mut young = (0usize, 0usize); // (alive, sites)
+    let mut old = (0usize, 0usize);
+    for kz in -220i64..220 {
+        for kx in -220i64..220 {
+            // Dense-grid light sites sit at period/2 + k*period.
+            let wx = 1.4 + kx as f32 * 2.8 + 0.2;
+            let wz = 1.4 + kz as f32 * 2.8 + 0.2;
+            if BackroomsLevel::in_expanse(&noise, 42, wx, wz) {
+                continue;
+            }
+            let column = BackroomsLevel::column_plan(&noise, 42, &tuning, wx, wz);
+            if column.solid {
+                continue;
+            }
+            let age = institution_age_at(&noise, 42, wx, wz);
+            let bucket = if age < 0.35 {
+                &mut young
+            } else if age > 0.65 {
+                &mut old
+            } else {
+                continue;
+            };
+            bucket.0 += usize::from(column.light);
+            bucket.1 += 1;
+        }
+    }
+    assert!(young.1 > 400 && old.1 > 400, "sample too small: {young:?} {old:?}");
+    let young_rate = young.0 as f32 / young.1 as f32;
+    let old_rate = old.0 as f32 / old.1 as f32;
+    assert!(
+        old_rate < young_rate * 0.82,
+        "age barely steers decay: young {young_rate:.3} vs old {old_rate:.3}"
+    );
+}
+
 #[test]
 fn test_print_ascii_map() {
     let noise = SimpleNoiseProvider::new();

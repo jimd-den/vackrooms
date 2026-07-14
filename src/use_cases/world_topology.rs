@@ -123,6 +123,22 @@ fn field(
     ((sum / norm) * 0.8 + 0.5).clamp(0.0, 1.0)
 }
 
+/// The institution-age field alone — how long this stretch of the building
+/// has been rotting. Split out of [`sample_fields`] (and used by it, so the
+/// two can never disagree) because per-column callers need one field, not
+/// six: old territory keeps fewer of its fluorescents alive.
+pub fn institution_age_at(noise: &dyn NoiseProvider, seed: u32, wx: f32, wz: f32) -> f32 {
+    field(
+        noise,
+        seed,
+        0xF1E1_0003,
+        wx,
+        wz,
+        [260.0, 90.0, 30.0],
+        [1.0, 0.5, 0.25],
+    )
+}
+
 /// Sample every macro parameter field at one world point. Pure and
 /// world-space: two callers asking about the same point always agree,
 /// regardless of which cell, region, or chunk asked.
@@ -146,15 +162,7 @@ pub fn sample_fields(noise: &dyn NoiseProvider, seed: u32, wx: f32, wz: f32) -> 
             [520.0, 170.0, 60.0],
             [1.0, 0.4, 0.15],
         ),
-        institution_age: field(
-            noise,
-            seed,
-            0xF1E1_0003,
-            wx,
-            wz,
-            [260.0, 90.0, 30.0],
-            [1.0, 0.5, 0.25],
-        ),
+        institution_age: institution_age_at(noise, seed, wx, wz),
         anomaly_pressure: field(
             noise,
             seed,
