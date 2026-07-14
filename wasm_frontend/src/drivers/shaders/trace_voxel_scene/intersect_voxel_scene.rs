@@ -2,6 +2,7 @@
 
 pub const GLSL: &str = r#"
 const float TRACE_INFINITY = 1e30;
+const float TRACE_MIN_TIE_EPSILON = 1e-7;
 
 struct RayBoxHit {
     bool hit;
@@ -31,6 +32,10 @@ float inverseDirection(float direction) {
         return direction < 0.0 ? -TRACE_INFINITY : TRACE_INFINITY;
     }
     return 1.0 / direction;
+}
+
+float distanceTieTolerance(float distance) {
+    return max(abs(distance) * 1e-6, TRACE_MIN_TIE_EPSILON);
 }
 
 RayBoxHit intersectBox(vec3 rayOrigin, vec3 rayDirection, vec3 boundsMin, vec3 boundsMax) {
@@ -82,7 +87,6 @@ float exitDistanceFromBox(
     vec3 rayDirection,
     vec3 boundsMin,
     vec3 boundsMax,
-    float tieEpsilon,
     out vec3 nextNormal
 ) {
     vec3 exitTimes = vec3(TRACE_INFINITY);
@@ -91,7 +95,10 @@ float exitDistanceFromBox(
     if (abs(rayDirection.z) >= 1e-20) exitTimes.z = ((rayDirection.z > 0.0 ? boundsMax.z : boundsMin.z) - rayOrigin.z) / rayDirection.z;
 
     float nearest = min(exitTimes.x, min(exitTimes.y, exitTimes.z));
-    float tolerance = max(abs(nearest) * 1e-6, tieEpsilon);
+    // Traversal bias and tie tolerance solve different problems. The former
+    // moves a sample into the next cell; using that comparatively large value
+    // here incorrectly merges distinct, very close wall/ceiling crossings.
+    float tolerance = distanceTieTolerance(nearest);
     // Use the same tolerant X/Y/Z precedence as finest-cell DDA. Without
     // this, a mathematically tied edge ray can acquire a different face
     // normal solely because one path jumped across a larger empty leaf.
@@ -130,7 +137,7 @@ VoxelHit traceChunkSkippingEmptyLeaves(
 
         vec3 crossedNormal;
         float nextDistance = exitDistanceFromBox(
-            rayOrigin, rayDirection, leaf.boundsMin, leaf.boundsMax, epsilon, crossedNormal
+            rayOrigin, rayDirection, leaf.boundsMin, leaf.boundsMax, crossedNormal
         );
         if (nextDistance <= distance + epsilon * 0.25) nextDistance = distance + epsilon;
         distance = nextDistance;
@@ -153,12 +160,6 @@ VoxelHit traceChunkDda(
     vec3 samplePoint = rayOrigin + rayDirection * min(distance + epsilon, chunkBox.exit);
     vec3 cell = floor(samplePoint / voxelSize);
     vec3 directionStep = sign(rayDirection);
-    vec3 nextBoundary = (cell + max(directionStep, vec3(0.0))) * voxelSize;
-    vec3 nextTimes = vec3(TRACE_INFINITY);
-    vec3 deltaTimes = vec3(TRACE_INFINITY);
-    if (abs(rayDirection.x) >= 1e-20) { nextTimes.x = (nextBoundary.x - rayOrigin.x) / rayDirection.x; deltaTimes.x = voxelSize / abs(rayDirection.x); }
-    if (abs(rayDirection.y) >= 1e-20) { nextTimes.y = (nextBoundary.y - rayOrigin.y) / rayDirection.y; deltaTimes.y = voxelSize / abs(rayDirection.y); }
-    if (abs(rayDirection.z) >= 1e-20) { nextTimes.z = (nextBoundary.z - rayOrigin.z) / rayDirection.z; deltaTimes.z = voxelSize / abs(rayDirection.z); }
     vec3 normal = chunkBox.entryNormal;
 
     for (int stepIndex = 0; stepIndex < 768; ++stepIndex) {
@@ -169,16 +170,28 @@ VoxelHit traceChunkDda(
             return VoxelHit(true, distance, normal, leaf.material, leaf.color, leaf.lightWord);
         }
 
+        // Recompute boundary times from the canonical integer cell each step.
+        // Repeated `nextTime += deltaTime` accumulates enough rounding error
+        // to reverse two distinct wall/ceiling crossings near a long ray.
+        vec3 nextBoundary = (cell + max(directionStep, vec3(0.0))) * voxelSize;
+        vec3 nextTimes = vec3(TRACE_INFINITY);
+        if (abs(rayDirection.x) >= 1e-20) nextTimes.x = (nextBoundary.x - rayOrigin.x) / rayDirection.x;
+        if (abs(rayDirection.y) >= 1e-20) nextTimes.y = (nextBoundary.y - rayOrigin.y) / rayDirection.y;
+        if (abs(rayDirection.z) >= 1e-20) nextTimes.z = (nextBoundary.z - rayOrigin.z) / rayDirection.z;
+
         float nextDistance = min(nextTimes.x, min(nextTimes.y, nextTimes.z));
         if (nextDistance > chunkBox.exit) break;
         // Step every tied axis so a ray through an edge/corner cannot stall.
-        float tieEpsilon = max(abs(nextDistance) * 1e-6, epsilon);
+        // This is a floating-point equality tolerance, not the sampling bias.
+        // Keeping them separate preserves the mathematically nearer face when
+        // two boundaries are close but not actually coincident.
+        float tieEpsilon = distanceTieTolerance(nextDistance);
         bool crossX = abs(nextTimes.x - nextDistance) <= tieEpsilon;
         bool crossY = abs(nextTimes.y - nextDistance) <= tieEpsilon;
         bool crossZ = abs(nextTimes.z - nextDistance) <= tieEpsilon;
-        if (crossX) { cell.x += directionStep.x; nextTimes.x += deltaTimes.x; }
-        if (crossY) { cell.y += directionStep.y; nextTimes.y += deltaTimes.y; }
-        if (crossZ) { cell.z += directionStep.z; nextTimes.z += deltaTimes.z; }
+        if (crossX) cell.x += directionStep.x;
+        if (crossY) cell.y += directionStep.y;
+        if (crossZ) cell.z += directionStep.z;
         if (crossX) normal = vec3(-directionStep.x, 0.0, 0.0);
         else if (crossY) normal = vec3(0.0, -directionStep.y, 0.0);
         else normal = vec3(0.0, 0.0, -directionStep.z);
