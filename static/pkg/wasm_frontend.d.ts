@@ -80,8 +80,9 @@ export function set_render_scale(scale: number): void;
 
 /**
  * Flips one renderer optimization switch by name (`"hiz"`, `"f2b"`,
- * `"mips"`, `"beam_occlusion"`, `"shadows"`, `"cells"`, `"cull"`,
- * `"budget"`, `"dither"`, `"timer"`). Unknown names are ignored.
+ * `"skip"`, `"mips"`, `"beam_occlusion"`, `"shadows"`, `"cells"`,
+ * `"cull"`, `"budget"`, `"dither"`, `"bake"`, `"timer"`). Unknown names
+ * are ignored.
  */
 export function set_render_toggle(name: string, enabled: boolean): void;
 
@@ -108,7 +109,6 @@ export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembl
 export interface InitOutput {
     readonly memory: WebAssembly.Memory;
     readonly set_fov: (a: number) => void;
-    readonly start: () => void;
     readonly worker_generate: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number];
     readonly worker_init: (a: number, b: number, c: number) => void;
     readonly get_blueprint_svg: (a: number, b: number, c: number, d: number, e: number) => [number, number];
@@ -129,6 +129,7 @@ export interface InitOutput {
     readonly set_mouse_sensitivity: (a: number) => void;
     readonly set_render_scale: (a: number) => void;
     readonly set_cpu_shadows: (a: number) => void;
+    readonly start: () => void;
     readonly wasm_bindgen__convert__closures_____invoke__h4f7fded1a540d94c: (a: number, b: number, c: number) => void;
     readonly wasm_bindgen__convert__closures_____invoke__h23ea99ea78eeb43b: (a: number, b: number, c: any) => void;
     readonly wasm_bindgen__convert__closures_____invoke__h23ea99ea78eeb43b_2: (a: number, b: number, c: any) => void;

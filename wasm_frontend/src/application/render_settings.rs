@@ -24,9 +24,9 @@
 
 /// One on/off switch per optimization, across all render paths.
 ///
-/// Correctness-preserving switches default on. The lossy static-light cache
-/// defaults off: first boot uses analytic fixtures, while `rt_bake=1` opts
-/// into the quantized cache after its tradeoff has been made explicit.
+/// Correctness-preserving switches default on. The approximate diffuse-fill
+/// bake defaults off: first boot uses the strict analytic-light image, while
+/// `rt_bake=1` opts into the quantized field explicitly.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RenderToggles {
     // ------------------------------------------------------------------
@@ -60,9 +60,9 @@ pub struct RenderToggles {
     // ------------------------------------------------------------------
     // GPU paths (surface / splat / raymarch)
     // ------------------------------------------------------------------
-    /// Hero-light shadow-map pass (surface + splat renderers). Off = no
-    /// shadow pass, no shadow lookups; the strongest light simply doesn't
-    /// cast shadows.
+    /// Direct-light visibility. The raymarcher casts exact SVO segments to
+    /// every emitter quadrature sample; raster paths use their shadow-map
+    /// approximation. Off is a faster explicitly unoccluded diagnostic.
     pub shadow_pass: bool,
     /// OPTIMIZATION (splat): per-cell instance-range culling. Face instances
     /// are grouped into spatial cells; invisible cells are skipped and
@@ -80,10 +80,11 @@ pub struct RenderToggles {
     /// Dither/grain/banding-noise post effects (GPU). A visual feature more
     /// than a speedup; toggle to isolate its contribution to the image.
     pub dither: bool,
-    /// OPTIMIZATION (surface + raymarch): use the quantized static irradiance
-    /// cache instead of evaluating static fixtures per visible sample. Dynamic
-    /// lights remain analytic. Off = the direct-light reference equations,
-    /// which is the first diagnostic path for any suspected bake artifact.
+    /// Optional quantized diffuse-fill field for the surface renderer.
+    /// Analytic fixtures remain authoritative because the path-distance bake
+    /// is not mathematically equivalent to an area-light integral. The
+    /// raymarcher deliberately rejects the field's face-independent SVO
+    /// encoding and stays on the strict analytic-light image.
     pub baked_lighting: bool,
     /// `EXT_disjoint_timer_query_webgl2` GPU frame timing for the HUD. Off =
     /// no queries issued (some drivers stall on them).

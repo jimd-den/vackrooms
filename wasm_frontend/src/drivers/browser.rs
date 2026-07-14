@@ -15,6 +15,7 @@ use web_sys::{
 };
 
 use vackrooms::frameworks_drivers::simple_noise::SimpleNoiseProvider;
+use vackrooms::use_cases::generate_chunk::GeneratorConfig;
 
 use crate::adapters::input::InputCollector;
 use crate::adapters::local_chunk_source::LocalChunkSource;
@@ -267,7 +268,7 @@ pub fn boot() -> Result<(), JsValue> {
     // GeneratorConfig behind one adapter prevents a rejected voxel override
     // from producing different worlds on the main and worker threads.
     let (resolved_seed, generator_config) = generator_setup_from_query(&query, WORLD_SEED);
-    let high_spec = query.contains("spec=high");
+    let high_spec = generator_config.chunk_size == GeneratorConfig::high_spec().chunk_size;
     // Spawn on the main corridor of region (0,0), looking east down its
     // west leg: the first frame is a lit, walled corridor receding into
     // fog — the player knows immediately that this is the Backrooms.

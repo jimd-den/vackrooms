@@ -447,7 +447,7 @@ impl Engine {
             d2(a).total_cmp(&d2(b))
         });
 
-        let (scene_lights, scene_light_count) = select_scene_lights(
+        let scene_lights = select_scene_lights(
             self.store
                 .iter_ordered()
                 .flat_map(|chunk| chunk.payload.surface.lights.iter()),
@@ -461,7 +461,6 @@ impl Engine {
             dynamic_lights: self.flare_lights(),
             dynamic_light_count: self.flare_light_count(),
             scene_lights,
-            scene_light_count,
             environment: self.environment(),
         };
         self.renderer.draw(&frame, &self.draws);

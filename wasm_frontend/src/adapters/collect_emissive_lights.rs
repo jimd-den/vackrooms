@@ -8,18 +8,18 @@
 //! downward-facing emissive surface exists.
 
 use vackrooms::domain::entities::voxel_grid::{
-    VOXEL_AIR, VOXEL_GLIMMER, VOXEL_LIGHT, VOXEL_RED_LIGHT, VoxelGrid,
+    VOXEL_AIR, VOXEL_GLIMMER, VOXEL_LIGHT, VOXEL_RED_LIGHT, VoxelGrid, material_color_f32,
 };
 use vackrooms::use_cases::bake_voxel_lighting::DEFAULT_MAX_LIGHT_RANGE_WORLD_UNITS;
 
 use crate::application::ports::{LightKind, LightSource, POSITION_FIXED_SCALE};
 
-/// Emission is expressed in the bake's established 0--15 linear domain.
-/// Normalizing the spectrum into `color * intensity` makes the direct-light
-/// path agree with the baked-light path without hiding brightness in color.
+/// The direct-light spectrum comes from the authoritative visible-material
+/// palette, decoded to linear RGB. The low-precision voxel bake has its own
+/// deliberately coarser 0--15 spectrum and must not leak into this contract.
 #[derive(Clone, Copy)]
 struct EmissionProfile {
-    rgb: [f32; 3],
+    linear_rgb: [f32; 3],
     /// Linear emitted-radiance scale used by the analytic area-light model.
     /// This deliberately matches `emittedRadiance`/`emittedVoxelRadiance`:
     /// normalizing a 0--15 bake sample to intensity 1 made a physical area
@@ -79,14 +79,8 @@ pub fn collect_emissive_lights(
                     continue;
                 }
 
-                let component = collect_owned_rectangle(
-                    halo_grid,
-                    x,
-                    y,
-                    z,
-                    lateral_padding,
-                    &mut visited,
-                );
+                let component =
+                    collect_owned_rectangle(halo_grid, x, y, z, lateral_padding, &mut visited);
                 let key = component_key(component, voxel_size, halo_world_origin);
                 keyed_lights.push((
                     key,
@@ -133,9 +127,8 @@ fn collect_owned_rectangle(
 
     let mut max_z_exclusive = start_z + 1;
     while max_z_exclusive < owned_z_end
-        && (start_x..max_x_exclusive).all(|x| {
-            rectangle_cell_matches(grid, x, y, max_z_exclusive, material, visited)
-        })
+        && (start_x..max_x_exclusive)
+            .all(|x| rectangle_cell_matches(grid, x, y, max_z_exclusive, material, visited))
     {
         max_z_exclusive += 1;
     }
@@ -205,7 +198,6 @@ fn light_from_component(
     let depth = (component.max_z_exclusive - component.min_z) as f32 * voxel_size;
     let profile = emission_profile(component.material)
         .expect("components are seeded only from emissive materials");
-    let peak_emission = profile.rgb.into_iter().fold(0.0_f32, f32::max);
     let kind = if profile.kind == LightKind::Emergency {
         LightKind::Emergency
     } else if width > depth * 2.0 || depth > width * 2.0 {
@@ -222,7 +214,7 @@ fn light_from_component(
             origin[2] + (component.min_z + component.max_z_exclusive) as f32 * voxel_size * 0.5,
         ],
         half_size: [width * 0.5, depth * 0.5],
-        color: profile.rgb.map(|channel| channel / peak_emission),
+        color: profile.linear_rgb,
         radius: DEFAULT_MAX_LIGHT_RANGE_WORLD_UNITS,
         intensity: profile.radiance,
         kind,
@@ -232,24 +224,25 @@ fn light_from_component(
 }
 
 fn emission_profile(material: u8) -> Option<EmissionProfile> {
-    Some(match material {
-        VOXEL_LIGHT => EmissionProfile {
-            rgb: [15.0, 14.0, 11.0],
-            radiance: 10.0,
-            kind: LightKind::CeilingPanel,
-        },
-        VOXEL_RED_LIGHT => EmissionProfile {
-            rgb: [15.0, 3.0, 2.0],
-            radiance: 8.0,
-            kind: LightKind::CeilingPanel,
-        },
-        VOXEL_GLIMMER => EmissionProfile {
-            rgb: [3.0, 5.0, 7.0],
-            radiance: 0.9,
-            kind: LightKind::Emergency,
-        },
+    let (radiance, kind) = match material {
+        VOXEL_LIGHT => (10.0, LightKind::CeilingPanel),
+        VOXEL_RED_LIGHT => (8.0, LightKind::CeilingPanel),
+        VOXEL_GLIMMER => (0.9, LightKind::Emergency),
         _ => return None,
+    };
+    Some(EmissionProfile {
+        linear_rgb: material_color_f32(material).map(srgb_channel_to_linear),
+        radiance,
+        kind,
     })
+}
+
+fn srgb_channel_to_linear(channel: f32) -> f32 {
+    if channel <= 0.04045 {
+        channel / 12.92
+    } else {
+        ((channel + 0.055) / 1.055).powf(2.4)
+    }
 }
 
 /// FNV-1a over the full fixed-point world-space identity. Hash collisions are
@@ -290,14 +283,17 @@ mod tests {
             }
         }
 
-        let lights = collect_emissive_lights(&grid, 0.5, [10.0, 0.0, -4.0]);
+        let lights = collect_emissive_lights(&grid, 0.5, [10.0, 0.0, -4.0], 0);
 
         assert_eq!(lights.len(), 1);
         let light = lights[0];
         assert_eq!(light.position, [11.5, 1.5, -3.0]);
         assert_eq!(light.half_size, [0.5, 0.5]);
         assert_eq!(light.kind, LightKind::CeilingPanel);
-        assert_eq!(light.color, [1.0, 14.0 / 15.0, 11.0 / 15.0]);
+        let expected_color = material_color_f32(VOXEL_LIGHT).map(srgb_channel_to_linear);
+        for (actual, expected) in light.color.into_iter().zip(expected_color) {
+            assert_near(actual, expected);
+        }
         assert_near(light.radius, DEFAULT_MAX_LIGHT_RANGE_WORLD_UNITS);
         assert_near(light.intensity, 10.0);
     }
@@ -308,8 +304,8 @@ mod tests {
         grid.set(1, 2, 1, VOXEL_LIGHT);
         grid.set(5, 2, 1, VOXEL_LIGHT);
 
-        let first = collect_emissive_lights(&grid, 1.0, [0.0; 3]);
-        let second = collect_emissive_lights(&grid, 1.0, [0.0; 3]);
+        let first = collect_emissive_lights(&grid, 1.0, [0.0; 3], 0);
+        let second = collect_emissive_lights(&grid, 1.0, [0.0; 3], 0);
 
         assert_eq!(first, second, "collection order must be deterministic");
         assert_eq!(first.len(), 2);
@@ -327,14 +323,54 @@ mod tests {
             }
         }
 
-        let left = collect_emissive_lights(&left_window, 0.5, [10.0, 0.0, -2.0]);
-        let right = collect_emissive_lights(&right_window, 0.5, [11.0, 0.0, -2.0]);
+        let left = collect_emissive_lights(&left_window, 0.5, [10.0, 0.0, -2.0], 0);
+        let right = collect_emissive_lights(&right_window, 0.5, [11.0, 0.0, -2.0], 0);
 
         assert_eq!(left.len(), 1);
         assert_eq!(right.len(), 1);
         assert_eq!(left[0].id, right[0].id);
         assert_eq!(left[0].position, right[0].position);
         assert_eq!(left[0].half_size, right[0].half_size);
+    }
+
+    #[test]
+    fn neighboring_halos_own_disjoint_halves_of_a_boundary_panel() {
+        // Logical interiors are [0,4) and [4,8). The two-cell panel crosses
+        // that boundary; each halo can see both cells, but owns only one.
+        let mut left_window = VoxelGrid::new(6, 3, 4);
+        left_window.set(4, 2, 2, VOXEL_LIGHT); // world [3,4)
+        left_window.set(5, 2, 2, VOXEL_LIGHT); // halo: world [4,5)
+
+        let mut right_window = VoxelGrid::new(6, 3, 4);
+        right_window.set(0, 2, 2, VOXEL_LIGHT); // halo: world [3,4)
+        right_window.set(1, 2, 2, VOXEL_LIGHT); // world [4,5)
+
+        let left = collect_emissive_lights(&left_window, 1.0, [-1.0, 0.0, -1.0], 1);
+        let right = collect_emissive_lights(&right_window, 1.0, [3.0, 0.0, -1.0], 1);
+
+        assert_eq!(left.len(), 1);
+        assert_eq!(right.len(), 1);
+        assert_eq!(left[0].position[0], 3.5);
+        assert_eq!(right[0].position[0], 4.5);
+        assert_eq!(left[0].half_size[0] + right[0].half_size[0], 1.0);
+        assert_ne!(left[0].id, right[0].id);
+    }
+
+    #[test]
+    fn damaged_l_shaped_fixture_does_not_emit_over_its_hole() {
+        let mut grid = VoxelGrid::new(4, 3, 4);
+        grid.set(1, 2, 1, VOXEL_LIGHT);
+        grid.set(2, 2, 1, VOXEL_LIGHT);
+        grid.set(1, 2, 2, VOXEL_LIGHT);
+
+        let lights = collect_emissive_lights(&grid, 1.0, [0.0; 3], 0);
+        let total_area = lights
+            .iter()
+            .map(|light| 4.0 * light.half_size[0] * light.half_size[1])
+            .sum::<f32>();
+
+        assert_eq!(lights.len(), 2, "the hole prevents one bounding rectangle");
+        assert_eq!(total_area, 3.0, "emissive area must be exactly conserved");
     }
 
     #[test]
@@ -348,7 +384,7 @@ mod tests {
         grid.set(1, 1, 2, VOXEL_CEILING);
         grid.set(1, 2, 1, VOXEL_CEILING);
 
-        assert!(collect_emissive_lights(&grid, 1.0, [0.0; 3]).is_empty());
+        assert!(collect_emissive_lights(&grid, 1.0, [0.0; 3], 0).is_empty());
     }
 
     #[test]
@@ -356,7 +392,7 @@ mod tests {
         let mut grid = VoxelGrid::new(3, 2, 3);
         grid.set(1, 0, 1, VOXEL_LIGHT);
 
-        assert!(collect_emissive_lights(&grid, 1.0, [0.0; 3]).is_empty());
+        assert!(collect_emissive_lights(&grid, 1.0, [0.0; 3], 0).is_empty());
     }
 
     #[test]
@@ -367,7 +403,7 @@ mod tests {
         }
         grid.set(6, 2, 3, VOXEL_GLIMMER);
 
-        let lights = collect_emissive_lights(&grid, 1.0, [0.0; 3]);
+        let lights = collect_emissive_lights(&grid, 1.0, [0.0; 3], 0);
 
         assert_eq!(lights.len(), 2);
         assert!(lights.iter().any(|light| light.kind == LightKind::Strip));
@@ -375,7 +411,10 @@ mod tests {
             .iter()
             .find(|light| light.kind == LightKind::Emergency)
             .unwrap();
-        assert_eq!(emergency.color, [3.0 / 7.0, 5.0 / 7.0, 1.0]);
-        assert_near(emergency.intensity, 7.0 / 15.0);
+        let expected_color = material_color_f32(VOXEL_GLIMMER).map(srgb_channel_to_linear);
+        for (actual, expected) in emergency.color.into_iter().zip(expected_color) {
+            assert_near(actual, expected);
+        }
+        assert_near(emergency.intensity, 0.9);
     }
 }

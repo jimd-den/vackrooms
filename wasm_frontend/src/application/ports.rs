@@ -152,6 +152,10 @@ pub struct SurfaceMeshPayload {
     pub lod: u8,
     pub light_volume: Vec<u8>,
     pub light_volume_size: [u32; 3],
+    /// Lateral halo cells retained in `light_volume`. Geometry is still
+    /// chunk-local; this offset exists so a boundary face can sample the
+    /// adjacent air texel instead of falling off the texture and going dark.
+    pub light_volume_padding: u8,
     pub lights: Vec<LightSource>,
     /// Face-instance page for the splat renderer, derived from the same
     /// greedy quads as `vertices`, so both paths describe the same boundary.
@@ -169,6 +173,7 @@ impl SurfaceMeshPayload {
             lod,
             light_volume: Vec::new(),
             light_volume_size: [0, 0, 0],
+            light_volume_padding: 0,
             lights: Vec::new(),
             faces: FaceInstanceSet::empty(),
             voxel_scale: 1.0,
@@ -210,10 +215,10 @@ pub struct ChunkDraw {
 /// Upper bound on per-frame dynamic lights handed to renderers (flares).
 pub const MAX_DYNAMIC_LIGHTS: usize = 4;
 
-/// Static fixture budget shared by all renderers. The application selects
-/// the most relevant unique emitters once per frame; GPU backends merely
-/// evaluate the same list.
-pub const MAX_SCENE_LIGHTS: usize = 8;
+/// Fixed light-slot budget retained by the legacy splat path. The rewritten
+/// surface and raymarch paths consume the complete fixture list through a
+/// floating-point texture instead of truncating the physical scene.
+pub const MAX_SCENE_LIGHTS: usize = 16;
 
 /// A short-lived runtime light (dropped flare). World-space state owned by
 /// the engine — never part of chunk payloads, baked light volumes, or the
@@ -284,7 +289,7 @@ impl Default for Environment {
 }
 
 /// Camera state for one frame, in world space.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct FrameParams {
     pub camera_pos: [f32; 3],
     pub yaw: f32,
@@ -294,11 +299,10 @@ pub struct FrameParams {
     /// `dynamic_light_count` entries are meaningful.
     pub dynamic_lights: [DynamicLight; MAX_DYNAMIC_LIGHTS],
     pub dynamic_light_count: u8,
-    /// Nearest/most influential deduplicated world fixtures. Unlike the old
-    /// driver-local selection this reaches surfaces, splats, raymarch, and
-    /// CPU reference rendering through the same contract.
-    pub scene_lights: [LightSource; MAX_SCENE_LIGHTS],
-    pub scene_light_count: u8,
+    /// Every finite, enabled, deduplicated world fixture. Correctness-first
+    /// renderers must not discard a light merely because it is far from the
+    /// camera: it can still be local to a visible distant receiver.
+    pub scene_lights: Vec<LightSource>,
     /// Level atmosphere (sky, fog, ambient scale).
     pub environment: Environment,
 }
@@ -309,7 +313,7 @@ impl FrameParams {
     }
 
     pub fn active_scene_lights(&self) -> &[LightSource] {
-        &self.scene_lights[..self.scene_light_count as usize]
+        &self.scene_lights
     }
 }
 
@@ -322,8 +326,7 @@ impl Default for FrameParams {
             flashlight: false,
             dynamic_lights: [DynamicLight::default(); MAX_DYNAMIC_LIGHTS],
             dynamic_light_count: 0,
-            scene_lights: [LightSource::default(); MAX_SCENE_LIGHTS],
-            scene_light_count: 0,
+            scene_lights: Vec::new(),
             environment: Environment::default(),
         }
     }

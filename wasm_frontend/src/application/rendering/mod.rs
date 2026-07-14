@@ -8,6 +8,28 @@
 /// Linear RGB radiance or radiance-like intensity.
 pub type LinearRgb = [f32; 3];
 
+/// Converts linear HDR radiance to the canvas' ordinary sRGB encoding.
+///
+/// The same monotone Reinhard curve and IEC sRGB transfer function are used
+/// by both new GPU shaders. Keeping a CPU form here prevents clear colors and
+/// test probes from accidentally treating linear atmosphere values as display
+/// values (which made unloaded outdoor space much too dark).
+pub fn encode_display_color(radiance: LinearRgb) -> LinearRgb {
+    radiance.map(|channel| {
+        let linear = nonnegative_radiance(channel);
+        let mapped = if linear == f32::INFINITY {
+            1.0
+        } else {
+            linear / (1.0 + linear)
+        };
+        if mapped <= 0.003_130_8 {
+            mapped * 12.92
+        } else {
+            1.055 * mapped.powf(1.0 / 2.4) - 0.055
+        }
+    })
+}
+
 /// Beer-Lambert transmittance through a homogeneous medium.
 ///
 /// ```text
@@ -261,6 +283,16 @@ mod tests {
         for channel in 0..3 {
             assert_close(actual[channel], expected[channel], tolerance);
         }
+    }
+
+    #[test]
+    fn display_encoding_is_finite_monotone_and_has_correct_endpoints() {
+        assert_eq!(encode_display_color([0.0, -1.0, f32::NAN]), [0.0; 3]);
+        let encoded = encode_display_color([0.1, 1.0, f32::INFINITY]);
+        assert!(encoded[0] > 0.0);
+        assert!(encoded[1] > encoded[0]);
+        assert_close(encoded[2], 1.0, EPSILON);
+        assert!(encoded.into_iter().all(f32::is_finite));
     }
 
     #[test]

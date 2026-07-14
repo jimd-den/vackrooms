@@ -2,9 +2,10 @@
 
 use crate::application::ports::FrameParams;
 
-/// Draw-distance cap for the raster paths (world units). Their fog reaches
-/// full opacity before this, so the cull is invisible.
-pub const MAX_DRAW_DISTANCE: f32 = 100.0;
+/// Shared raster far plane and conservative culling boundary (world units).
+/// Beer--Lambert fog never becomes exactly opaque, so projection and culling
+/// must use the identical distance rather than hiding a ten-unit mismatch.
+pub const MAX_DRAW_DISTANCE: f32 = 110.0;
 
 /// Sphere visibility: inside the draw distance and not entirely behind the
 /// camera plane. Returns the squared distance for near-to-far sorting, or

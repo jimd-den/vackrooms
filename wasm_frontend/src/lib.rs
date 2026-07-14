@@ -965,7 +965,7 @@ mod entry {
 /// same wasm module: `worker_init` builds a chunk source from the *same*
 /// URL query the main thread used (identical world by construction), and
 /// `worker_generate` runs the full chunk pipeline — architectural
-/// generation, BFS lighting, greedy mesh + face instances, SVO build and
+/// generation, voxel diffuse bake, greedy mesh + face instances, SVO build and
 /// serialization, collision extraction — returning one transferable byte
 /// buffer (see `adapters::chunk_codec`).
 #[cfg(target_arch = "wasm32")]

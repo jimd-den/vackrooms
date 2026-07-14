@@ -3,14 +3,16 @@
 //! The module follows the lifetime of a frame instead of collecting the whole
 //! renderer in one file:
 //!
-//! * [`atlas`] owns the integer SVO texture and its incremental row updates;
-//! * [`draw`] uploads per-frame state and implements [`RendererPort`];
+//! * [`upload_voxel_atlas`] owns the integer SVO texture and its incremental row updates;
+//! * [`draw_voxel_scene`] uploads per-frame state and implements [`RendererPort`];
 //! * this file owns long-lived program, quad, viewport, and tuning state.
 //!
 //! [`RendererPort`]: crate::application::ports::RendererPort
 
-mod atlas;
-mod draw;
+#[path = "draw.rs"]
+mod draw_voxel_scene;
+#[path = "atlas.rs"]
+mod upload_voxel_atlas;
 
 use std::cell::RefCell;
 
@@ -23,10 +25,11 @@ use web_sys::{
 use crate::application::atlas::MAX_CHUNKS;
 use crate::drivers::gl::program::{ContextOptions, create_context, link_program};
 use crate::drivers::gl::timer::GpuFrameTimer;
+use crate::drivers::gl::upload_scene_lights::SceneLightTexture;
 use crate::drivers::shaders::raymarch;
 
-use atlas::AtlasTexture;
-use draw::ChunkUniformBuffers;
+use draw_voxel_scene::ChunkUniformBuffers;
+use upload_voxel_atlas::AtlasTexture;
 
 thread_local! {
     /// `tan(vertical_fov / 2)`. `0.767` is the 75-degree default.
@@ -56,7 +59,7 @@ struct Uniforms {
     flashlight: Option<WebGlUniformLocation>,
     front_to_back: Option<WebGlUniformLocation>,
     empty_space_skip: Option<WebGlUniformLocation>,
-    baked_lighting: Option<WebGlUniformLocation>,
+    direct_visibility: Option<WebGlUniformLocation>,
     dither: Option<WebGlUniformLocation>,
     outdoor: Option<WebGlUniformLocation>,
     sky_color: Option<WebGlUniformLocation>,
@@ -64,11 +67,8 @@ struct Uniforms {
     ambient_scale: Option<WebGlUniformLocation>,
     fog_density: Option<WebGlUniformLocation>,
     fog_start: Option<WebGlUniformLocation>,
-    light_count: Option<WebGlUniformLocation>,
-    light_positions: Option<WebGlUniformLocation>,
-    light_colors: Option<WebGlUniformLocation>,
-    light_params: Option<WebGlUniformLocation>,
-    light_kinds: Option<WebGlUniformLocation>,
+    scene_light_texture: Option<WebGlUniformLocation>,
+    scene_light_texture_width: Option<WebGlUniformLocation>,
     dynamic_light_count: Option<WebGlUniformLocation>,
     dynamic_pos_radius: Option<WebGlUniformLocation>,
     dynamic_color_intensity: Option<WebGlUniformLocation>,
@@ -79,6 +79,8 @@ struct Uniforms {
     chunk_world_sizes: Option<WebGlUniformLocation>,
     chunk_voxel_sizes: Option<WebGlUniformLocation>,
     chunk_depths: Option<WebGlUniformLocation>,
+    chunk_light_first: Option<WebGlUniformLocation>,
+    chunk_light_counts: Option<WebGlUniformLocation>,
 }
 
 impl Uniforms {
@@ -94,7 +96,7 @@ impl Uniforms {
             flashlight: uniform("uFlashlightEnabled"),
             front_to_back: uniform("uFrontToBackEnabled"),
             empty_space_skip: uniform("uEmptySpaceSkipEnabled"),
-            baked_lighting: uniform("uBakedLightingEnabled"),
+            direct_visibility: uniform("uDirectVisibilityEnabled"),
             dither: uniform("uDitherEnabled"),
             outdoor: uniform("uOutdoor"),
             sky_color: uniform("uSkyColor"),
@@ -102,11 +104,8 @@ impl Uniforms {
             ambient_scale: uniform("uAmbientScale"),
             fog_density: uniform("uFogDensity"),
             fog_start: uniform("uFogStart"),
-            light_count: uniform("uLightCount"),
-            light_positions: uniform("uLightPositions"),
-            light_colors: uniform("uLightColors"),
-            light_params: uniform("uLightParams"),
-            light_kinds: uniform("uLightKinds"),
+            scene_light_texture: uniform("uSceneLightTexture"),
+            scene_light_texture_width: uniform("uSceneLightTextureWidth"),
             dynamic_light_count: uniform("uDynamicLightCount"),
             dynamic_pos_radius: uniform("uDynamicPosRadius"),
             dynamic_color_intensity: uniform("uDynamicColorIntensity"),
@@ -117,6 +116,8 @@ impl Uniforms {
             chunk_world_sizes: uniform("uChunkWorldSizes"),
             chunk_voxel_sizes: uniform("uChunkVoxelSizes"),
             chunk_depths: uniform("uChunkDepths"),
+            chunk_light_first: uniform("uChunkLightFirst"),
+            chunk_light_counts: uniform("uChunkLightCounts"),
         }
     }
 }
@@ -173,6 +174,7 @@ pub struct WebGl2Renderer {
     quad: FullscreenQuad,
     uniforms: Uniforms,
     atlas: AtlasTexture,
+    scene_lights: SceneLightTexture,
     width: i32,
     height: i32,
     chunk_uniforms: ChunkUniformBuffers,
@@ -188,6 +190,7 @@ impl WebGl2Renderer {
         let uniforms = Uniforms::resolve(&gl, &program);
         let quad = FullscreenQuad::create(&gl, &program)?;
         let timer = GpuFrameTimer::new(&gl);
+        let scene_lights = SceneLightTexture::create(&gl)?;
 
         gl.use_program(Some(&program));
 
@@ -197,6 +200,7 @@ impl WebGl2Renderer {
             quad,
             uniforms,
             atlas: AtlasTexture::new(),
+            scene_lights,
             width: canvas.width() as i32,
             height: canvas.height() as i32,
             chunk_uniforms: ChunkUniformBuffers::with_capacity(MAX_CHUNKS),

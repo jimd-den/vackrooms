@@ -8,7 +8,9 @@ mod reconstruct_surface;
 mod sample_static_irradiance;
 mod shade_visible_surface;
 
-use super::{apply_distance_fog, chunks, encode_display_color, evaluate_scene_lighting};
+use super::{
+    apply_distance_fog, chunks, encode_display_color, evaluate_scene_lighting, sample_scene_lights,
+};
 
 pub use reconstruct_surface::VERTEX_SHADER;
 
@@ -30,14 +32,17 @@ uniform int uBakedLightingEnabled;
 
 uniform sampler3D uLightVolume;
 uniform vec3 uChunkOrigin;
+uniform vec3 uLightVolumeOrigin;
 uniform float uVoxelSize;
 
 uniform int uLightCount;
-uniform vec3 uLightPositions[8];
-uniform vec3 uLightColors[8];
-// radius, intensity, half-size X, half-size Z
-uniform vec4 uLightParams[8];
-uniform int uLightKinds[8];
+uniform int uLightFirst;
+uniform sampler2D uSceneLightTexture;
+uniform int uSceneLightTextureWidth;
+
+uniform int uDynamicLightCount;
+uniform vec4 uDynamicPosRadius[4];
+uniform vec4 uDynamicColorIntensity[4];
 
 uniform sampler2D uShadowMap;
 uniform mat4 uLightViewProjection;
@@ -66,6 +71,7 @@ pub fn fragment_source() -> String {
         chunks::FLARE_CORES_GLSL,
         encode_display_color::GLSL,
         evaluate_scene_lighting::GLSL,
+        sample_scene_lights::GLSL,
         apply_distance_fog::GLSL,
         sample_static_irradiance::GLSL,
         shade_visible_surface::GLSL,
@@ -90,5 +96,6 @@ mod tests {
         }
         assert!(!source.contains("quantize5"));
         assert!(!source.contains("heightFactor"));
+        assert!(source.contains("isDownwardEmittingFace"));
     }
 }
