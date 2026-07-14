@@ -5,6 +5,7 @@
 //! streaming logic testable without a GPU or a browser.
 
 use crate::application::collision::Aabb;
+use vackrooms::domain::entities::anomaly::{PitHazard, RealitySnapshot, TraversalGate};
 
 /// Chunk-local fixed-point scale used by [`PackedVertex::position`]. A 20 u
 /// high-spec chunk occupies only 20,480 units, comfortably inside `u16`.
@@ -152,6 +153,67 @@ pub struct ChunkDraw {
     pub world_size: f32,
 }
 
+/// Upper bound on per-frame dynamic lights handed to renderers (flares).
+pub const MAX_DYNAMIC_LIGHTS: usize = 4;
+
+/// A short-lived runtime light (dropped flare). World-space state owned by
+/// the engine — never part of chunk payloads, baked light volumes, or the
+/// reality snapshot. Renderers treat it as one more point light; intensity
+/// already includes CPU-side flicker and fade so no shader needs a clock.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct DynamicLight {
+    pub position: [f32; 3],
+    pub color: [f32; 3],
+    pub radius: f32,
+    pub intensity: f32,
+}
+
+/// Per-level atmosphere handed to every renderer with the frame, so a level
+/// switch (noclip) changes the sky/fog/ambient identically in the surface,
+/// splat, raymarch, and CPU paths. `outdoor == false` means "keep your
+/// interior Backrooms look" — the colors below are only consulted outdoors,
+/// which keeps the four hand-tuned indoor palettes byte-identical.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Environment {
+    /// True on open-sky levels (the grassland). Renderers clear to
+    /// `sky_color`, fog toward `fog_color`, and scale ambient response.
+    pub outdoor: bool,
+    /// Clear color behind all geometry.
+    pub sky_color: [f32; 3],
+    /// Distance-fog blend target (slightly hazier than the sky).
+    pub fog_color: [f32; 3],
+    /// Multiplier on the ambient/indirect lighting response (>1 = daylight).
+    pub ambient_scale: f32,
+}
+
+impl Environment {
+    /// Level 0 and every other interior: renderers use their own palettes.
+    pub fn interior() -> Self {
+        Self {
+            outdoor: false,
+            sky_color: [0.0, 0.0, 0.0],
+            fog_color: [0.15, 0.125, 0.055],
+            ambient_scale: 1.0,
+        }
+    }
+
+    /// Level 34 grassland: a bright daylight sky.
+    pub fn daylight() -> Self {
+        Self {
+            outdoor: true,
+            sky_color: [0.53, 0.72, 0.92],
+            fog_color: [0.66, 0.78, 0.92],
+            ambient_scale: 2.2,
+        }
+    }
+}
+
+impl Default for Environment {
+    fn default() -> Self {
+        Self::interior()
+    }
+}
+
 /// Camera state for one frame, in world space.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct FrameParams {
@@ -159,6 +221,32 @@ pub struct FrameParams {
     pub yaw: f32,
     pub pitch: f32,
     pub flashlight: bool,
+    /// Nearest active flares, distance-culled; only the first
+    /// `dynamic_light_count` entries are meaningful.
+    pub dynamic_lights: [DynamicLight; MAX_DYNAMIC_LIGHTS],
+    pub dynamic_light_count: u8,
+    /// Level atmosphere (sky, fog, ambient scale).
+    pub environment: Environment,
+}
+
+impl FrameParams {
+    pub fn active_dynamic_lights(&self) -> &[DynamicLight] {
+        &self.dynamic_lights[..self.dynamic_light_count as usize]
+    }
+}
+
+impl Default for FrameParams {
+    fn default() -> Self {
+        Self {
+            camera_pos: [0.0; 3],
+            yaw: 0.0,
+            pitch: 0.0,
+            flashlight: false,
+            dynamic_lights: [DynamicLight::default(); MAX_DYNAMIC_LIGHTS],
+            dynamic_light_count: 0,
+            environment: Environment::default(),
+        }
+    }
 }
 
 /// Abstraction over the actual rasterizer back end.
@@ -209,7 +297,7 @@ pub trait RendererPort {
 }
 
 /// A fully prepared chunk as the application consumes it.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ChunkPayload {
     /// Root node index local to this chunk's `nodes` array.
     pub root: u32,
@@ -221,17 +309,43 @@ pub struct ChunkPayload {
     pub surface: SurfaceMeshPayload,
     /// Solid-voxel bounding boxes in world space, for player collision.
     pub collision: Vec<Aabb>,
+    /// Semantic threshold planes derived by the same generation snapshot as
+    /// the voxel grid. The engine folds crossings into the next reality.
+    pub traversal_gates: Vec<TraversalGate>,
+    /// Authored floor openings with deterministic recovery destinations.
+    pub pit_hazards: Vec<PitHazard>,
 }
 
 /// One background chunk-load order, echoed back verbatim with its result so
 /// the engine can reject stale work (wrong level, chunk no longer desired,
 /// or already refined past this LOD).
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ChunkRequest {
+    /// Monotonic identity assigned by the engine. A completion may only
+    /// clear the pending entry carrying this exact id; this prevents a late
+    /// result from an evicted/re-requested chunk from cancelling newer work.
+    pub request_id: u32,
     pub origin_x: f32,
     pub origin_z: f32,
     pub level: u32,
     pub lod: u8,
+    /// Immutable encounter state used to generate this chunk. It is part of
+    /// request identity, not ambient worker state.
+    pub reality: RealitySnapshot,
+}
+
+impl ChunkRequest {
+    /// Exact identity check for asynchronous completion validation. Origins
+    /// compare by bits so this remains an identity operation rather than an
+    /// approximate spatial comparison.
+    pub fn is_same_request(&self, other: &Self) -> bool {
+        self.request_id == other.request_id
+            && self.origin_x.to_bits() == other.origin_x.to_bits()
+            && self.origin_z.to_bits() == other.origin_z.to_bits()
+            && self.level == other.level
+            && self.lod == other.lod
+            && self.reality == other.reality
+    }
 }
 
 /// A finished background load.
@@ -254,6 +368,21 @@ pub trait ChunkSourcePort {
     /// LOD of a chunk covers the same world cube (`world_size` invariant),
     /// so payloads are interchangeable to the renderer.
     fn load(&self, origin_x: f32, origin_z: f32, level: u32, lod: u8) -> ChunkPayload;
+
+    /// Loads against an explicit immutable reality snapshot. Stateless
+    /// sources retain source compatibility through the default implementation;
+    /// procedural sources override this and route the snapshot into generation.
+    fn load_with_reality(
+        &self,
+        origin_x: f32,
+        origin_z: f32,
+        level: u32,
+        lod: u8,
+        reality: &RealitySnapshot,
+    ) -> ChunkPayload {
+        let _ = reality;
+        self.load(origin_x, origin_z, level, lod)
+    }
 
     /// True when the source generates in the background. The engine then
     /// drives it with [`Self::request`]/[`Self::poll_completed`] instead of

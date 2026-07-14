@@ -3,7 +3,7 @@
 A voxel-only rendering engine built on **Clean Architecture**, targeting
 low-spec hardware. The whole engine — procedural generation, lighting, sparse
 voxel octree (SVO) construction, chunk streaming, player physics, and
-rendering — compiles to a single ~410 KB WebAssembly module. The browser
+rendering — compiles to a single WebAssembly module. The browser
 runs it; a zero-dependency native HTTP server merely serves the files (or, on
 GitHub Pages, static files alone — the wasm engine generates chunks entirely
 client-side and needs no server).
@@ -23,6 +23,23 @@ implementations, selected at runtime by `create_renderer`
 
 `SurfaceRenderer` and `SplatRenderer` fall back (to CPU, or to surfaces)
 if WebGL2 or the requested backend fails to initialize.
+
+Renderer code is organized by lifetime and responsibility rather than by one
+backend-sized class:
+
+| Module | Responsibility |
+|---|---|
+| `drivers/surface_webgl/{mod,resources,draw}.rs` | surface composition, chunk GPU resources, staged frame pipeline |
+| `drivers/splat_webgl/{mod,resources,draw}.rs` | splat composition, instance/shadow resources, staged frame pipeline |
+| `drivers/webgl/{mod,atlas,draw}.rs` | raymarch composition, SVO texture lifecycle, fullscreen submission |
+| `adapters/cpu_splatter/` | atlas decode, camera, cone light, ray queries, shading, raster traversal, tests |
+| `drivers/gl/` | context/program setup, matrices, light selection, shadow targets, timers, visibility |
+| `drivers/shaders/` | one literate Rust module per GLSL program plus shared chunks |
+
+Optional shortcuts are plain data in `application::render_settings::RenderToggles`.
+Each driver snapshots that switchboard once per frame; inner algorithms never
+read browser globals. The same switches are available live in Settings →
+Optimize and as shareable `?rt_<name>=0|1` query parameters.
 
 Of the three classical voxel pipeline families (mesh/rasterized,
 SVO ray casting, hybrid), the `raymarch` backend implements a
@@ -124,7 +141,7 @@ application::atlas::build_atlas ─► merged atlas + per-chunk rebased roots
       ▼
 WebGl2Renderer ──────────────────► RGBA32UI texture + uniform chunk table
       ▼
-fragment shader (drivers/shaders.rs) — fullscreen quad, sorted chunk AABBs,
+fragment shader (drivers/shaders/raymarch.rs) — fullscreen quad, sorted chunk AABBs,
 stack-based SVO march, empty-space skipping ──► pixels
 ```
 
@@ -144,12 +161,67 @@ the SVO become single large collision boxes for free.
 
 The same layout is documented at its source of truth,
 `src/adapters/octree_gpu_serializer.rs`, and decoded in
-`wasm_frontend/src/drivers/shaders.rs` (`decodeNode`).
+`wasm_frontend/src/drivers/shaders/raymarch.rs` (`decodeNode`).
 
 ## Level 0: architecture first
 
-Level 0 no longer decorates a random maze — it *plans* buildings and then
-voxelizes them (`use_cases/region_plan.rs` + `use_cases/backrooms_level.rs`):
+Level 0 is a **world-planning system**, not a random room generator. Math
+selects architectural *intentions*; it never substitutes for them. Planning
+descends a strict scale hierarchy, each level constraining the next:
+
+```
+world seed
+  -> MacroFields         multi-octave parameter fields (world_topology)
+    -> MacroCell graph   160 u cells: nodes, portals, red-room events,
+                         vertical links (use_cases/world_topology.rs)
+      -> RegionPlan      80 u architectural plan (use_cases/region_plan.rs)
+        -> ColumnPlan    one voxel column (use_cases/backrooms_level.rs)
+          -> VoxelGrid   resolution-dependent output (level_zero/voxelize.rs)
+```
+
+**Fractal math's one job.** `world_topology::sample_fields` sums three
+noise octaves per parameter (`F(x,z) = Σ aᵢ·N(x/sᵢ, z/sᵢ)`) into `[0, 1]`
+fields — `openness`, `vertical_pressure`, `institution_age`,
+`anomaly_pressure`, `redroom_pressure`, `style_blend`. Fields only bias
+probabilities and style choices (where the building's rules change); a
+planner still decides every corridor, room, stair, and threshold. This is
+what makes billions of areas *differ* without ever placing a wall by noise.
+
+**The macro graph.** `plan_macro_cell(seed, cell, red_room_scale, noise)`
+is a pure function returning one 160 u `MacroCell`: a `WorldNode` per
+region (classified `Warren` / `OpenPlate` / `Atrium` / `Stairwell` /
+`RedRoomEncounter`), shared-edge `Portal`s (both neighbors of an edge
+derive the identical crossing — the infinite-corridor contract),
+`VerticalLink` stair reservations, and at most one `RedRoomEvent`. A 5×5
+graph snapshot test pins the exact topology of seed 42: an unintentional
+world change fails the build.
+
+**Red rooms are graph events, not a biome.** Events are planned on the
+macro lattice by a deterministic local tournament: a candidate cell fires
+only if no candidate within the separation radius beats its score, so any
+two encounters keep a cooldown distance (≥ 3 regions), clustered where
+`redroom_pressure` runs high. The region planner merely *realizes* an event
+that targets its region by promoting one occupied, reachable assembly.
+
+**Vertical circulation.** `vertical_link_for_region` reserves stairwells
+where `vertical_pressure` is high: `OrdinaryStair` and `EndlessAscent`
+links are realized by `use_cases/vertical_circulation.rs` as compact Stair
+assemblies beside the main spine — a lit vestibule, a monotonic flight of
+0.2 u treads (raised floor voxelizes as solid, so it collides), and either
+a landing or an endless climb into an unlit 5.4 u shaft. Elevation is an
+integer story index on `WorldNode`; `EndlessDescent` / `ServiceShaft`
+links stay graph reservations until the engine can stream below elevation
+0 and the player gains vertical physics (see roadmap).
+
+**Archways are topological connectors.** A `Transition` arch room carries
+an `ArchBehavior`: most are plain `Anchor`s, but a `CultureSeam`'s far
+half changes ceiling regime, floor grammar, and lintel height, and a
+`ScaleBreach`'s far half repeats the same grammar larger. The seam is
+expressed only through legal architectural vocabulary — never impossible
+collision or repainted walls.
+
+Within one region, the planner works as before
+(`use_cases/region_plan.rs` + `use_cases/backrooms_level.rs`):
 
 1. **Region plans.** The world tiles into fixed 80 u regions. A pure function
    of `(seed, region)` derives 1–3 `ArchitectGenome`s (circulation style,
@@ -177,6 +249,72 @@ All plan geometry snaps to a 0.4 u lattice (one coarse voxel) so every LOD
 of a chunk voxelizes the same architecture. Debug hook:
 `cargo run --example dump_plan` prints region plans as ASCII;
 `debug_region_ascii` renders any plan.
+
+### Infinite generation and anomalies
+
+The generation code is organized by the language of Level 0, rather than by
+delivery mechanism:
+
+```
+world_topology (macro fields, graph events, portals, vertical links)
+        │
+InfiniteRegionWindow ──► RegionPlan(s) ──► architectural ColumnPlan
+                                                │
+anomalies/{planning,geometry} ──────────────────┤
+red_rooms/{planning,geometry,recursive_level} ──┤
+vertical_circulation (stair profiles) ──────────┘
+                                                │
+                                      ColumnField (1-column halo)
+                                                │
+                                      voxelize_columns ──► VoxelGrid
+```
+
+- `domain/entities/anomaly/` contains only domain language: rectilinear
+  geometry, immutable anomaly instances, traversal semantics, and canonical
+  reality snapshots. The public `anomaly` namespace remains stable.
+  `domain/entities/world_topology.rs` holds the macro-graph language
+  (`MacroCell`, `WorldNode`, `Portal`, `VerticalLink`, `MacroFields`).
+- `use_cases/anomalies/` plans and samples macro anomaly families on the
+  same 160 u lattice as the world graph; per-anchor chance is weighted by
+  the `anomaly_pressure` field, so anomalies arrive in loose
+  constellations, never a uniform sprinkle.
+  `use_cases/red_rooms/` owns the assembly-derived encounter and its recursive
+  Level 0 address. The old `anomaly_plan` module is only a compatibility
+  facade. The pre-planning `?level=1` generator lives untouched in
+  `use_cases/legacy_blueprint.rs`, consulted by nothing in Level 0.
+- `InfiniteRegionWindow` is the finite query cache for an infinite region
+  lattice. A missing plan is an error instead of silently falling back to an
+  unrelated region.
+- A committed Red Room derives its branch seed and region-aligned translation
+  with integer hashes over the full 64-bit anomaly id. Planning and sampling
+  use that same address, so worker order, chunk boundaries, and floating-point
+  id precision cannot select different worlds.
+- `ColumnField` and `voxelize_columns` are resolution-dependent output stages.
+  World planning never reads the requested output extent; generating one 20 u
+  area or four 10 u areas produces the same voxels at matching coordinates.
+
+Reality is part of chunk identity. Entering a Red Room changes the active
+infinite Level 0 address, so all resident chunks are atomically scheduled for
+replacement; partially repainting only the vestibule would splice two worlds
+at a streaming boundary.
+
+### Generation invariants (enforced by tests)
+
+Massive procedural worlds only work when randomness is constrained. These
+contracts are non-negotiable and each is asserted natively:
+
+- The same seed, coordinates, LOD, and reality always produce identical
+  geometry; the 5×5 macro-graph snapshot digest pins seed 42's topology.
+- Neighboring regions independently compute the same shared portals, and
+  the primary route crosses every region boundary (corridors chain forever).
+- Every assembly entrance opens onto a corridor; sealed masses are
+  intentional (`AbandonedExpansion`), never accidents.
+- Stair flights rise monotonically from a flat entrance, keep ≥ 2.2 u of
+  headroom over every tread, and reach their declared landing.
+- Red-room events keep a minimum separation radius; a red room never
+  produces red masonry — only red light over ordinary architecture.
+- World planning never reads the requested output extent: one 20 u query
+  and four 10 u queries produce the same voxels at matching coordinates.
 
 ## Chunk streaming
 
@@ -233,10 +371,11 @@ through a wall.
 
 Ports make the interesting logic natively testable — no browser, no GPU:
 
-- `cargo test --workspace` runs 116 tests: entities, generation, lighting,
-  octree build/serialize, plus the front end's player physics, sliding
-  collision, streaming policy/eviction, atlas rebasing, input mapping, and
-  the resolution governor.
+- `cargo test --workspace` runs 212 tests: entities, generation (including
+  the macro-graph snapshot, red-room separation, stair-flight, and arch-seam
+  invariants), lighting, octree build/serialize, plus the front end's player
+  physics, sliding collision, streaming policy/eviction, atlas rebasing,
+  input mapping, and the resolution governor.
 - Renderer/chunk-source **test doubles** verify the engine's contract with
   its ports (upload counts, draw-table sizes) rather than pixels.
 - The drivers layer is deliberately thin: translation only, no decisions.
@@ -251,6 +390,19 @@ consumes. The wasm client needs no data endpoints at all.
 
 ## Roadmap (documented non-goals of this iteration)
 
+- **Vertical streaming**: chunks keyed by `(x, z, elevation)` so
+  `EndlessDescent` / `ServiceShaft` links can voxelize real destinations;
+  player step-up and Y physics so planned flights become climbable. The
+  topology contracts (`VerticalLink`, integer `elevation`) already exist —
+  the endless variants should re-address the world at each landing, never
+  mesh a literal infinite staircase.
+- Arch seams as *portal transforms*: a `CultureSeam` crossing re-seeding
+  the architect genome on the far side, `LoopBreach` returning near the
+  origin under a shifted reality epoch (gate machinery exists; the arch
+  kinds need their own `TraversalGate` semantics).
+- Red-room progression: foreshadowing (warming/flickering fixtures across
+  the one or two assemblies adjacent to a planned event, driven by the
+  existing event lookup).
 - Temporal reprojection / checkerboarding to complement adaptive resolution.
 - Per-chunk AABB *rasterization* (BackSide boxes + `gl_FragDepth` writeback)
   to replace the fullscreen quad once chunk counts grow beyond 25 (`raymarch`

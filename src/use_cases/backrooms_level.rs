@@ -11,33 +11,45 @@
 //!   circulation through a vast building, with at most two interior branches.
 //!   Its edge walls persist in long runs and open into large rooms or fabric,
 //!   not a repeated doorway grid.
-//! * **Fabric**: partitions are sparse 18 u fragments. Framed doors occur on
-//!   only a small portion of retained walls; broad openings and complete
-//!   dissolves into expanses do most of the connectivity work.
+//! * **Fabric**: the default fill *is* the labyrinth — an irregular warren
+//!   of rooms on a hidden 7.2 u lattice, chained through hashed doorways
+//!   (binary-tree rule guarantees global connectivity chunk-locally) and
+//!   merged by porosity-driven wall dropout so no grid is ever readable.
+//!   Open expanses are the exception that punctuates it, never the default.
 
+use crate::domain::entities::anomaly::{
+    AnomalyInstance, AnomalyKind, Axis2, RealitySnapshot, TraversalGate, TraversalGateKind,
+    WorldBounds,
+};
 use crate::domain::entities::architecture::{
     AssemblyInstance, CeilingLanguage, CirculationSpine, RegionPlan, SpaceProgram,
     StructuralSystem, StructuralSystemInstance,
 };
-use crate::domain::entities::voxel_grid::{
-    VOXEL_CEILING, VOXEL_FLOOR, VOXEL_LIGHT, VOXEL_RED_WALL, VOXEL_WALL, VoxelGrid,
-};
+use crate::domain::entities::voxel_grid::{VOXEL_FLOOR, VOXEL_LIGHT, VOXEL_WALL, VoxelGrid};
 use crate::entities::models::Position;
+use crate::use_cases::anomalies::geometry::sample_anomaly;
 use crate::use_cases::generate_chunk::{GeneratorConfig, LevelTuning};
+use crate::use_cases::infinite_level::InfiniteRegionWindow;
 use crate::use_cases::level_generator::LevelGenerator;
+use crate::use_cases::level_zero::{ColumnField, voxelize_columns};
 use crate::use_cases::ports::NoiseProvider;
-use crate::use_cases::region_plan::{PLAN_WALL_T, REGION_SIZE, generate_region_plan, region_index};
+use crate::use_cases::red_rooms::{
+    geometry::sample_red_room, recursive_level::RecursiveLevelWindow,
+};
+use crate::use_cases::region_plan::{PLAN_WALL_T, region_index, spawn_point};
 
 /// Ceiling height of the tallest (atrium) vaults, world units.
 pub const MAX_CEILING_UNITS: f32 = 5.4;
 /// Total grid height: headroom above the tallest vault.
 pub const GRID_HEIGHT_UNITS: f32 = 5.8;
 
-/// Fragmented partition fabric: long 18 u wall runs can survive before a
-/// meaningful opening, unlike the old 6 u office-cell cadence.
-const WALL_PERIOD: f32 = 18.0;
 const DOOR_WIDTH: f32 = 1.2;
 const DOOR_HEIGHT: f32 = 2.2;
+
+/// The default fabric room lattice. Rooms are chained through hashed
+/// doorways and merged by wall dropout, so the cell size never reads as a
+/// grid from inside — it is the scale of the labyrinth, not its shape.
+const FABRIC_CELL: f32 = 7.2;
 
 /// Column grid spacing inside expanses.
 const EXPANSE_COLUMN_PERIOD: f32 = 7.2;
@@ -47,9 +59,6 @@ const EXPANSE_COLUMN_PERIOD: f32 = 7.2;
 /// shader's 2.8 u grid), never stepped ceiling geometry.
 const LIGHT_PERIOD: f32 = 2.8;
 
-/// Sconce band height on atrium pillars.
-const SCONCE_UNITS: f32 = 2.4;
-
 /// Runtime direct lights sit below their visible ceiling panel. Tall atria
 /// need a longer pendant drop so the light reaches occupied space and casts
 /// useful column shadows instead of flattening against the vault.
@@ -58,28 +67,83 @@ fn runtime_light_height(ceiling_units: f32, is_atrium: bool) -> f32 {
     (ceiling_units - pendant_drop).max(2.4)
 }
 
-/// Keep a clearing around the world spawn point.
-const SPAWN: (f32, f32) = (5.0, 5.0);
-const SPAWN_CLEAR_RADIUS: f32 = 2.5;
+fn gate_crosses_bounds(gate: &TraversalGate, bounds: WorldBounds) -> bool {
+    match gate.axis {
+        Axis2::X => {
+            gate.plane >= bounds.min_x - 0.01
+                && gate.plane <= bounds.max_x + 0.01
+                && gate.span_max >= bounds.min_z
+                && gate.span_min <= bounds.max_z
+        }
+        Axis2::Z => {
+            gate.plane >= bounds.min_z - 0.01
+                && gate.plane <= bounds.max_z + 0.01
+                && gate.span_max >= bounds.min_x
+                && gate.span_min <= bounds.max_x
+        }
+    }
+}
+
+/// Within this radius of the spawn point the main corridor keeps both of its
+/// edge walls fully intact: the first thing the player reads is an
+/// unambiguous walled corridor, not a dissolved edge into open fabric. The
+/// world only starts opening up once that grammar has been established.
+const SPAWN_READABLE_RADIUS: f32 = 26.0;
 
 pub struct BackroomsLevel;
 
 /// What one (x, z) column of the level looks like.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct ColumnPlan {
+    /// Whether the walkable floor slab exists under this column.
+    pub floor: bool,
+    /// Raised solid floor above the base slab, world units (stair treads,
+    /// landings, plinths). `0.0` is the ordinary one-voxel slab. Raised
+    /// floor voxelizes as solid wall material so it collides — a tread the
+    /// player ghosts through would be worse than one that blocks.
+    pub floor_units: f32,
     /// Floor-to-ceiling solid (wall or pillar).
     pub solid: bool,
-    /// Red accent variant of a solid column.
-    pub red: bool,
     /// Ceiling height in world units (top of the walkable space).
     pub ceiling_units: f32,
     /// Ceiling light above this column.
     pub light: bool,
+    /// The light above this column burns red (red-room corruption). Only
+    /// ever true inside an assembly whose whole room is the anomaly.
+    pub red_light: bool,
     /// Solid band hanging from the ceiling down to this height (door
     /// lintels). The space below stays walkable.
     pub lintel_from_units: Option<f32>,
     /// Glowing sconce band on a solid column (atrium pillars).
     pub sconce: bool,
+    /// Material used for solid columns and lintels (a wall-treatment voxel
+    /// from the shared
+    /// [`crate::domain::entities::environment::EnvironmentProfile`] semantics).
+    pub wall_material: u8,
+    /// Material of the floor slab (carpet depth/condition/fluid semantics).
+    pub floor_material: u8,
+    /// Material of the fixture voxel when `light` is set (warm fluorescent,
+    /// red pressure, or cool glimmer).
+    pub light_material: u8,
+}
+
+impl ColumnPlan {
+    /// An open ordinary-fabric column with the default Level 0 materials.
+    pub(crate) fn open(ceiling_units: f32) -> Self {
+        Self {
+            floor: true,
+            floor_units: 0.0,
+            solid: false,
+            ceiling_units,
+            light: false,
+            red_light: false,
+            lintel_from_units: None,
+            sconce: false,
+            wall_material: VOXEL_WALL,
+            floor_material: VOXEL_FLOOR,
+            light_material: VOXEL_LIGHT,
+        }
+    }
 }
 
 /// The broad ceiling hierarchy that gives Level 0 scale without turning the
@@ -121,12 +185,15 @@ impl BackroomsLevel {
         wx: f32,
         wz: f32,
     ) -> FabricCeilingBand {
+        // Regular dropped ceiling — the labyrinth fabric — is the default
+        // condition of Level 0. Expanses and vaults are deliberate
+        // punctuation the maze occasionally opens into, never the baseline.
         let field = Self::n(noise, seed, 0xAA10, wx, wz, 0.18);
         if field < -0.60 {
             FabricCeilingBand::Compression
-        } else if field < 0.36 {
+        } else if field < 0.52 {
             FabricCeilingBand::Regular
-        } else if field < 0.68 {
+        } else if field < 0.76 {
             FabricCeilingBand::Expanse
         } else {
             FabricCeilingBand::Vault
@@ -195,14 +262,11 @@ impl BackroomsLevel {
         // shader darkens the same COFFER_PERIOD grid instead.
 
         // ---- solids ------------------------------------------------------
-        let spawn_d2 = (wx - SPAWN.0) * (wx - SPAWN.0) + (wz - SPAWN.1) * (wz - SPAWN.1);
-        let in_spawn = spawn_d2 < SPAWN_CLEAR_RADIUS * SPAWN_CLEAR_RADIUS;
-
         let mut solid = false;
         let mut lintel_from_units: Option<f32> = None;
         let sconce = false;
 
-        if !in_spawn && expanse {
+        if expanse {
             // Sparse structural columns hold the expanse ceiling up.
             let cx = (wx / EXPANSE_COLUMN_PERIOD).floor() as i64;
             let cz = (wz / EXPANSE_COLUMN_PERIOD).floor() as i64;
@@ -211,81 +275,66 @@ impl BackroomsLevel {
             if on_site && Self::cell_hash(noise, seed, 0xF200, cx, cz) < 0.7 * tuning.pillars {
                 solid = true;
             }
-        } else if !in_spawn {
-            let fx = wx.rem_euclid(WALL_PERIOD);
-            let fz = wz.rem_euclid(WALL_PERIOD);
-            let cell_x = (wx / WALL_PERIOD).floor() as i64;
-            let cell_z = (wz / WALL_PERIOD).floor() as i64;
-
-            // (solid, lintel) contribution of one wall family. Directional
-            // noise keeps a retained partition alive over several large
-            // periods, so it reads as a broken wall mass instead of cell
-            // boundaries feeding a maze.
-            let wall_here = |f_wall: f32, f_along: f32, is_z_wall: bool| {
-                if f_wall >= PLAN_WALL_T {
-                    return (false, false);
-                }
-
-                let (cx, cz) = if is_z_wall {
-                    (cell_x - 1, cell_z)
+        } else {
+            // The default fabric *is* the Backrooms labyrinth: an irregular
+            // warren of yellow rooms chained through hashed doorways.
+            // Connectivity is a binary-tree rule — every cell knocks a
+            // doorway through its west *or* its north wall — so all rooms
+            // connect without a chunk ever seeing its neighbors. Smoothly
+            // drifting porosity (whole walls dropped, wider thresholds,
+            // second doorways) breaks the lattice read: it plays as one
+            // endless wrong building, never as "a maze section".
+            let t = PLAN_WALL_T;
+            let fx = wx.rem_euclid(FABRIC_CELL);
+            let fz = wz.rem_euclid(FABRIC_CELL);
+            let (in_w, in_n) = (fx < t, fz < t);
+            if in_w && in_n {
+                // Junction posts anchor every corner; where the walls
+                // around them have dropped they survive as column stubs.
+                solid = tuning.walls > 0.0;
+            } else if in_w || in_n {
+                let cx = (wx / FABRIC_CELL).floor() as i64;
+                let cz = (wz / FABRIC_CELL).floor() as i64;
+                // 0 = tight labyrinth, 1 = broken-open suites; drifts over
+                // ~180 u so density changes read as neighborhoods, not zones.
+                let porosity =
+                    (Self::n(noise, seed, 0x9010, wx, wz, 0.11) * 0.5 + 0.5).clamp(0.0, 1.0);
+                let opens_west = Self::cell_hash(noise, seed, 0x9200, cx, cz) < 0.5;
+                let (wall_salt, door_salt, opens_here) = if in_w {
+                    (0x9300u32, 0x9500u32, opens_west)
                 } else {
-                    (cell_x, cell_z - 1)
+                    (0x9400u32, 0x9600u32, !opens_west)
                 };
-
-                // World-space midpoint of this wall segment
-                let (wx_mid, wz_mid) = if is_z_wall {
-                    (cx as f32 * WALL_PERIOD, (cz as f32 + 0.5) * WALL_PERIOD)
-                } else {
-                    ((cx as f32 + 0.5) * WALL_PERIOD, cz as f32 * WALL_PERIOD)
-                };
-
-                // Threshold formula: 1.0 - walls.clamp(0, 2), with the
-                // default retaining roughly half of these *18 u* candidates.
-                // The visual default is therefore open fabric punctuated by
-                // long wall runs rather than close-set corridors.
-                let threshold = 1.0 - tuning.walls.clamp(0.0, 2.0);
-                let keep = if is_z_wall {
-                    let n_val = Self::n(noise, seed, 0xD500, wx_mid, wz_mid * 0.5, 1.0);
-                    n_val > threshold
-                } else {
-                    let n_val = Self::n(noise, seed, 0xD600, wx_mid * 0.5, wz_mid, 1.0);
-                    n_val > threshold
-                };
-
-                if !keep {
-                    return (false, false);
-                }
-
-                // A retained segment may have one meaningful interruption.
-                // Framed doors are rare evidence of a former office; broad,
-                // full-height portals are more common but still live on the
-                // 18 u cadence, never a repetitive doorway grid.
-                let door_salt = if is_z_wall { 0xD700 } else { 0xD800 };
-                let door_hash = Self::cell_hash(noise, seed, door_salt, cx, cz);
-                if door_hash > 0.88 {
-                    let door_pos = (WALL_PERIOD - DOOR_WIDTH) * 0.5;
-                    if f_along >= door_pos && f_along < door_pos + DOOR_WIDTH {
-                        return (false, true); // Doorway: open below, lintel above
-                    }
-                } else {
-                    let portal_salt = if is_z_wall { 0xD710 } else { 0xD810 };
-                    let portal_hash = Self::cell_hash(noise, seed, portal_salt, cx, cz);
-                    if portal_hash > 0.66 {
-                        let portal_width = 4.8;
-                        let portal_pos = (WALL_PERIOD - portal_width) * 0.5;
-                        if f_along >= portal_pos && f_along < portal_pos + portal_width {
-                            return (false, false); // Full-height broad portal
+                // Whole-wall dropout merges rooms into larger wrong shapes.
+                // Porosity varies along a run, so drops end ragged rather
+                // than on clean cell boundaries. The walls knob scales
+                // survival: 0 empties the fabric, 2 approaches a full grid.
+                let survive = (0.92 - 0.42 * porosity) * tuning.walls.clamp(0.0, 1.5);
+                if Self::cell_hash(noise, seed, wall_salt, cx, cz) < survive {
+                    let along = if in_w { fz } else { fx };
+                    // The binary-tree wall always gets its doorway; porous
+                    // neighborhoods often cut a second one.
+                    let extra = Self::cell_hash(noise, seed, door_salt ^ 0x1F, cx, cz)
+                        < 0.18 + 0.42 * porosity;
+                    if opens_here || extra {
+                        let dh = Self::cell_hash(noise, seed, door_salt, cx, cz);
+                        let width = DOOR_WIDTH + 0.2 + 2.2 * porosity;
+                        let pos = t + (FABRIC_CELL - 2.0 * t - width) * dh;
+                        if along >= pos && along < pos + width {
+                            // Narrow thresholds sometimes keep a lintel:
+                            // framed evidence of doors that once existed.
+                            if width < 2.0
+                                && Self::cell_hash(noise, seed, door_salt ^ 0x2E, cx, cz) < 0.35
+                            {
+                                lintel_from_units = Some(DOOR_HEIGHT);
+                            }
+                        } else {
+                            solid = true;
                         }
+                    } else {
+                        solid = true;
                     }
                 }
-                (true, false) // Solid wall
-            };
-
-            let (sx, lx) = wall_here(fx, fz, true);
-            let (sz, lz) = wall_here(fz, fx, false);
-            solid = sx || sz;
-            if !solid && (lx || lz) {
-                lintel_from_units = Some(DOOR_HEIGHT);
             }
         }
 
@@ -300,21 +349,23 @@ impl BackroomsLevel {
             let cell_z = (wz / panel_period).floor() as i64;
             let keep = if expanse { 0.66 } else { 0.78 } * tuning.lights;
             let alive = Self::cell_hash(noise, seed, 0xE900, cell_x, cell_z) < keep;
-            (lx < 0.45 && lz < 0.45 && alive) || spawn_d2 < 0.36
+            lx < 0.45 && lz < 0.45 && alive
         } else {
             false
         };
 
-        let red = solid
-            && Self::cell_hash(noise, seed, 0xF100, (wx / 1.4) as i64, (wz / 1.4) as i64) > 0.94;
-
         ColumnPlan {
+            floor: true,
+            floor_units: 0.0,
             solid,
-            red,
             ceiling_units,
             light,
+            red_light: false,
             lintel_from_units,
             sconce,
+            wall_material: VOXEL_WALL,
+            floor_material: VOXEL_FLOOR,
+            light_material: VOXEL_LIGHT,
         }
     }
 
@@ -326,23 +377,10 @@ impl BackroomsLevel {
         config: &GeneratorConfig,
         noise: &dyn NoiseProvider,
     ) -> Vec<((i64, i64), RegionPlan)> {
-        let m = 1.0;
-        let mut out = Vec::new();
-        for rz in region_index(chunk_pos.z - m)..=region_index(chunk_pos.z + chunk_size + m) {
-            for rx in region_index(chunk_pos.x - m)..=region_index(chunk_pos.x + chunk_size + m) {
-                out.push((
-                    (rx, rz),
-                    generate_region_plan(
-                        seed,
-                        Position::new(rx as f32 * REGION_SIZE, rz as f32 * REGION_SIZE),
-                        REGION_SIZE,
-                        config,
-                        noise,
-                    ),
-                ));
-            }
-        }
-        out
+        InfiniteRegionWindow::around_chunk(chunk_pos, chunk_size, 1.0, seed, config, noise)
+            .iter()
+            .map(|(key, plan)| (key, plan.clone()))
+            .collect()
     }
 
     /// Is (wx, wz) on a structural column of this system?
@@ -381,14 +419,7 @@ impl BackroomsLevel {
             Some(CeilingLanguage::ExposedSoffit) => ceiling_units -= 0.2,
             _ => {}
         }
-        let mut plan = ColumnPlan {
-            solid: false,
-            red: false,
-            ceiling_units,
-            light: false,
-            lintel_from_units: None,
-            sconce: false,
-        };
+        let mut plan = ColumnPlan::open(ceiling_units);
 
         // Entrances pierce the wall band (and win over everything solid).
         for e in &a.entrances {
@@ -458,17 +489,22 @@ impl BackroomsLevel {
             }
             if let Some(r) = renovator {
                 if a.corruption.renovation_overlay && Self::on_column(r, wx, wz) {
+                    // Renovation columns intrude on the original bay rhythm;
+                    // the contradiction itself is the corruption. They stay
+                    // ordinary wall material — Level 0 has no red masonry.
                     plan.solid = true;
-                    plan.red = true; // renovation columns read as intrusions
                 }
             }
         }
 
-        // Fixtures, tied to the assembly's ceiling modules.
+        // Fixtures, tied to the assembly's ceiling modules. In a red room
+        // every fixture burns red: the anomaly is the room's light, applied
+        // after all geometry decisions and on the same fixture spacing.
         if !plan.solid && tuning.lights > 0.0 {
             for f in &a.fixtures {
                 if f.lit && (wx - f.at.x).abs() <= f.half_x && (wz - f.at.z).abs() <= f.half_z {
                     plan.light = true;
+                    plan.red_light = a.corruption.red_room;
                     break;
                 }
             }
@@ -489,7 +525,14 @@ impl BackroomsLevel {
         const DRIFT_ZONE: f32 = 12.0;
         let zone_x = (wx / DRIFT_ZONE).floor() * DRIFT_ZONE + DRIFT_ZONE * 0.5;
         let zone_z = (wz / DRIFT_ZONE).floor() * DRIFT_ZONE + DRIFT_ZONE * 0.5;
-        let drift = Self::n(noise, seed, 0xCA00_u32.wrapping_add(spine.id), zone_x, zone_z, 0.35);
+        let drift = Self::n(
+            noise,
+            seed,
+            0xCA00_u32.wrapping_add(spine.id),
+            zone_x,
+            zone_z,
+            0.35,
+        );
         let (height, lo, hi) = match spine.spine_kind {
             SpaceProgram::MainCorridor => (3.8 + 0.4 * drift, 3.4, 4.2),
             SpaceProgram::SecondaryHall => (3.3 + 0.3 * drift, 3.0, 3.6),
@@ -512,6 +555,15 @@ impl BackroomsLevel {
         wx: f32,
         wz: f32,
     ) -> bool {
+        // The opening spine sequence is sacred: near spawn the corridor keeps
+        // both edge walls so the player's first minute reads as circulation
+        // through a building, before any dissolution into fabric.
+        let sp = spawn_point(seed);
+        let spawn_d2 = (wx - sp.x) * (wx - sp.x) + (wz - sp.z) * (wz - sp.z);
+        if spawn_d2 < SPAWN_READABLE_RADIUS * SPAWN_READABLE_RADIUS {
+            return false;
+        }
+
         if Self::in_expanse(noise, seed, wx, wz) {
             return true;
         }
@@ -532,6 +584,7 @@ impl BackroomsLevel {
     }
 
     /// The architectural column plan: corridor beats assembly beats fabric.
+    #[cfg(test)]
     pub(crate) fn plan_column(
         plan: &RegionPlan,
         noise: &dyn NoiseProvider,
@@ -540,9 +593,27 @@ impl BackroomsLevel {
         wx: f32,
         wz: f32,
     ) -> ColumnPlan {
-        let spawn_d2 = (wx - SPAWN.0) * (wx - SPAWN.0) + (wz - SPAWN.1) * (wz - SPAWN.1);
-        let in_spawn = spawn_d2 < SPAWN_CLEAR_RADIUS * SPAWN_CLEAR_RADIUS;
+        Self::plan_column_in_reality(
+            plan,
+            noise,
+            seed,
+            &GeneratorConfig::low_spec().with_tuning(*tuning),
+            &RealitySnapshot::empty(),
+            wx,
+            wz,
+        )
+    }
 
+    pub(crate) fn plan_column_in_reality(
+        plan: &RegionPlan,
+        noise: &dyn NoiseProvider,
+        seed: u32,
+        config: &GeneratorConfig,
+        reality: &RealitySnapshot,
+        wx: f32,
+        wz: f32,
+    ) -> ColumnPlan {
+        let tuning = &config.tuning;
         // -- circulation ----------------------------------------------------
         let mut in_corridor = false;
         let mut corridor_ceiling = 0.0f32;
@@ -569,19 +640,49 @@ impl BackroomsLevel {
                 }
             }
         }
-        if in_corridor && !in_spawn {
+        if in_corridor {
             return ColumnPlan {
-                solid: false,
-                red: false,
-                ceiling_units: corridor_ceiling,
                 light: corridor_light && tuning.lights > 0.0,
-                lintel_from_units: None,
-                sconce: false,
+                ..ColumnPlan::open(corridor_ceiling)
             };
         }
 
+        // Archway anchors take precedence over every hostile family, and any
+        // hostile column within an anchor's margin generates as if no epoch
+        // had ever advanced: arch rooms and their surroundings are immune to
+        // non-Euclidean transformation by construction, not by policy.
+        if let Some(anchor) = plan
+            .anomalies
+            .iter()
+            .find(|a| a.kind == AnomalyKind::ArchwayRoom && a.contains(wx, wz))
+        {
+            return sample_anomaly(anchor, noise, seed, config, reality, wx, wz);
+        }
+        let near_anchor = plan.anomalies.iter().any(|a| {
+            a.kind == AnomalyKind::ArchwayRoom
+                && a.footprint.bounds().expanded(3.2).contains(wx, wz)
+        });
+
+        if let Some(instance) = plan
+            .anomalies
+            .iter()
+            .filter(|a| {
+                a.kind != AnomalyKind::RedRoom
+                    && a.kind != AnomalyKind::ArchwayRoom
+                    && a.contains(wx, wz)
+            })
+            .max_by(|a, b| {
+                a.normalized_depth(wx, wz)
+                    .total_cmp(&b.normalized_depth(wx, wz))
+            })
+        {
+            let frozen = RealitySnapshot::empty();
+            let effective_reality = if near_anchor { &frozen } else { reality };
+            return sample_anomaly(instance, noise, seed, config, effective_reality, wx, wz);
+        }
+
         // -- assemblies -------------------------------------------------------
-        if !in_spawn {
+        {
             let renovator_structure = plan.architects.get(1).map(|g| StructuralSystemInstance {
                 system: g.structural_system,
                 bay_x: 3.6,
@@ -596,26 +697,46 @@ impl BackroomsLevel {
                     continue;
                 }
                 let inside = a.footprint.contains(wx, wz);
-                return Self::assembly_column(
-                    a,
-                    inside,
-                    renovator_structure.as_ref(),
-                    tuning,
-                    wx,
-                    wz,
-                );
+                let mut base =
+                    Self::assembly_column(a, inside, renovator_structure.as_ref(), tuning, wx, wz);
+                // A stair assembly shapes its interior as a flight: the
+                // vertical link that reserved it decides whether the flight
+                // lands or climbs endlessly. Stairs are architecture, so a
+                // walls=0 debug world flattens them along with everything.
+                if a.program == SpaceProgram::Stair && inside && !base.solid && tuning.walls > 0.0 {
+                    let rx = region_index(plan.origin_world.x + 0.1);
+                    let rz = region_index(plan.origin_world.z + 0.1);
+                    let kind = crate::use_cases::world_topology::vertical_link_for_region(
+                        seed, noise, rx, rz,
+                    )
+                    .map(|link| link.kind)
+                    .unwrap_or(
+                        crate::domain::entities::world_topology::VerticalLinkKind::OrdinaryStair,
+                    );
+                    crate::use_cases::vertical_circulation::apply_stair_profile(
+                        a, kind, &mut base, wx, wz,
+                    );
+                }
+                if a.corruption.red_room
+                    && let Some(red) = plan.anomalies.iter().find(|r| {
+                        r.kind == AnomalyKind::RedRoom
+                            && r.footprint
+                                .bounds()
+                                .expanded(PLAN_WALL_T + 0.05)
+                                .contains(wx, wz)
+                    })
+                {
+                    return sample_red_room(red, base, config, reality, wx, wz);
+                }
+                return base;
             }
         }
 
         // -- corridor edge walls through fabric -------------------------------
-        if corridor_wall && !in_spawn && tuning.walls > 0.0 && !corridor_gap {
+        if corridor_wall && tuning.walls > 0.0 && !corridor_gap {
             return ColumnPlan {
                 solid: true,
-                red: false,
-                ceiling_units: corridor_ceiling.max(3.2),
-                light: false,
-                lintel_from_units: None,
-                sconce: false,
+                ..ColumnPlan::open(corridor_ceiling.max(3.2))
             };
         }
 
@@ -632,40 +753,169 @@ impl LevelGenerator for BackroomsLevel {
         config: GeneratorConfig,
         noise: &dyn NoiseProvider,
     ) -> VoxelGrid {
+        self.generate_with_reality(chunk_pos, seed, config, noise, &RealitySnapshot::empty())
+    }
+
+    fn generate_with_reality(
+        &self,
+        chunk_pos: Position,
+        seed: u32,
+        config: GeneratorConfig,
+        noise: &dyn NoiseProvider,
+        reality: &RealitySnapshot,
+    ) -> VoxelGrid {
         let s = config.voxel_scale;
         let width = (config.chunk_size / s).round() as usize;
         let depth = (config.chunk_size / s).round() as usize;
         let height = (GRID_HEIGHT_UNITS / s) as usize;
         let mut grid = VoxelGrid::new(width, height, depth);
 
-        // Architecture first: plan every region this chunk overlaps.
+        // Base plans remain available for the authored threshold and for
+        // ordinary reality. A committed Red Room adds a second, explicitly
+        // addressed Level 0 window instead of smuggling offsets and seeds
+        // through the voxel loop.
         let plans =
             BackroomsLevel::region_plans_for(chunk_pos, config.chunk_size, seed, &config, noise);
+        let recursive_level = RecursiveLevelWindow::around_chunk(
+            chunk_pos,
+            config.chunk_size,
+            1.0,
+            seed,
+            config,
+            noise,
+            reality,
+        );
+
+        // Architecture first: plan every region this chunk overlaps.
         let plan_of = |wx: f32, wz: f32| -> &RegionPlan {
             let key = (region_index(wx), region_index(wz));
             plans
                 .iter()
                 .find(|(k, _)| *k == key)
                 .map(|(_, p)| p)
-                .unwrap_or(&plans[0].1)
+                .expect("region window covers the requested voxel halo")
         };
 
-        use crate::domain::entities::architecture::{RuntimeLight, LightKind};
+        // Export semantic crossings/hazards from the same immutable plans as
+        // voxel geometry. Neighboring region plans repeat macro instances, so
+        // deduplicate by stable IDs before the payload reaches the engine.
+        let chunk_bounds = WorldBounds::new(
+            chunk_pos.x,
+            chunk_pos.z,
+            chunk_pos.x + config.chunk_size,
+            chunk_pos.z + config.chunk_size,
+        );
+        let mut seen_instances = std::collections::HashSet::new();
+        let mut seen_gates = std::collections::HashSet::new();
+        let mut seen_hazards = std::collections::HashSet::new();
+        let authored_bounds = recursive_level.as_ref().map_or(chunk_bounds, |recursive| {
+            recursive.to_recursive_bounds(chunk_bounds)
+        });
+        let mut export_interactions = |plan: &RegionPlan| {
+            for anomaly in &plan.anomalies {
+                if !seen_instances.insert(anomaly.id)
+                    || !anomaly
+                        .footprint
+                        .bounds()
+                        .intersects(authored_bounds.expanded(1.0))
+                {
+                    continue;
+                }
+                for gate in anomaly.traversal_gates() {
+                    if gate_crosses_bounds(gate, authored_bounds) && seen_gates.insert(gate.id) {
+                        grid.traversal_gates.push(
+                            recursive_level
+                                .as_ref()
+                                .map_or(*gate, |recursive| recursive.project_gate(*gate)),
+                        );
+                    }
+                }
+                for hazard in anomaly.pit_hazards_for_bounds(authored_bounds) {
+                    if seen_hazards.insert(hazard.id) {
+                        grid.pit_hazards.push(
+                            recursive_level
+                                .as_ref()
+                                .map_or(hazard, |recursive| recursive.project_hazard(hazard)),
+                        );
+                    }
+                }
+            }
+        };
+        if let Some(recursive) = &recursive_level {
+            for (_, plan) in recursive.iter() {
+                export_interactions(plan);
+            }
+        } else {
+            for (_, plan) in &plans {
+                export_interactions(plan);
+            }
+        }
+        drop(export_interactions);
+
+        // The recursive branch supplies its own anomaly semantics, while the
+        // encounter that opened it retains one checkpoint in visible space.
+        // Alternating across that authored plane advances the closed loop.
+        if let Some(recursive) = &recursive_level {
+            for gate in plans
+                .iter()
+                .flat_map(|(_, plan)| plan.anomalies.iter())
+                .filter(|anomaly| anomaly.id == recursive.instance_id())
+                .flat_map(AnomalyInstance::traversal_gates)
+                .filter(|gate| gate.kind == TraversalGateKind::RedLoop)
+            {
+                if gate_crosses_bounds(gate, chunk_bounds) && seen_gates.insert(gate.id) {
+                    grid.traversal_gates.push(*gate);
+                }
+            }
+        }
+
+        use crate::domain::entities::architecture::{LightKind, RuntimeLight};
         let mut seen = std::collections::HashSet::new();
-        for (_, plan) in &plans {
+        let mut collect_runtime_lights = |plan: &RegionPlan| {
             for a in &plan.assemblies {
                 if a.corruption.abandoned {
                     continue;
                 }
                 for f in &a.fixtures {
-                    if !f.lit { continue; }
-                    let key = (f.at.x.to_bits(), f.at.z.to_bits());
-                    if !seen.insert(key) { continue; }
-                    
-                    let cx = f.at.x - chunk_pos.x;
-                    let cz = f.at.z - chunk_pos.z;
-                    if cx >= -15.0 && cx <= config.chunk_size + 15.0 && cz >= -15.0 && cz <= config.chunk_size + 15.0 {
-                        let ceiling_units = a.ceiling_zones.iter()
+                    if !f.lit {
+                        continue;
+                    }
+                    let rendered_at = recursive_level
+                        .as_ref()
+                        .map_or(f.at, |recursive| recursive.project_position(f.at));
+                    let key = (rendered_at.x.to_bits(), rendered_at.z.to_bits());
+                    if !seen.insert(key) {
+                        continue;
+                    }
+
+                    let (sample_at, fixture_plan) = if let Some(recursive) = &recursive_level {
+                        recursive
+                            .plan_at(rendered_at)
+                            .expect("recursive region window covers its projected fixtures")
+                    } else {
+                        (f.at, plan_of(f.at.x, f.at.z))
+                    };
+
+                    // Region-scale anomaly interiors own their fixture
+                    // rhythm. Do not leak an overwritten assembly's runtime
+                    // light into a blackout/pillar/pit payload.
+                    if fixture_plan.anomalies.iter().any(|anomaly| {
+                        anomaly.kind != AnomalyKind::RedRoom
+                            && anomaly.contains(sample_at.x, sample_at.z)
+                    }) {
+                        continue;
+                    }
+
+                    let cx = rendered_at.x - chunk_pos.x;
+                    let cz = rendered_at.z - chunk_pos.z;
+                    if cx >= -15.0
+                        && cx <= config.chunk_size + 15.0
+                        && cz >= -15.0
+                        && cz <= config.chunk_size + 15.0
+                    {
+                        let ceiling_units = a
+                            .ceiling_zones
+                            .iter()
                             .find(|z| z.area.contains(f.at.x, f.at.z))
                             .map(|z| z.height_units)
                             .unwrap_or(4.0);
@@ -674,7 +924,7 @@ impl LevelGenerator for BackroomsLevel {
                             crate::domain::entities::architecture::SpaceProgram::Atrium
                         );
                         let y = runtime_light_height(ceiling_units, is_atrium);
-                            
+
                         let kind = if f.half_x > f.half_z * 2.0 || f.half_z > f.half_x * 2.0 {
                             LightKind::Strip
                         } else {
@@ -684,21 +934,42 @@ impl LevelGenerator for BackroomsLevel {
                         // Runtime lights are collected before voxelization, so
                         // query the architectural column plan rather than the
                         // still-empty grid when rejecting pillar intersections.
-                        let is_buried = BackroomsLevel::plan_column(
-                            plan_of(f.at.x, f.at.z),
-                            noise,
-                            seed,
-                            &config.tuning,
-                            f.at.x,
-                            f.at.z,
-                        )
-                        .solid;
+                        let is_buried = if let Some(recursive) = &recursive_level {
+                            BackroomsLevel::plan_column_in_reality(
+                                fixture_plan,
+                                noise,
+                                recursive.seed(),
+                                recursive.config(),
+                                reality,
+                                sample_at.x,
+                                sample_at.z,
+                            )
+                            .solid
+                        } else {
+                            BackroomsLevel::plan_column_in_reality(
+                                fixture_plan,
+                                noise,
+                                seed,
+                                &config,
+                                reality,
+                                sample_at.x,
+                                sample_at.z,
+                            )
+                            .solid
+                        };
 
                         if !is_buried {
+                            // Red rooms are exposed purely by their light
+                            // color; the fixtures keep the room's spacing.
+                            let rgb = if recursive_level.is_some() || a.corruption.red_room {
+                                [1.0, 0.22, 0.16]
+                            } else {
+                                [1.0, 0.95, 0.8]
+                            };
                             grid.runtime_lights.push(RuntimeLight {
-                                world_pos: [f.at.x, y, f.at.z],
+                                world_pos: [rendered_at.x, y, rendered_at.z],
                                 half_size: [f.half_x, f.half_z],
-                                rgb: [1.0, 0.95, 0.8],
+                                rgb,
                                 range: if is_atrium { 24.0 } else { 16.0 },
                                 intensity: if is_atrium { 4.0 } else { 1.0 },
                                 enabled: true,
@@ -708,74 +979,53 @@ impl LevelGenerator for BackroomsLevel {
                     }
                 }
             }
+        };
+        if let Some(recursive) = &recursive_level {
+            for (_, plan) in recursive.iter() {
+                collect_runtime_lights(plan);
+            }
+        } else {
+            for (_, plan) in &plans {
+                collect_runtime_lights(plan);
+            }
         }
 
         // Plan every column plus a 1-voxel margin: ceiling skirts must seal
         // height steps across chunk borders too.
-        let tuning = config.tuning;
         let plan_at = |lx: i64, lz: i64| -> ColumnPlan {
             let wx = chunk_pos.x + (lx as f32 + 0.5) * s;
             let wz = chunk_pos.z + (lz as f32 + 0.5) * s;
-            BackroomsLevel::plan_column(plan_of(wx, wz), noise, seed, &tuning, wx, wz)
+
+            if let Some(recursive) = &recursive_level {
+                let (recursive_point, plan) = recursive
+                    .plan_at(Position::new(wx, wz))
+                    .expect("recursive region window covers the voxel halo");
+                let mut column = BackroomsLevel::plan_column_in_reality(
+                    plan,
+                    noise,
+                    recursive.seed(),
+                    recursive.config(),
+                    reality,
+                    recursive_point.x,
+                    recursive_point.z,
+                );
+                column.red_light = true;
+                column
+            } else {
+                BackroomsLevel::plan_column_in_reality(
+                    plan_of(wx, wz),
+                    noise,
+                    seed,
+                    &config,
+                    reality,
+                    wx,
+                    wz,
+                )
+            }
         };
 
-        let mut plans = Vec::with_capacity((width + 2) * (depth + 2));
-        for lz in -1..=(depth as i64) {
-            for lx in -1..=(width as i64) {
-                plans.push(plan_at(lx, lz));
-            }
-        }
-        let plan = |lx: i64, lz: i64| -> &ColumnPlan {
-            &plans[((lz + 1) as usize) * (width + 2) + (lx + 1) as usize]
-        };
-
-        let max_y = height - 1;
-        let to_vox = |units: f32| ((units / s) as usize).clamp(2, max_y);
-
-        for z in 0..depth {
-            for x in 0..width {
-                let p = *plan(x as i64, z as i64);
-                let ch = to_vox(p.ceiling_units);
-
-                grid.set(x, 0, z, VOXEL_FLOOR);
-
-                if p.solid {
-                    let mat = if p.red { VOXEL_RED_WALL } else { VOXEL_WALL };
-                    for y in 1..ch {
-                        grid.set(x, y, z, mat);
-                    }
-                    if p.sconce {
-                        let sy = to_vox(SCONCE_UNITS).min(ch - 1);
-                        grid.set(x, sy, z, VOXEL_LIGHT);
-                    }
-                } else if let Some(from) = p.lintel_from_units {
-                    // Door lintel: solid from door height to the ceiling.
-                    for y in to_vox(from)..ch {
-                        grid.set(x, y, z, VOXEL_WALL);
-                    }
-                }
-
-                // Ceiling plus a skirt down to the tallest neighbor, so a
-                // higher neighboring ceiling can never see over this one.
-                let neighbor_max = [
-                    plan(x as i64 - 1, z as i64),
-                    plan(x as i64 + 1, z as i64),
-                    plan(x as i64, z as i64 - 1),
-                    plan(x as i64, z as i64 + 1),
-                ]
-                .iter()
-                .map(|n| to_vox(n.ceiling_units))
-                .max()
-                .unwrap_or(ch);
-
-                for y in ch..=neighbor_max.max(ch) {
-                    grid.set(x, y, z, VOXEL_CEILING);
-                }
-                if p.light && !p.solid {
-                    grid.set(x, ch, z, VOXEL_LIGHT);
-                }
-            }
-        }
+        let columns = ColumnField::sample(width, depth, plan_at);
+        voxelize_columns(&mut grid, &columns, s);
 
         grid
     }
@@ -784,9 +1034,10 @@ impl LevelGenerator for BackroomsLevel {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::entities::voxel_grid::VOXEL_AIR;
+    use crate::domain::entities::voxel_grid::{VOXEL_AIR, VOXEL_STICKY_CARPET};
     use crate::frameworks_drivers::simple_noise::SimpleNoiseProvider;
     use crate::use_cases::generate_chunk::LevelTuning;
+    use crate::use_cases::region_plan::REGION_SIZE;
 
     fn generate(ox: f32, oz: f32) -> VoxelGrid {
         BackroomsLevel.generate(
@@ -821,10 +1072,11 @@ mod tests {
             "backrooms must be mostly open space"
         );
 
-        // BFS from the spawn clearing (world 5,5 = local 25,25 in chunk 0,0).
+        // BFS from the first open interior voxel.
+        let &(sx, sz) = open.first().expect("some open floor exists");
         let mut visited = vec![false; w * d];
-        let mut queue = std::collections::VecDeque::from([(w / 2, d / 2)]);
-        visited[(w / 2) * d + d / 2] = true;
+        let mut queue = std::collections::VecDeque::from([(sx, sz)]);
+        visited[sx * d + sz] = true;
         let mut reached = 0usize;
         while let Some((x, z)) = queue.pop_front() {
             reached += 1;
@@ -880,12 +1132,96 @@ mod tests {
                     .unwrap();
                 let expect =
                     BackroomsLevel::plan_column(plan, &noise, 42, &LevelTuning::default(), wx, wz);
-                let got_solid =
-                    grid.get(lx, 1, z) == VOXEL_WALL || grid.get(lx, 1, z) == VOXEL_RED_WALL;
+                let got_solid = grid.get(lx, 1, z) == VOXEL_WALL;
+                // Raised floor (stair treads) also writes wall material at
+                // the walkable layer, so it counts as expected solid here.
+                let expect_solid =
+                    expect.solid || (expect.floor_units / config.voxel_scale).round() >= 1.0;
                 assert_eq!(
-                    got_solid, expect.solid,
+                    got_solid, expect_solid,
                     "column mismatch at world x={gx} z={z}"
                 );
+            }
+        }
+    }
+
+    #[test]
+    fn recursive_level_zero_is_independent_of_output_partition() {
+        use crate::domain::entities::anomaly::{
+            AnomalyStateStamp, Axis2, AxisDirection, RedRoomPhase,
+        };
+
+        // A committed encounter selects a deterministic recursive Level 0
+        // address.  The ID is intentionally wider than f32 can represent so
+        // this also protects the integer-first branch derivation.
+        let reality = RealitySnapshot::new(vec![AnomalyStateStamp::new(
+            0xDEAD_BEEF_1234_5678,
+            1,
+            4.8,
+            Axis2::X,
+            AxisDirection::Positive,
+            RedRoomPhase::Sealed,
+            0,
+            0xCAFE,
+        )]);
+        let noise = SimpleNoiseProvider::new();
+        let small_config = GeneratorConfig::low_spec();
+        let mut large_config = small_config;
+        large_config.chunk_size = 20.0;
+
+        let large = BackroomsLevel.generate_with_reality(
+            Position::new(0.0, 0.0),
+            42,
+            large_config,
+            &noise,
+            &reality,
+        );
+        let chunks = [
+            BackroomsLevel.generate_with_reality(
+                Position::new(0.0, 0.0),
+                42,
+                small_config,
+                &noise,
+                &reality,
+            ),
+            BackroomsLevel.generate_with_reality(
+                Position::new(10.0, 0.0),
+                42,
+                small_config,
+                &noise,
+                &reality,
+            ),
+            BackroomsLevel.generate_with_reality(
+                Position::new(0.0, 10.0),
+                42,
+                small_config,
+                &noise,
+                &reality,
+            ),
+            BackroomsLevel.generate_with_reality(
+                Position::new(10.0, 10.0),
+                42,
+                small_config,
+                &noise,
+                &reality,
+            ),
+        ];
+
+        let tile = chunks[0].width();
+        assert_eq!(large.width(), tile * 2);
+        assert_eq!(large.depth(), tile * 2);
+        for z in 0..large.depth() {
+            for x in 0..large.width() {
+                let tile_index = usize::from(x >= tile) + 2 * usize::from(z >= tile);
+                let local_x = x % tile;
+                let local_z = z % tile;
+                for y in 0..large.height() {
+                    assert_eq!(
+                        large.get(x, y, z),
+                        chunks[tile_index].get(local_x, y, local_z),
+                        "recursive Level 0 changed at ({x}, {y}, {z}) when the output was tiled"
+                    );
+                }
             }
         }
     }
@@ -982,7 +1318,8 @@ mod tests {
     #[test]
     fn assemblies_have_walls_and_open_entrances() {
         let noise = SimpleNoiseProvider::new();
-        let config = GeneratorConfig::low_spec();
+        let mut config = GeneratorConfig::low_spec();
+        config.anomalies.frequency = 0.0;
         let tuning = LevelTuning::default();
         let plans =
             BackroomsLevel::region_plans_for(Position::new(0.0, 0.0), 80.0, 42, &config, &noise);
@@ -1089,6 +1426,84 @@ mod tests {
         assert!(found, "no abandoned expansion within 36 regions");
     }
 
+    /// A planned stairwell samples through the full column pipeline as a
+    /// walkable flight: flat at the door, rising monotonically along the
+    /// walk axis, reaching its landing with headroom intact.
+    #[test]
+    fn stairwells_sample_as_rising_flights() {
+        use crate::use_cases::vertical_circulation::link_wants_geometry;
+        use crate::use_cases::world_topology::vertical_link_for_region;
+        let noise = SimpleNoiseProvider::new();
+        let config = GeneratorConfig::low_spec();
+        let tuning = LevelTuning::default();
+
+        let mut checked = 0usize;
+        for rz in -8i64..=8 {
+            for rx in -8i64..=8 {
+                let Some(link) = vertical_link_for_region(42, &noise, rx, rz) else {
+                    continue;
+                };
+                if !link_wants_geometry(&link) {
+                    continue;
+                }
+                let plans = BackroomsLevel::region_plans_for(
+                    Position::new(rx as f32 * REGION_SIZE, rz as f32 * REGION_SIZE),
+                    1.0,
+                    42,
+                    &config,
+                    &noise,
+                );
+                let plan = &plans.iter().find(|(k, _)| *k == (rx, rz)).unwrap().1;
+                let Some(stair) = plan
+                    .assemblies
+                    .iter()
+                    .find(|a| a.program == SpaceProgram::Stair)
+                else {
+                    continue;
+                };
+                let door = stair.entrances[0].center;
+                let b = stair.footprint.bounds();
+                let inward = if (door.z - b.1).abs() < (door.z - b.3).abs() {
+                    1.0
+                } else {
+                    -1.0
+                };
+
+                let at_door =
+                    BackroomsLevel::plan_column(plan, &noise, 42, &tuning, door.x, door.z);
+                assert!(!at_door.solid, "stair door is walled shut");
+                assert_eq!(at_door.floor_units, 0.0, "stair door is not flat");
+
+                let mut previous = 0.0f32;
+                let mut peak = 0.0f32;
+                let mut depth = 0.7;
+                while depth < (b.3 - b.1) - 0.6 {
+                    let wz = door.z + inward * depth;
+                    let c = BackroomsLevel::plan_column(plan, &noise, 42, &tuning, door.x, wz);
+                    if !c.solid {
+                        assert!(
+                            c.floor_units >= previous - 1e-6,
+                            "flight descends inside stair at region ({rx},{rz})"
+                        );
+                        assert!(
+                            c.ceiling_units - c.floor_units >= 2.2 - 1e-6,
+                            "flight headroom pinched at region ({rx},{rz})"
+                        );
+                        previous = c.floor_units;
+                        peak = peak.max(c.floor_units);
+                    }
+                    depth += 0.2;
+                }
+                assert!(
+                    peak >= 1.6 - 1e-6,
+                    "flight in ({rx},{rz}) peaked at {peak} u"
+                );
+                checked += 1;
+            }
+        }
+        assert!(checked >= 3, "only {checked} stairwells sampled");
+    }
+
     /// The baseline is broad regular dropped ceiling, with enough expansive
     /// and vaulted territory to prevent Level 0 from reading as a low maze.
     #[test]
@@ -1115,8 +1530,9 @@ mod tests {
         }
         let total = counts.iter().sum::<usize>() as f32;
         let ratio = |index| counts[index] as f32 / total;
+        // The labyrinth fabric is the default; open volumes punctuate it.
         assert!(
-            (0.45..=0.70).contains(&ratio(1)),
+            (0.60..=0.85).contains(&ratio(1)),
             "ceiling territories: compression {:.1}%, regular {:.1}%, expanse {:.1}%, vault {:.1}%",
             ratio(0) * 100.0,
             ratio(1) * 100.0,
@@ -1124,12 +1540,12 @@ mod tests {
             ratio(3) * 100.0
         );
         assert!(
-            (0.18..=0.42).contains(&ratio(2)),
+            (0.10..=0.28).contains(&ratio(2)),
             "open expanse territory was {:.1}%",
             ratio(2) * 100.0
         );
         assert!(
-            (0.05..=0.22).contains(&ratio(3)),
+            (0.03..=0.15).contains(&ratio(3)),
             "vault territory was {:.1}%",
             ratio(3) * 100.0
         );
@@ -1148,7 +1564,8 @@ mod tests {
     #[test]
     fn rare_doorways_still_have_lintels() {
         let noise = SimpleNoiseProvider::new();
-        let config = GeneratorConfig::low_spec();
+        let mut config = GeneratorConfig::low_spec();
+        config.anomalies.frequency = 0.0;
         let tuning = LevelTuning::default();
         let mut found = false;
         for rx in -6i64..=6 {
@@ -1255,9 +1672,7 @@ mod tests {
             GeneratorConfig::low_spec().at_lod(1),
             &noise,
         );
-        let solid = |g: &VoxelGrid, x: usize, z: usize| {
-            g.get(x, 1, z) == VOXEL_WALL || g.get(x, 1, z) == VOXEL_RED_WALL
-        };
+        let solid = |g: &VoxelGrid, x: usize, z: usize| g.get(x, 1, z) == VOXEL_WALL;
         let (mut matches, mut total) = (0usize, 0usize);
         for z in 0..coarse.depth() {
             for x in 0..coarse.width() {
@@ -1291,30 +1706,622 @@ mod tests {
         );
     }
 
-    /// The spawn point has a clear floor and a light overhead.
+    /// The player spawns *on the main corridor*: open floor along the
+    /// centerline, a lit fixture within a light-strip period, and — for the
+    /// readable opening sequence — solid edge walls on both sides.
     #[test]
-    fn spawn_clearing_is_open_and_lit() {
-        let grid = generate(0.0, 0.0);
-        let (cx, cz) = (25usize, 25usize); // world (5,5) at voxel_scale 0.2
-        for z in cz - 5..=cz + 5 {
-            for x in cx - 5..=cx + 5 {
-                assert!(
-                    is_open(&grid, x, z),
-                    "spawn clearing blocked at local ({x},{z})"
-                );
+    fn spawn_is_a_readable_walled_corridor() {
+        let noise = SimpleNoiseProvider::new();
+        let config = GeneratorConfig::low_spec();
+        let tuning = LevelTuning::default();
+        let sp = crate::use_cases::region_plan::spawn_point(42);
+
+        let plans =
+            BackroomsLevel::region_plans_for(Position::new(0.0, 0.0), 80.0, 42, &config, &noise);
+        let plan = &plans.iter().find(|(k, _)| *k == (0, 0)).unwrap().1;
+        let spine = &plan.corridors[0];
+        assert!(
+            spine.distance(sp.x, sp.z) < 0.3,
+            "spawn ({}, {}) is not on the main corridor centerline",
+            sp.x,
+            sp.z
+        );
+
+        // The corridor around spawn is open along the centerline, lit, and
+        // predominantly walled on both sides. Framed entrances and branch
+        // tees may pierce the run, but the edge must *read* as a wall — no
+        // dissolution into open fabric inside the readable radius.
+        let half = spine.width * 0.5;
+        let mut lit = false;
+        let mut solid_edges = [0usize; 2];
+        const STEPS: usize = 16;
+        for step in 0..STEPS {
+            let wx = sp.x + step as f32;
+            let c = BackroomsLevel::plan_column(plan, &noise, 42, &tuning, wx, sp.z);
+            assert!(!c.solid, "main corridor blocked at ({wx}, {})", sp.z);
+            lit |= c.light;
+            for (i, side) in [-1.0, 1.0f32].iter().enumerate() {
+                let wz = sp.z + side * (half + PLAN_WALL_T * 0.5);
+                if BackroomsLevel::plan_column(plan, &noise, 42, &tuning, wx, wz).solid {
+                    solid_edges[i] += 1;
+                }
             }
         }
-        let mut lit = false;
-        for z in cz - 3..=cz + 3 {
-            for x in cx - 3..=cx + 3 {
-                for y in 0..grid.height() {
-                    if grid.get(x, y, z) == VOXEL_LIGHT {
-                        lit = true;
+        assert!(lit, "no lit fixture along the first {STEPS} u of corridor");
+        for (i, solid) in solid_edges.iter().enumerate() {
+            assert!(
+                solid * 10 >= STEPS * 6,
+                "start corridor side {i} is mostly open ({solid}/{STEPS}): \
+                 the opening sequence must read as a walled corridor"
+            );
+        }
+    }
+
+    /// The fabric connectivity invariant: every warren cell opens through
+    /// its west or its north wall (doorway, dropped wall, or an override by
+    /// corridor/assembly/expanse), so the labyrinth is globally connected
+    /// by induction — no chunk ever needs to see its neighbors to prove it.
+    #[test]
+    fn every_fabric_cell_opens_west_or_north() {
+        let noise = SimpleNoiseProvider::new();
+        let config = GeneratorConfig::low_spec();
+        let tuning = LevelTuning::default();
+        let mut cells_checked = 0usize;
+        for cell_x in -40i64..40 {
+            for cell_z in -40i64..40 {
+                let x0 = cell_x as f32 * FABRIC_CELL;
+                let z0 = cell_z as f32 * FABRIC_CELL;
+                let plans = BackroomsLevel::region_plans_for(
+                    Position::new(x0, z0),
+                    FABRIC_CELL,
+                    42,
+                    &config,
+                    &noise,
+                );
+                let plan_for = |wx: f32, wz: f32| {
+                    let key = (region_index(wx), region_index(wz));
+                    &plans.iter().find(|(k, _)| *k == key).unwrap().1
+                };
+                // The invariant belongs to *pure* fabric. Cells clipped by a
+                // corridor edge or an assembly take their connectivity from
+                // those systems instead (tested separately), so skip them.
+                let (cx0, cz0) = (x0 - PLAN_WALL_T, z0 - PLAN_WALL_T);
+                let (cx1, cz1) = (x0 + FABRIC_CELL, z0 + FABRIC_CELL);
+                let clipped = plans.iter().any(|(_, p)| {
+                    p.corridors.iter().any(|s| {
+                        let m = s.width * 0.5 + PLAN_WALL_T + 0.1;
+                        [
+                            (cx0, cz0),
+                            (cx1, cz0),
+                            (cx0, cz1),
+                            (cx1, cz1),
+                            ((cx0 + cx1) * 0.5, (cz0 + cz1) * 0.5),
+                        ]
+                        .iter()
+                        .any(|&(px, pz)| s.distance(px, pz) <= m + FABRIC_CELL)
+                    }) || p.assemblies.iter().any(|a| {
+                        let b = a.footprint.bounds();
+                        cx0 < b.2 + PLAN_WALL_T
+                            && b.0 - PLAN_WALL_T < cx1
+                            && cz0 < b.3 + PLAN_WALL_T
+                            && b.1 - PLAN_WALL_T < cz1
+                    }) || p.anomalies.iter().any(|an| {
+                        // Anomaly interiors own their connectivity rules
+                        // (entrances, skeleton lanes, arch openings) and are
+                        // tested by their own family invariants.
+                        an.footprint
+                            .bounds()
+                            .expanded(PLAN_WALL_T + 0.1)
+                            .intersects(WorldBounds::new(cx0, cz0, cx1, cz1))
+                    })
+                });
+                if clipped {
+                    continue;
+                }
+                let mut open = false;
+                let mut probe = |wx: f32, wz: f32| {
+                    let c =
+                        BackroomsLevel::plan_column(plan_for(wx, wz), &noise, 42, &tuning, wx, wz);
+                    if !c.solid {
+                        open = true;
+                    }
+                };
+                // Sample along the west and north wall bands of the cell.
+                let mut a = PLAN_WALL_T + 0.1;
+                while a < FABRIC_CELL - PLAN_WALL_T {
+                    probe(x0 + 0.2, z0 + a);
+                    probe(x0 + a, z0 + 0.2);
+                    a += 0.2;
+                }
+                assert!(
+                    open,
+                    "fabric cell ({cell_x},{cell_z}) is sealed on both its \
+                     west and north walls"
+                );
+                cells_checked += 1;
+            }
+        }
+        assert!(cells_checked > 1000, "sample too small: {cells_checked}");
+    }
+
+    /// Red identity is owned by whole rooms: some region must contain a red
+    /// room whose fixtures voxelize as red lights, and crimson/peeled wall
+    /// voxels may appear only inside a red-room footprint (plus its wall
+    /// band) — the approach stain is telegraphy, never leakage into fabric.
+    #[test]
+    fn red_rooms_are_lit_red_but_never_built_red() {
+        use crate::domain::entities::voxel_grid::{VOXEL_RED_LIGHT, VOXEL_RED_WALL};
+        let noise = SimpleNoiseProvider::new();
+        let config = GeneratorConfig::low_spec();
+        let tuning = LevelTuning::default();
+
+        let mut red_room_seen = false;
+        'search: for rx in -4i64..=4 {
+            for rz in -4i64..=4 {
+                let plans = BackroomsLevel::region_plans_for(
+                    Position::new(rx as f32 * REGION_SIZE, rz as f32 * REGION_SIZE),
+                    1.0,
+                    42,
+                    &config,
+                    &noise,
+                );
+                let plan = &plans.iter().find(|(k, _)| *k == (rx, rz)).unwrap().1;
+                for a in &plan.assemblies {
+                    if !a.corruption.red_room {
+                        continue;
+                    }
+                    assert!(!a.corruption.abandoned, "a red room must be occupied");
+                    // Its lit fixtures plan red lights.
+                    let f = a.fixtures.iter().find(|f| f.lit).expect("lit fixture");
+                    let c = BackroomsLevel::plan_column(plan, &noise, 42, &tuning, f.at.x, f.at.z);
+                    if c.light {
+                        assert!(c.red_light, "red-room fixture plans a warm light");
+                        red_room_seen = true;
+                        break 'search;
                     }
                 }
             }
         }
-        assert!(lit, "no light panel above spawn");
+        assert!(red_room_seen, "no red room found within 81 regions");
+
+        // Red walls stay contained: any crimson voxel must sit inside some
+        // red-room footprint (plus wall band), and red lights appear only as
+        // ceiling lights.
+        for (ox, oz) in [(0.0, 0.0), (30.0, 10.0), (-40.0, 70.0), (150.0, -90.0)] {
+            let grid = generate(ox, oz);
+            let scale = config.voxel_scale;
+            for z in 0..grid.depth() {
+                for x in 0..grid.width() {
+                    for y in 0..grid.height() {
+                        if grid.get(x, y, z) == VOXEL_RED_WALL {
+                            panic!(
+                                "VOXEL_RED_WALL should never be voxelized at {wx}, {y}, {wz}",
+                                wx = ox + (x as f32 + 0.5) * scale,
+                                wz = oz + (z as f32 + 0.5) * scale
+                            );
+                        }
+                    }
+                    // Red lights sit at ceiling height, never at floor level.
+                    assert_ne!(grid.get(x, 1, z), VOXEL_RED_LIGHT);
+                }
+            }
+        }
+    }
+
+    fn find_macro_anomaly(kind: AnomalyKind) -> (GeneratorConfig, AnomalyInstance) {
+        let mut config = GeneratorConfig::low_spec();
+        config.anomalies.frequency = 4.0;
+        config.anomalies.pillar_expanses = (kind == AnomalyKind::PillarExpanse) as u8 as f32;
+        config.anomalies.blackouts = (kind == AnomalyKind::BlackoutExpanse) as u8 as f32;
+        config.anomalies.pit_lattices = (kind == AnomalyKind::PitLattice) as u8 as f32;
+        let noise = SimpleNoiseProvider::new();
+        for rz in 3i64..24 {
+            for rx in 3i64..24 {
+                let plans = BackroomsLevel::region_plans_for(
+                    Position::new(rx as f32 * REGION_SIZE, rz as f32 * REGION_SIZE),
+                    1.0,
+                    42,
+                    &config,
+                    &noise,
+                );
+                if let Some(instance) = plans
+                    .iter()
+                    .flat_map(|(_, p)| &p.anomalies)
+                    .find(|a| a.kind == kind)
+                {
+                    return (config, instance.clone());
+                }
+            }
+        }
+        panic!("no {kind:?} fixture found");
+    }
+
+    #[test]
+    fn pillar_epoch_changes_only_committed_wake_and_preserves_bearing_lane() {
+        use crate::domain::entities::anomaly::{AnomalyStateStamp, AxisDirection};
+        let (mut config, instance) = find_macro_anomaly(AnomalyKind::PillarExpanse);
+        config.anomalies.remap_intensity = 4.0;
+        let gate = instance.gates[instance.gates.len() / 2];
+        let reality = RealitySnapshot::new(vec![AnomalyStateStamp::new(
+            instance.id,
+            1,
+            gate.plane,
+            gate.axis,
+            AxisDirection::Positive,
+            crate::domain::entities::anomaly::RedRoomPhase::Outside,
+            0,
+            0,
+        )]);
+        let empty = RealitySnapshot::empty();
+        let noise = SimpleNoiseProvider::new();
+        let mut changed = 0usize;
+        let mut unchanged_forward = 0usize;
+        let mut lz = -instance.footprint.half_z + 1.0;
+        while lz < instance.footprint.half_z - 1.0 {
+            let mut lx = -instance.footprint.half_x + 1.0;
+            while lx < instance.footprint.half_x - 1.0 {
+                let p = instance.world_coords(lx, lz);
+                let a = sample_anomaly(&instance, &noise, 42, &config, &empty, p.x, p.z);
+                let b = sample_anomaly(&instance, &noise, 42, &config, &reality, p.x, p.z);
+                let in_wake =
+                    reality.stamps()[0].point_is_in_wake(p.x, p.z, config.anomalies.remap_distance);
+                if a.solid != b.solid {
+                    assert!(in_wake, "geometry changed ahead of the crossed gate");
+                    assert!(lz.abs() > instance.skeleton_half_width);
+                    changed += 1;
+                } else if !in_wake {
+                    unchanged_forward += 1;
+                }
+                if lz.abs() <= instance.skeleton_half_width {
+                    assert!(!a.solid && !b.solid, "bearing lane was blocked");
+                }
+                lx += 0.4;
+            }
+            lz += 0.4;
+        }
+        assert!(changed > 0, "pillar epoch produced no changed wake infill");
+        assert!(unchanged_forward > 100);
+    }
+
+    #[test]
+    fn blackout_has_a_recoverable_glimmer_lane_and_compressed_dark_core() {
+        let (config, instance) = find_macro_anomaly(AnomalyKind::BlackoutExpanse);
+        let noise = SimpleNoiseProvider::new();
+        let lane = instance.world_coords(0.0, 0.0);
+        let lane_plan = sample_anomaly(
+            &instance,
+            &noise,
+            42,
+            &config,
+            &RealitySnapshot::empty(),
+            lane.x,
+            lane.z,
+        );
+        assert!(!lane_plan.solid, "blackout recovery skeleton is blocked");
+        let core = instance.world_coords(0.0, instance.skeleton_half_width + 3.0);
+        let core_plan = sample_anomaly(
+            &instance,
+            &noise,
+            42,
+            &config,
+            &RealitySnapshot::empty(),
+            core.x,
+            core.z,
+        );
+        assert!(!core_plan.light, "blackout core has an ordinary fixture");
+        assert_eq!(core_plan.ceiling_units, 2.6);
+    }
+
+    #[test]
+    fn pit_lattice_omits_real_floor_and_exports_relocation_hazards() {
+        let (config, instance) = find_macro_anomaly(AnomalyKind::PitLattice);
+        let hazards = instance.pit_hazards_for_bounds(instance.footprint.bounds());
+        assert!(hazards.len() > 20, "pit lattice is not a room-scale hazard");
+        let h = hazards[0];
+        let plan = sample_anomaly(
+            &instance,
+            &SimpleNoiseProvider::new(),
+            42,
+            &config,
+            &RealitySnapshot::empty(),
+            h.center.x,
+            h.center.z,
+        );
+        assert!(!plan.floor, "pit center still voxelizes a floor slab");
+        assert!(!h.contains(h.recovery.x, h.recovery.z));
+
+        let ox = (h.center.x / config.chunk_size).floor() * config.chunk_size;
+        let oz = (h.center.z / config.chunk_size).floor() * config.chunk_size;
+        let grid = BackroomsLevel.generate_with_reality(
+            Position::new(ox, oz),
+            42,
+            config,
+            &SimpleNoiseProvider::new(),
+            &RealitySnapshot::empty(),
+        );
+        assert!(grid.pit_hazards.iter().any(|x| x.id == h.id));
+    }
+
+    #[test]
+    fn red_threshold_closes_the_remembered_entrance_into_a_loop() {
+        use crate::domain::entities::anomaly::AxisDirection;
+        let noise = SimpleNoiseProvider::new();
+        let mut config = GeneratorConfig::low_spec();
+        config.anomalies.pillar_expanses = 0.0;
+        config.anomalies.blackouts = 0.0;
+        config.anomalies.pit_lattices = 0.0;
+        let mut fixture = None;
+        for rz in -6i64..=6 {
+            for rx in -6i64..=6 {
+                let plans = BackroomsLevel::region_plans_for(
+                    Position::new(rx as f32 * REGION_SIZE, rz as f32 * REGION_SIZE),
+                    1.0,
+                    42,
+                    &config,
+                    &noise,
+                );
+                let plan = &plans.iter().find(|(k, _)| *k == (rx, rz)).unwrap().1;
+                if let Some(red) = plan
+                    .anomalies
+                    .iter()
+                    .find(|a| a.kind == AnomalyKind::RedRoom)
+                {
+                    fixture = Some((plan.clone(), red.clone()));
+                    break;
+                }
+            }
+            if fixture.is_some() {
+                break;
+            }
+        }
+        let (plan, red) = fixture.expect("red-room fixture");
+        let gate = red.gates[0];
+        let reality = RealitySnapshot::new(vec![
+            crate::domain::entities::anomaly::AnomalyStateStamp::new(
+                red.id,
+                1,
+                gate.plane,
+                gate.axis,
+                AxisDirection::Positive,
+                crate::domain::entities::anomaly::RedRoomPhase::Sealed,
+                0,
+                gate.id,
+            ),
+        ]);
+        let entrance = plan
+            .assemblies
+            .iter()
+            .find(|a| a.corruption.red_room)
+            .unwrap()
+            .entrances[0];
+        let open = BackroomsLevel::plan_column_in_reality(
+            &plan,
+            &noise,
+            42,
+            &config,
+            &RealitySnapshot::empty(),
+            entrance.center.x,
+            entrance.center.z,
+        );
+        let closed = BackroomsLevel::plan_column_in_reality(
+            &plan,
+            &noise,
+            42,
+            &config,
+            &reality,
+            entrance.center.x,
+            entrance.center.z,
+        );
+        assert!(!open.solid, "red room is closed before threshold entry");
+        assert!(closed.solid, "remembered red-room entrance did not close");
+
+        let ring_point = red.world_coords(red.footprint.half_x - 1.0, 0.0);
+        let ring = sample_red_room(
+            &red,
+            ColumnPlan::open(3.4),
+            &config,
+            &reality,
+            ring_point.x,
+            ring_point.z,
+        );
+        assert!(!ring.solid, "closed red room has no traversable loop");
+        assert_eq!(
+            ring.floor_material, VOXEL_STICKY_CARPET,
+            "committed loop lost its red carpet identity"
+        );
+
+        let mut escape_config = config;
+        escape_config.anomalies.red_escape_bias = 1.0;
+        let escape_reality = RealitySnapshot::new(vec![
+            crate::domain::entities::anomaly::AnomalyStateStamp::new(
+                red.id,
+                4,
+                gate.plane,
+                gate.axis,
+                AxisDirection::Positive,
+                crate::domain::entities::anomaly::RedRoomPhase::EscapeOpen,
+                3,
+                red.gates[1].id,
+            ),
+        ]);
+        let side_extent = if gate.axis == crate::domain::entities::anomaly::Axis2::Z {
+            red.footprint.half_x
+        } else {
+            red.footprint.half_z
+        };
+        let side_columns = [-side_extent, side_extent].map(|side| {
+            let point = if gate.axis == crate::domain::entities::anomaly::Axis2::Z {
+                red.world_coords(side, 0.0)
+            } else {
+                red.world_coords(0.0, side)
+            };
+            sample_red_room(
+                &red,
+                ColumnPlan::open(3.4),
+                &escape_config,
+                &escape_reality,
+                point.x,
+                point.z,
+            )
+        });
+        assert_eq!(
+            side_columns.iter().filter(|column| !column.solid).count(),
+            1,
+            "escape phase must open exactly one deterministic side wall"
+        );
+    }
+
+    /// Arch rooms are the stable contrast: pale walls, deep wet carpet, no
+    /// gates, and geometry provably identical under any encounter state —
+    /// even a fabricated stamp for their own instance id changes nothing.
+    #[test]
+    fn archway_rooms_are_stable_pale_anchors() {
+        use crate::domain::entities::anomaly::{AnomalyStateStamp, Axis2, AxisDirection};
+        use crate::domain::entities::voxel_grid::{VOXEL_DEEP_CARPET, VOXEL_PALE_WALL};
+        let mut config = GeneratorConfig::low_spec();
+        config.anomalies.frequency = 4.0;
+        config.anomalies.pillar_expanses = 0.0;
+        config.anomalies.blackouts = 0.0;
+        config.anomalies.pit_lattices = 0.0;
+        let noise = SimpleNoiseProvider::new();
+        let mut found = None;
+        'search: for rz in 3i64..24 {
+            for rx in 3i64..24 {
+                let plans = BackroomsLevel::region_plans_for(
+                    Position::new(rx as f32 * REGION_SIZE, rz as f32 * REGION_SIZE),
+                    1.0,
+                    42,
+                    &config,
+                    &noise,
+                );
+                if let Some(instance) = plans
+                    .iter()
+                    .flat_map(|(_, p)| &p.anomalies)
+                    .find(|a| a.kind == AnomalyKind::ArchwayRoom)
+                {
+                    found = Some(instance.clone());
+                    break 'search;
+                }
+            }
+        }
+        let instance = found.expect("no archway fixture found");
+        assert!(instance.gates.is_empty(), "arch rooms must carry no gates");
+        assert!(instance.arch.is_some());
+
+        let forged = RealitySnapshot::new(vec![AnomalyStateStamp::new(
+            instance.id,
+            7,
+            0.0,
+            Axis2::X,
+            AxisDirection::Positive,
+            crate::domain::entities::anomaly::RedRoomPhase::Outside,
+            0,
+            0,
+        )]);
+        let empty = RealitySnapshot::empty();
+        let mut pale_seen = false;
+        let mut carpet_seen = false;
+        let mut lz = -instance.footprint.half_z + 0.2;
+        while lz < instance.footprint.half_z {
+            let mut lx = -instance.footprint.half_x + 0.2;
+            while lx < instance.footprint.half_x {
+                let p = instance.world_coords(lx, lz);
+                let a = sample_anomaly(&instance, &noise, 42, &config, &empty, p.x, p.z);
+                let b = sample_anomaly(&instance, &noise, 42, &config, &forged, p.x, p.z);
+                assert_eq!(a, b, "archway geometry moved under a forged epoch");
+                if a.solid && a.wall_material == VOXEL_PALE_WALL {
+                    pale_seen = true;
+                }
+                if !a.solid && a.floor_material == VOXEL_DEEP_CARPET {
+                    carpet_seen = true;
+                }
+                lx += 0.4;
+            }
+            lz += 0.4;
+        }
+        assert!(pale_seen, "no pale arch wall voxelized");
+        assert!(carpet_seen, "no deep wet carpet voxelized");
+    }
+
+    /// Pillar expanses read calmer than ordinary Level 0 (dry shallow
+    /// carpet) and the protected bearing lane carries an unbroken light
+    /// rhythm — the route is architecture, not an invisible collision lane.
+    #[test]
+    fn pillar_expanse_is_dry_and_its_bearing_lane_is_lit_in_rhythm() {
+        use crate::domain::entities::voxel_grid::VOXEL_DRY_CARPET;
+        let (config, instance) = find_macro_anomaly(AnomalyKind::PillarExpanse);
+        let noise = SimpleNoiseProvider::new();
+        let empty = RealitySnapshot::empty();
+        let interior = instance.world_coords(1.0, 1.0);
+        let plan = sample_anomaly(
+            &instance, &noise, 42, &config, &empty, interior.x, interior.z,
+        );
+        assert_eq!(plan.floor_material, VOXEL_DRY_CARPET);
+
+        // Every 4.8u lane module inside the footprint carries a panel.
+        let mut modules = 0usize;
+        let mut lit = 0usize;
+        let mut lx = (-instance.footprint.half_x / 4.8).ceil() * 4.8 + 2.4;
+        while lx < instance.footprint.half_x - instance.entry_band {
+            if lx.abs() < instance.footprint.half_x - instance.entry_band {
+                let p = instance.world_coords(lx, 0.0);
+                let c = sample_anomaly(&instance, &noise, 42, &config, &empty, p.x, p.z);
+                modules += 1;
+                if c.light {
+                    lit += 1;
+                }
+            }
+            lx += 4.8;
+        }
+        assert!(modules >= 8, "sample too small: {modules}");
+        assert!(
+            lit * 10 >= modules * 8,
+            "bearing lane rhythm is broken: {lit}/{modules} modules lit"
+        );
+    }
+
+    /// Blackout cues are semantic: skeleton fixtures voxelize as cool
+    /// glimmers, the approach keeps warm office light, and committed-depth
+    /// floors pool recessed fluid somewhere.
+    #[test]
+    fn blackout_cues_are_glimmers_and_floors_pool_fluid() {
+        use crate::domain::entities::voxel_grid::{VOXEL_FLUID, VOXEL_GLIMMER};
+        let (config, instance) = find_macro_anomaly(AnomalyKind::BlackoutExpanse);
+        let noise = SimpleNoiseProvider::new();
+        let empty = RealitySnapshot::empty();
+
+        let mut glimmer_seen = false;
+        let mut lx = (-instance.footprint.half_x / 28.0).ceil() * 28.0 + 0.2;
+        while lx < instance.footprint.half_x {
+            let p = instance.world_coords(lx, 0.0);
+            let c = sample_anomaly(&instance, &noise, 42, &config, &empty, p.x, p.z);
+            if c.light {
+                assert_eq!(
+                    c.light_material, VOXEL_GLIMMER,
+                    "skeleton cue is not a glimmer"
+                );
+                glimmer_seen = true;
+            }
+            lx += 28.0;
+        }
+        assert!(glimmer_seen, "no glimmer found on the recovery skeleton");
+
+        let mut fluid_seen = false;
+        let mut lz = -instance.footprint.half_z * 0.5;
+        while lz < instance.footprint.half_z * 0.5 && !fluid_seen {
+            let mut sx = -instance.footprint.half_x * 0.5;
+            while sx < instance.footprint.half_x * 0.5 {
+                let p = instance.world_coords(sx, lz);
+                let c = sample_anomaly(&instance, &noise, 42, &config, &empty, p.x, p.z);
+                if !c.solid && c.floor_material == VOXEL_FLUID {
+                    fluid_seen = true;
+                    break;
+                }
+                sx += 0.8;
+            }
+            lz += 0.8;
+        }
+        assert!(fluid_seen, "no recessed fluid basin in the blackout core");
     }
 
     #[test]

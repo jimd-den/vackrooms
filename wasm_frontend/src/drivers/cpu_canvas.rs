@@ -68,6 +68,9 @@ impl RendererPort for CpuCanvasRenderer {
         let old_scale = self.settings.internal_scale;
         self.settings = crate::get_cpu_settings();
         self.settings.fov_tan = crate::drivers::webgl::fov_tan();
+        // The optimization switchboard is sampled once per frame here; the
+        // platform-free rasterizer itself never reads globals.
+        self.settings.toggles = crate::get_render_toggles();
         if self.settings.internal_scale != old_scale {
             if let Some(canvas) = self.ctx.canvas() {
                 self.resize(canvas.width(), canvas.height());

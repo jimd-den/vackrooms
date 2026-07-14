@@ -16,7 +16,6 @@
 //! unit-tested.
 
 use vackrooms::adapters::voxel_mapper::{FaceDirection, MergedQuad};
-use vackrooms::domain::entities::voxel_grid::{VOXEL_LIGHT, VOXEL_RED_LIGHT};
 
 use crate::adapters::surface_mesh::material_id;
 use crate::application::ports::{
@@ -150,7 +149,7 @@ fn emit_capped(
 ) {
     let frame = face_frame(quad, s);
     let material = material_id(quad.v_type);
-    let flags = if material == VOXEL_LIGHT || material == VOXEL_RED_LIGHT {
+    let flags = if vackrooms::domain::entities::voxel_grid::EMISSIVE_MATERIALS.contains(&material) {
         FACE_INSTANCE_FLAG_EMISSIVE
     } else {
         0

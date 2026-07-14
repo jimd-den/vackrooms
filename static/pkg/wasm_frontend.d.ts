@@ -25,6 +25,12 @@ export function get_chunk_blueprint_svg(seed: number, chunk_x: number, chunk_z: 
 export function get_chunk_voxel_blueprint_svg(seed: number, chunk_x: number, chunk_z: number, voxel_scale: number, pixels_per_voxel: number, show_grid: boolean, show_semantics: boolean, show_ceiling: boolean): string;
 
 /**
+ * Debug payload for one generated chunk: a compact material slice plus the
+ * plan objects that explain why those voxels were placed.
+ */
+export function get_debug_chunk_json(seed: number, chunk_x: number, chunk_z: number, voxel_scale: number): string;
+
+/**
  * Compact geometry feed for the canvas debug map. This deliberately returns
  * planning primitives rather than SVG so the page can redraw cheaply while
  * panning, zooming, or changing overlays.
@@ -32,6 +38,15 @@ export function get_chunk_voxel_blueprint_svg(seed: number, chunk_x: number, chu
 export function get_debug_region_json(seed: number, region_x: number, region_z: number): string;
 
 export function get_large_voxel_blueprint_svg(seed: number, rx_val: number, rz_val: number, voxel_scale: number, size_world: number, layer: string): string;
+
+/**
+ * Returns one renderer switch by its short URL name. This small diagnostic
+ * export lets the settings UI and browser smoke tests verify the effective
+ * state after URL and local-preference overrides have been composed.
+ */
+export function render_toggle_enabled(name: string): boolean | undefined;
+
+export function set_anomaly_debug(enabled: boolean): void;
 
 export function set_cpu_lod_cutoff(cutoff: number): void;
 
@@ -45,10 +60,14 @@ export function set_cpu_shadows(mode: number): void;
 
 export function set_doom_controls(enabled: boolean): void;
 
+/**
+ * Updates the directional face-lighting response shared by every raymarch
+ * fragment. The values are sampled once when a frame is submitted.
+ */
 export function set_face_weights(top: number, bottom: number, x: number, z: number): void;
 
 /**
- * Sets the vertical field of view in degrees (clamped to 40–110).
+ * Sets the vertical field of view in degrees, clamped to a usable range.
  */
 export function set_fov(degrees: number): void;
 
@@ -66,6 +85,13 @@ export function set_mouse_sensitivity(multiplier: number): void;
 export function set_render_scale(scale: number): void;
 
 /**
+ * Flips one renderer optimization switch by name (`"hiz"`, `"f2b"`,
+ * `"mips"`, `"beam_occlusion"`, `"shadows"`, `"cells"`, `"cull"`,
+ * `"budget"`, `"dither"`, `"timer"`). Unknown names are ignored.
+ */
+export function set_render_toggle(name: string, enabled: boolean): void;
+
+/**
  * Composition root. Runs automatically when the wasm module is
  * instantiated by `static/index.html`.
  *
@@ -76,7 +102,7 @@ export function set_render_scale(scale: number): void;
  */
 export function start(): void;
 
-export function worker_generate(origin_x: number, origin_z: number, level: number, lod: number): Uint8Array;
+export function worker_generate(_request_id: number, origin_x: number, origin_z: number, level: number, lod: number, reality_words: Uint32Array): Uint8Array;
 
 /**
  * `default_seed` must match the main thread's `WORLD_SEED`.
@@ -90,15 +116,19 @@ export interface InitOutput {
     readonly start: () => void;
     readonly set_face_weights: (a: number, b: number, c: number, d: number) => void;
     readonly set_fov: (a: number) => void;
-    readonly worker_generate: (a: number, b: number, c: number, d: number) => [number, number];
+    readonly worker_generate: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number];
     readonly worker_init: (a: number, b: number, c: number) => void;
     readonly get_blueprint_svg: (a: number, b: number, c: number, d: number, e: number) => [number, number];
     readonly get_chunk_blueprint_svg: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number];
     readonly get_chunk_voxel_blueprint_svg: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number];
+    readonly get_debug_chunk_json: (a: number, b: number, c: number, d: number) => [number, number];
     readonly get_debug_region_json: (a: number, b: number, c: number) => [number, number];
     readonly get_large_voxel_blueprint_svg: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number];
+    readonly render_toggle_enabled: (a: number, b: number) => number;
+    readonly set_anomaly_debug: (a: number) => void;
     readonly set_doom_controls: (a: number) => void;
     readonly set_invert_y: (a: number) => void;
+    readonly set_render_toggle: (a: number, b: number, c: number) => void;
     readonly set_cpu_lod_cutoff: (a: number) => void;
     readonly set_cpu_max_draw_distance: (a: number) => void;
     readonly set_cpu_max_splat_half: (a: number) => void;

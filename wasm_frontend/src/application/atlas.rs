@@ -159,6 +159,8 @@ mod tests {
             world_size: 12.8,
             surface: crate::application::ports::SurfaceMeshPayload::empty(0),
             collision: vec![],
+            traversal_gates: vec![],
+            pit_hazards: vec![],
         }
     }
 

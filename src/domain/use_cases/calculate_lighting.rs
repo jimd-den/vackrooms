@@ -1,10 +1,15 @@
-use crate::domain::entities::voxel_grid::{VOXEL_AIR, VOXEL_LIGHT, VOXEL_RED_LIGHT, VoxelGrid};
+use crate::domain::entities::voxel_grid::{
+    VOXEL_AIR, VOXEL_GLIMMER, VOXEL_LIGHT, VOXEL_RED_LIGHT, VoxelGrid,
+};
 use std::collections::VecDeque;
 
 /// Warm fluorescent tube color for standard lights (0-15 per channel).
 const LIGHT_WARM: [u8; 3] = [15, 14, 11];
 /// Deep red exit/alarm light color.
 const LIGHT_RED: [u8; 3] = [15, 3, 2];
+/// Cool, very dim emergency glimmer (blackout recovery skeleton). Its short
+/// BFS falloff is what keeps deep blackout genuinely dark between cues.
+const LIGHT_GLIMMER: [u8; 3] = [3, 5, 7];
 
 /// Calculates colored 3D voxel lighting across the dense VoxelGrid using a
 /// BFS flood-fill, Rethinking-Voxels style: three independent light channels
@@ -26,11 +31,11 @@ pub fn calculate_voxel_lighting(grid: &mut VoxelGrid) {
         for y in 0..h {
             for x in 0..w {
                 let v = grid.get(x, y, z);
-                if v == VOXEL_LIGHT || v == VOXEL_RED_LIGHT {
-                    let rgb = if v == VOXEL_RED_LIGHT {
-                        LIGHT_RED
-                    } else {
-                        LIGHT_WARM
+                if v == VOXEL_LIGHT || v == VOXEL_RED_LIGHT || v == VOXEL_GLIMMER {
+                    let rgb = match v {
+                        VOXEL_RED_LIGHT => LIGHT_RED,
+                        VOXEL_GLIMMER => LIGHT_GLIMMER,
+                        _ => LIGHT_WARM,
                     };
                     grid.set_light_rgb(x, y, z, rgb);
                     queue.push_back((x, y, z));
