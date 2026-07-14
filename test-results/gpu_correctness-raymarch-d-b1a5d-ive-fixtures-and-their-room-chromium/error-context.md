@@ -22,7 +22,7 @@ expect(received).toEqual(expected) // deep equality
   Object {
 -   "changedPixels": 0,
 -   "maximumChannelDelta": 0,
-+   "changedPixels": 2,
++   "changedPixels": 1,
 +   "maximumChannelDelta": 55,
   }
 ```
