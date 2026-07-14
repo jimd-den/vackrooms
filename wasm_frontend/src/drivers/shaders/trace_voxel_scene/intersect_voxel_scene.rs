@@ -122,6 +122,16 @@ float exitDistanceFromBox(
     return nearest;
 }
 
+VoxelHit traceChunkDda(
+    vec3 rayOrigin,
+    vec3 rayDirection,
+    int rootIndex,
+    float worldSize,
+    float voxelSize,
+    int svoDepth,
+    RayBoxHit chunkBox
+);
+
 VoxelHit traceChunkSkippingEmptyLeaves(
     vec3 rayOrigin,
     vec3 rayDirection,
@@ -134,13 +144,29 @@ VoxelHit traceChunkSkippingEmptyLeaves(
     float distance = chunkBox.entry;
     vec3 normal = chunkBox.entryNormal;
     float sampleBias = traversalSampleBias(voxelSize);
+    float refinementEntry = chunkBox.entry;
+    vec3 refinementEntryNormal = chunkBox.entryNormal;
 
     for (int stepIndex = 0; stepIndex < 768; ++stepIndex) {
         if (distance > chunkBox.exit) break;
         vec3 samplePoint = rayOrigin + rayDirection * min(distance + sampleBias, chunkBox.exit);
         VoxelLeaf leaf = lookupVoxelLeaf(samplePoint, rootIndex, worldSize, svoDepth);
         if (leaf.material != 0u) {
-            return VoxelHit(true, distance, normal, leaf.material, leaf.color, leaf.lightWord);
+            // The coarse walk proves emptiness only. Resolve the final
+            // voxel-scale crossing with the diagnostic algorithm so both
+            // policies produce one canonical distance, material, and normal.
+            RayBoxHit refinementBox = RayBoxHit(
+                true, refinementEntry, chunkBox.exit, refinementEntryNormal
+            );
+            return traceChunkDda(
+                rayOrigin,
+                rayDirection,
+                rootIndex,
+                worldSize,
+                voxelSize,
+                svoDepth,
+                refinementBox
+            );
         }
 
         vec3 crossedNormal;
@@ -150,6 +176,11 @@ VoxelHit traceChunkSkippingEmptyLeaves(
         if (nextDistance <= distance + sampleBias * 0.25) {
             nextDistance = distance + sampleBias;
         }
+        // A normalized ray moves at most one voxel per axis over this short
+        // interval. Retaining it lets the exact resolver reconstruct every
+        // potentially competing face without replaying the skipped octant.
+        refinementEntry = max(distance, nextDistance - voxelSize);
+        refinementEntryNormal = normal;
         distance = nextDistance;
         normal = crossedNormal;
     }
