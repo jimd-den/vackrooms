@@ -24,10 +24,9 @@
 
 /// One on/off switch per optimization, across all render paths.
 ///
-/// Everything defaults to **on**. Correctness-preserving switches fall back
-/// to a slower, simpler path; explicitly documented quality/features
-/// (`mip_lod`, cone occlusion, face budget, shadows, dither) intentionally
-/// alter fidelity so their cost and artifacts can be isolated.
+/// Correctness-preserving switches default on. The lossy static-light cache
+/// defaults off: first boot uses analytic fixtures, while `rt_bake=1` opts
+/// into the quantized cache after its tradeoff has been made explicit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RenderToggles {
     // ------------------------------------------------------------------
@@ -43,6 +42,11 @@ pub struct RenderToggles {
     /// and z-rejection. Off = input order plus explicit nearest-hit
     /// comparison; identical image, more traversal/overdraw.
     pub front_to_back: bool,
+    /// OPTIMIZATION (raymarch): jump across the complete empty SVO leaf
+    /// containing the current sample. Off = diagnostic finest-voxel DDA;
+    /// both paths use the same exact point lookup and must report the same
+    /// nearest hit/material/normal.
+    pub empty_space_skip: bool,
     /// OPTIMIZATION (CPU): coarse-to-fine LOD — a subtree whose projection
     /// fits in ~a pixel is drawn as one MIP-filtered splat instead of being
     /// descended. Off = full descent to leaves regardless of distance, except
@@ -76,6 +80,11 @@ pub struct RenderToggles {
     /// Dither/grain/banding-noise post effects (GPU). A visual feature more
     /// than a speedup; toggle to isolate its contribution to the image.
     pub dither: bool,
+    /// OPTIMIZATION (surface + raymarch): use the quantized static irradiance
+    /// cache instead of evaluating static fixtures per visible sample. Dynamic
+    /// lights remain analytic. Off = the direct-light reference equations,
+    /// which is the first diagnostic path for any suspected bake artifact.
+    pub baked_lighting: bool,
     /// `EXT_disjoint_timer_query_webgl2` GPU frame timing for the HUD. Off =
     /// no queries issued (some drivers stall on them).
     pub gpu_timer: bool,
@@ -86,6 +95,7 @@ impl Default for RenderToggles {
         Self {
             hierarchical_z: true,
             front_to_back: true,
+            empty_space_skip: true,
             mip_lod: true,
             flashlight_occlusion: true,
             shadow_pass: true,
@@ -93,13 +103,14 @@ impl Default for RenderToggles {
             face_budget: true,
             distance_cull: true,
             dither: true,
+            baked_lighting: false,
             gpu_timer: true,
         }
     }
 }
 
 /// Canonical query-name/bit ordering used by parsing and bitfield round trips.
-const TOGGLE_BITS: [(&str, u32); 10] = [
+const TOGGLE_BITS: [(&str, u32); 12] = [
     ("hiz", 1 << 0),
     ("f2b", 1 << 1),
     ("mips", 1 << 2),
@@ -110,6 +121,8 @@ const TOGGLE_BITS: [(&str, u32); 10] = [
     ("cull", 1 << 7),
     ("dither", 1 << 8),
     ("timer", 1 << 9),
+    ("skip", 1 << 10),
+    ("bake", 1 << 11),
 ];
 
 impl RenderToggles {
@@ -117,6 +130,7 @@ impl RenderToggles {
         Some(match name {
             "hiz" => &mut self.hierarchical_z,
             "f2b" => &mut self.front_to_back,
+            "skip" => &mut self.empty_space_skip,
             "mips" => &mut self.mip_lod,
             "beam_occlusion" => &mut self.flashlight_occlusion,
             "shadows" => &mut self.shadow_pass,
@@ -124,6 +138,7 @@ impl RenderToggles {
             "budget" => &mut self.face_budget,
             "cull" => &mut self.distance_cull,
             "dither" => &mut self.dither,
+            "bake" => &mut self.baked_lighting,
             "timer" => &mut self.gpu_timer,
             _ => return None,
         })
@@ -196,11 +211,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn defaults_are_all_on() {
+    fn defaults_use_analytic_static_lighting() {
         let t = RenderToggles::default();
-        assert!(t.hierarchical_z && t.front_to_back && t.mip_lod);
+        assert!(t.hierarchical_z && t.front_to_back && t.empty_space_skip && t.mip_lod);
         assert!(t.flashlight_occlusion && t.shadow_pass && t.cell_culling && t.face_budget);
         assert!(t.distance_cull && t.dither && t.gpu_timer);
+        assert!(!t.baked_lighting);
     }
 
     #[test]

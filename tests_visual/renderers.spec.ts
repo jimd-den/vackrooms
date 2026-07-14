@@ -2,9 +2,9 @@ import { expect, test } from '@playwright/test';
 
 const backends = [
   {
-    query: 'renderer=surface&rt_cull=0&rt_shadows=0&rt_dither=0&rt_timer=0',
+    query: 'renderer=surface&rt_bake=0&rt_cull=0&rt_shadows=0&rt_dither=0&rt_timer=0',
     label: 'GPU surfaces',
-    disabled: ['cull', 'shadows', 'dither', 'timer'],
+    disabled: ['bake', 'cull', 'shadows', 'dither', 'timer'],
   },
   {
     query:
@@ -13,9 +13,9 @@ const backends = [
     disabled: ['cull', 'shadows', 'cells', 'budget', 'dither', 'timer'],
   },
   {
-    query: 'renderer=raymarch&rt_f2b=0&rt_dither=0&rt_timer=0',
+    query: 'renderer=raymarch&rt_bake=0&rt_skip=0&rt_f2b=0&rt_dither=0&rt_timer=0',
     label: 'GPU raymarch (debug)',
-    disabled: ['f2b', 'dither', 'timer'],
+    disabled: ['bake', 'skip', 'f2b', 'dither', 'timer'],
   },
   {
     query: 'renderer=cpu&rt_hiz=0&rt_f2b=0&rt_mips=0&rt_beam_occlusion=0&rt_cull=0',

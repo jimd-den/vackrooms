@@ -128,7 +128,7 @@ SimpleNoiseProvider (driver)
       ▼
 GenerateChunkArchitectureUseCase ──► VoxelGrid (dense u8 grid + light grid)
       │                                   │
-      │                          calculate_voxel_lighting (BFS flood fill)
+      │                          bake_voxel_lighting (world-unit air paths)
       ▼                                   ▼
 BuildOctreeUseCase ──────────────► SparseVoxelOctree
       │                              (arena Vec<SvoNode>, uniform-collapsed)

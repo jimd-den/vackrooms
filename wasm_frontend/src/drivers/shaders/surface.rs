@@ -189,13 +189,13 @@ void main() {
     float baked = vStaticIndirect * (1.0 / 15.0);
     vec3 bakedWarm = vec3(baked, baked * 0.94, baked * 0.72);
     irradiance = max(irradiance, bakedWarm);
+    vec3 roomAmbient = vec3(0.16, 0.145, 0.075);
+    vec3 bouncedLight = irradiance * 0.75;
+    irradiance = max(roomAmbient, bouncedLight);
     if (uOutdoor == 1) {
         // Daylight floor: the sky layer's BFS light dominates outdoors; do
         // not crush it toward the dim interior baseline.
         irradiance = max(irradiance, vec3(0.30, 0.32, 0.36));
-    } else {
-        irradiance = max(irradiance, vec3(0.16, 0.13, 0.07));
-        irradiance = mix(vec3(0.18, 0.15, 0.08), irradiance, 0.25);
     }
 
     // Upward-facing surfaces brightest, downward surfaces notably darker,
@@ -221,8 +221,8 @@ void main() {
 
     // Yellow-green ambient and olive shadows (cool neutral hemisphere
     // outdoors so the grassland reads as daylight, not office fluorescence).
-    vec3 ambientUp = vec3(0.35, 0.38, 0.22) * irradiance;
-    vec3 ambientDown = vec3(0.14, 0.15, 0.08) * irradiance;
+    vec3 ambientUp   = vec3(0.16, 0.17, 0.09) * irradiance;
+    vec3 ambientDown = vec3(0.035, 0.030, 0.012) * irradiance;
     if (uOutdoor == 1) {
         ambientUp = vec3(0.62, 0.66, 0.72) * irradiance;
         ambientDown = vec3(0.34, 0.36, 0.33) * irradiance;
@@ -268,7 +268,8 @@ void main() {
             float specular = pow(ndoth, specPower) * (1.0 - roughness) * 0.5;
 
             // Inverse square falloff
-            float falloff = pow(max(1.0 - d2 / range2, 0.0), 2.0) / (1.0 + 0.05 * d2);
+            float x = clamp(d2 / range2, 0.0, 1.0);
+            float falloff = (1.0 - x) * (1.0 - x);
 
             float visible = 1.0;
             if (i == uShadowedLightIndex) {
@@ -305,16 +306,6 @@ void main() {
               + flashlight;
     }
 
-    // Fog with onset distance - pushed further back for large open spaces like the Atrium
-    float fogOnset = 15.0;
-    float fogDist = max(0.0, distanceToCamera - fogOnset);
-    float fogDensity = 0.028;
-    float heightFactor = 1.0 + 0.35 * smoothstep(0.0, 3.4, vWorldPosition.y);
-
-    // Ensure fog reaches exactly 1.0 before the chunk ungenerated boundary
-    float fogAmount = 1.0 - exp(-fogDist * fogDensity * heightFactor);
-    fogAmount = max(fogAmount, smoothstep(38.0, 50.0, distanceToCamera));
-
     // Volumetric scattering (glow)
     vec3 glow = vec3(0.0);
     for (int i = 0; i < 4; ++i) {
@@ -332,46 +323,35 @@ void main() {
         glow += uLightColors[i] * uLightParams[i].y * phase * attenuation * depthMask * 2.5;
     }
 
-    // Slight distance desaturation and contrast compression before fog,
-    // retaining bright emissive ceiling fixtures.
-    if (!emissive(vMaterial) && uOutdoor == 0) {
-        float desatFactor = clamp(distanceToCamera * 0.015, 0.0, 0.55);
-        float gray = dot(color, vec3(0.299, 0.587, 0.114));
-        color = mix(color, vec3(gray), desatFactor);
-        color = mix(color, vec3(0.22, 0.18, 0.12), desatFactor * 0.35); // pull toward a warm middle gray
-    }
+    // Fog with onset distance
+    float fogOnset = 22.0;
+    float fogDist = max(0.0, distanceToCamera - fogOnset);
+    float fogDensity = 0.010;
 
-    // Baseline fog color
-    vec3 baselineFogColor = vec3(0.15, 0.125, 0.055);
+    // Keep distant geometry readable; streaming should not force full opacity.
+    float fogAmount = min(1.0 - exp(-fogDist * fogDensity), 0.82);
 
-    // Height-based fog color: warmer/darker near the floor, sickly-green/dimmer near the ceiling
-    float hNorm = clamp(vWorldPosition.y / 5.0, 0.0, 1.0);
-    vec3 heightFogColor = mix(
-        vec3(0.12, 0.09, 0.035), // warmer/darker near the floor
-        vec3(0.14, 0.15, 0.06), // sickly-green/dimmer near the ceiling
+    float hNorm = clamp(vWorldPosition.y / 3.4, 0.0, 1.0);
+    vec3 fogColor = mix(
+        vec3(0.018, 0.014, 0.006),  // floor: nearly black warm brown
+        vec3(0.026, 0.030, 0.010),  // ceiling: faint sickly olive
         hNorm
     );
     if (uOutdoor == 1) {
-        // Outdoors distance haze fades toward the bright sky.
-        baselineFogColor = uFogColor;
-        heightFogColor = uFogColor;
+        fogColor = uFogColor;
     }
 
-    // Seamless transition back to baseline fog color at far boundary
-    float farFade = smoothstep(35.0, 50.0, distanceToCamera);
-    vec3 currentFogColor = mix(heightFogColor, baselineFogColor, farFade);
+    // Separate emissive glow and flares to retain visibility through fog
+    vec3 emissiveGlow = glow + flareCores(vWorldPosition, uCameraPosition);
 
-    // Also fade the volumetric glow to 0 at the far clip so it doesn't cause a gap
-    currentFogColor += glow * (1.0 - farFade);
+    // Blend geometry color toward fogColor
+    vec3 foggedSurface = mix(color, fogColor, fogAmount);
 
-    // Blend geometry color toward currentFogColor
-    color = mix(color, currentFogColor, clamp(fogAmount, 0.0, 1.0));
+    // Add emissive terms, reduced but not destroyed by fog.
+    color = foggedSurface + emissiveGlow * (1.0 - fogAmount * 0.55);
 
     // Add a subtle ambient glow to the near-field (so it isn't completely dry and flat up close)
     color += glow * 0.12 * exp(-distanceToCamera * 0.05);
-
-    // Flare cores (shared chunk; occluded by nearer surfaces, no x-ray dots).
-    color += flareCores(vWorldPosition, uCameraPosition);
 
     color = toneMap(color);
 

@@ -12,8 +12,6 @@
 //! Every optional shortcut is labeled at its branch and controlled by the
 //! shared `RenderToggles` switchboard.
 
-use std::collections::HashMap;
-
 use web_sys::WebGl2RenderingContext as Gl;
 
 use crate::application::ports::{
@@ -111,7 +109,7 @@ fn render_frame(
 
     let resident: Vec<&SplatChunk> = renderer.chunks.values().collect();
     let visible = collect_visible_chunks(&resident, frame, toggles.distance_cull);
-    let lights = select_frame_lights(&resident, frame);
+    let lights = select_frame_lights(frame);
     let shadow = render_shadow_pass(renderer, &resident, &lights, toggles.shadow_pass);
 
     bind_frame_uniforms(renderer, frame, &lights, &shadow, toggles.dither);
@@ -184,18 +182,9 @@ fn squared_distance(a: [f32; 3], b: [f32; 3]) -> f32 {
     dx * dx + dy * dy + dz * dz
 }
 
-fn select_frame_lights(visible: &[&SplatChunk], frame: &FrameParams) -> SelectedLights {
-    let mut fixtures = HashMap::new();
-    for chunk in visible {
-        for light in &chunk.lights {
-            if light.enabled {
-                fixtures.insert(light.id, light);
-            }
-        }
-    }
-
+fn select_frame_lights(frame: &FrameParams) -> SelectedLights {
     let dynamic = dynamic_light_sources(frame);
-    select_lights(fixtures.values().copied(), &dynamic, frame)
+    select_lights(frame.active_scene_lights().iter(), &dynamic, frame)
 }
 
 /// FEATURE (rt_shadows): resident greedy meshes cast the hero-light shadow

@@ -15,6 +15,7 @@ use crate::application::ports::{
     ChunkDraw, ChunkRequest, ChunkSourcePort, CompletedChunk, DynamicLight, Environment,
     FrameParams, MAX_DYNAMIC_LIGHTS, RendererPort, SurfaceChunk,
 };
+use crate::application::prepare_frame_lighting::select_scene_lights;
 use crate::application::streaming::{
     ChunkKey, ChunkStore, LoadedChunk, StreamingPolicy, chunk_key,
 };
@@ -446,6 +447,12 @@ impl Engine {
             d2(a).total_cmp(&d2(b))
         });
 
+        let (scene_lights, scene_light_count) = select_scene_lights(
+            self.store
+                .iter_ordered()
+                .flat_map(|chunk| chunk.payload.surface.lights.iter()),
+            self.player.position,
+        );
         let frame = FrameParams {
             camera_pos: self.player.position,
             yaw: self.player.yaw,
@@ -453,6 +460,8 @@ impl Engine {
             flashlight: input.flashlight,
             dynamic_lights: self.flare_lights(),
             dynamic_light_count: self.flare_light_count(),
+            scene_lights,
+            scene_light_count,
             environment: self.environment(),
         };
         self.renderer.draw(&frame, &self.draws);
@@ -1008,6 +1017,8 @@ impl Engine {
                     origin: [chunk.origin.0, 0.0, chunk.origin.1],
                     root_index: 0,
                     world_size: chunk.payload.world_size,
+                    voxel_size: chunk.payload.voxel_size,
+                    svo_depth: chunk.payload.svo_depth,
                 });
             }
             self.draws.truncate(MAX_CHUNKS);
@@ -1074,6 +1085,8 @@ impl Engine {
                     origin: [chunk.origin.0, 0.0, chunk.origin.1],
                     root_index: (offset + chunk.payload.root as usize) as i32,
                     world_size: chunk.payload.world_size,
+                    voxel_size: chunk.payload.voxel_size,
+                    svo_depth: chunk.payload.svo_depth,
                 });
             }
         }
@@ -1297,6 +1310,8 @@ mod tests {
                 root: 0,
                 nodes: [1u32, 0, 0, 0].repeat(1024), // one padded row of air leaves
                 world_size: 12.8,
+                voxel_size: 0.2,
+                svo_depth: 6,
                 surface: crate::application::ports::SurfaceMeshPayload::empty(0),
                 collision: vec![Aabb::new([origin_x, 0.0, 0.0], [origin_x + 0.2, 3.0, 0.2])],
                 traversal_gates: vec![],
@@ -1318,6 +1333,8 @@ mod tests {
                 root: 0,
                 nodes: [1u32, 0, 0, 0].repeat(1024),
                 world_size: 12.8,
+                voxel_size: 0.2,
+                svo_depth: 6,
                 surface: crate::application::ports::SurfaceMeshPayload::empty(0),
                 collision: vec![Aabb::new([-100.0, 0.0, -100.0], [100.0, 3.0, 100.0])],
                 traversal_gates: vec![],

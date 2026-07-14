@@ -35,7 +35,11 @@ pub fn sphere_visible(
     let (sy, cy) = frame.yaw.sin_cos();
     let forward = [-cp * sy, sp, -cp * cy];
     let dot = to[0] * forward[0] + to[1] * forward[1] + to[2] * forward[2];
-    if dot >= -radius { Some(distance2) } else { None }
+    if dot >= -radius {
+        Some(distance2)
+    } else {
+        None
+    }
 }
 
 /// Center + bounding-sphere radius of a chunk from its origin and local

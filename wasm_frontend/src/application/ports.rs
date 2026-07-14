@@ -24,7 +24,37 @@ pub struct PackedVertex {
     pub ao: u8,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+/// Geometric emission model used by every renderer.
+///
+/// Keeping this in the application contract prevents a driver from silently
+/// turning a downward fluorescent panel into an omnidirectional point light.
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum LightKind {
+    /// Runtime flares and other lights that radiate in every direction.
+    #[default]
+    Point = 0,
+    /// A rectangular ceiling emitter whose front face points down.
+    CeilingPanel = 1,
+    /// A long rectangular ceiling emitter whose front face points down.
+    Strip = 2,
+    /// A small low-output emergency emitter.
+    Emergency = 3,
+}
+
+impl LightKind {
+    pub fn from_u8(value: u8) -> Option<Self> {
+        Some(match value {
+            0 => Self::Point,
+            1 => Self::CeilingPanel,
+            2 => Self::Strip,
+            3 => Self::Emergency,
+            _ => return None,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct LightSource {
     pub id: u64,
     pub position: [f32; 3],
@@ -34,8 +64,25 @@ pub struct LightSource {
     /// Authored luminous strength. Kept independent from radius so a large
     /// atrium light can be brighter without relying on a driver heuristic.
     pub intensity: f32,
+    pub kind: LightKind,
     pub flicker_mode: u8,
     pub enabled: bool,
+}
+
+impl Default for LightSource {
+    fn default() -> Self {
+        Self {
+            id: 0,
+            position: [0.0; 3],
+            half_size: [0.0; 2],
+            color: [0.0; 3],
+            radius: 0.0,
+            intensity: 0.0,
+            kind: LightKind::Point,
+            flicker_mode: 0,
+            enabled: false,
+        }
+    }
 }
 
 /// One error-selected, axis-aligned visible surface rectangle for the splat
@@ -151,10 +198,22 @@ pub struct ChunkDraw {
     pub root_index: i32,
     /// Side length of the chunk's SVO cube in world units.
     pub world_size: f32,
+    /// Exact world-space edge length of a leaf voxel at this chunk's LOD.
+    /// Never infer this from `world_size`: the SVO cube is power-of-two
+    /// padded and deliberately larger than the logical chunk.
+    pub voxel_size: f32,
+    /// Exact SVO depth. Kept beside the voxel size so traversal has no
+    /// profile-specific constants or hidden maximum-depth guesses.
+    pub svo_depth: u8,
 }
 
 /// Upper bound on per-frame dynamic lights handed to renderers (flares).
 pub const MAX_DYNAMIC_LIGHTS: usize = 4;
+
+/// Static fixture budget shared by all renderers. The application selects
+/// the most relevant unique emitters once per frame; GPU backends merely
+/// evaluate the same list.
+pub const MAX_SCENE_LIGHTS: usize = 8;
 
 /// A short-lived runtime light (dropped flare). World-space state owned by
 /// the engine — never part of chunk payloads, baked light volumes, or the
@@ -184,6 +243,10 @@ pub struct Environment {
     pub fog_color: [f32; 3],
     /// Multiplier on the ambient/indirect lighting response (>1 = daylight).
     pub ambient_scale: f32,
+    /// Beer-Lambert extinction coefficient in inverse world units.
+    pub fog_density: f32,
+    /// Clear near-field distance before extinction begins.
+    pub fog_start: f32,
 }
 
 impl Environment {
@@ -192,8 +255,11 @@ impl Environment {
         Self {
             outdoor: false,
             sky_color: [0.0, 0.0, 0.0],
-            fog_color: [0.15, 0.125, 0.055],
+            // Linear RGB; display encoding happens exactly once after fog.
+            fog_color: [0.020, 0.014, 0.0045],
             ambient_scale: 1.0,
+            fog_density: 0.018,
+            fog_start: 12.0,
         }
     }
 
@@ -201,9 +267,12 @@ impl Environment {
     pub fn daylight() -> Self {
         Self {
             outdoor: true,
-            sky_color: [0.53, 0.72, 0.92],
-            fog_color: [0.66, 0.78, 0.92],
+            // Linear equivalents of the authored sRGB sky/haze palette.
+            sky_color: [0.243, 0.477, 0.827],
+            fog_color: [0.393, 0.570, 0.827],
             ambient_scale: 2.2,
+            fog_density: 0.012,
+            fog_start: 18.0,
         }
     }
 }
@@ -225,6 +294,11 @@ pub struct FrameParams {
     /// `dynamic_light_count` entries are meaningful.
     pub dynamic_lights: [DynamicLight; MAX_DYNAMIC_LIGHTS],
     pub dynamic_light_count: u8,
+    /// Nearest/most influential deduplicated world fixtures. Unlike the old
+    /// driver-local selection this reaches surfaces, splats, raymarch, and
+    /// CPU reference rendering through the same contract.
+    pub scene_lights: [LightSource; MAX_SCENE_LIGHTS],
+    pub scene_light_count: u8,
     /// Level atmosphere (sky, fog, ambient scale).
     pub environment: Environment,
 }
@@ -232,6 +306,10 @@ pub struct FrameParams {
 impl FrameParams {
     pub fn active_dynamic_lights(&self) -> &[DynamicLight] {
         &self.dynamic_lights[..self.dynamic_light_count as usize]
+    }
+
+    pub fn active_scene_lights(&self) -> &[LightSource] {
+        &self.scene_lights[..self.scene_light_count as usize]
     }
 }
 
@@ -244,6 +322,8 @@ impl Default for FrameParams {
             flashlight: false,
             dynamic_lights: [DynamicLight::default(); MAX_DYNAMIC_LIGHTS],
             dynamic_light_count: 0,
+            scene_lights: [LightSource::default(); MAX_SCENE_LIGHTS],
+            scene_light_count: 0,
             environment: Environment::default(),
         }
     }
@@ -305,6 +385,9 @@ pub struct ChunkPayload {
     pub nodes: Vec<u32>,
     /// Side length of the SVO cube in world units.
     pub world_size: f32,
+    /// Exact leaf size/depth used to build `nodes`.
+    pub voxel_size: f32,
+    pub svo_depth: u8,
     /// Greedy surface mesh used by the default raster path.
     pub surface: SurfaceMeshPayload,
     /// Solid-voxel bounding boxes in world space, for player collision.

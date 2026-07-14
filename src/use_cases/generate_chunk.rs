@@ -6,6 +6,92 @@ use crate::use_cases::ports::{NULL_TELEMETRY, NoiseProvider, TelemetryPort};
 
 pub use crate::use_cases::anomalies::config::AnomalyTuning;
 
+/// Deepest octree currently supported by every renderer and serializer.
+///
+/// A depth-eight tree has a 256-voxel padded axis. Raising this is an
+/// architectural change: generation cost, payload size, shader traversal
+/// bounds, and GPU texture limits all need to be reviewed together.
+pub const MAX_SUPPORTED_SVO_DEPTH: u32 = 8;
+
+/// Maximum number of dense X/Z voxel columns generated for one chunk.
+///
+/// The existing high-detail profile is 200 x 200 = 40,000 columns. Keeping
+/// the user override inside that measured budget prevents a seemingly small
+/// voxel-size change from allocating an unbounded dense scene before it is
+/// compressed into an SVO.
+pub const MAX_DENSE_CHUNK_COLUMNS: u64 = 40_000;
+
+/// Tallest authored interior in the current generator catalog. Two boundary
+/// layers are added below when estimating the dense grid allocation.
+const MAX_GENERATED_HEIGHT_WORLD_UNITS: f64 = 12.0;
+
+/// Maximum dense voxel samples allocated before SVO compression.
+///
+/// This admits the standard 10u profile at 0.05u resolution, including the
+/// tallest legacy atrium: 200 x 200 x 242 = 9,680,000 samples.
+pub const MAX_DENSE_CHUNK_VOXELS: u64 = 9_680_000;
+
+/// Why a requested scene voxel size cannot be used by a generator profile.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum VoxelSizeError {
+    NotFinite,
+    NotPositive,
+    /// The chunk edge must contain a whole number of voxels. Otherwise
+    /// independently generated neighbors disagree at their shared seam.
+    DoesNotTileChunk {
+        chunk_size: f32,
+        voxel_size: f32,
+    },
+    SvoDepthExceedsLimit {
+        required: u32,
+        maximum: u32,
+    },
+    DenseChunkBudgetExceeded {
+        required_columns: u64,
+        maximum_columns: u64,
+    },
+    DenseVoxelBudgetExceeded {
+        required_voxels: u64,
+        maximum_voxels: u64,
+    },
+}
+
+impl std::fmt::Display for VoxelSizeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotFinite => write!(f, "voxel size must be finite"),
+            Self::NotPositive => write!(f, "voxel size must be greater than zero"),
+            Self::DoesNotTileChunk {
+                chunk_size,
+                voxel_size,
+            } => write!(
+                f,
+                "voxel size {voxel_size} does not divide chunk size {chunk_size} into whole cells"
+            ),
+            Self::SvoDepthExceedsLimit { required, maximum } => write!(
+                f,
+                "voxel size requires SVO depth {required}, but the supported maximum is {maximum}"
+            ),
+            Self::DenseChunkBudgetExceeded {
+                required_columns,
+                maximum_columns,
+            } => write!(
+                f,
+                "voxel size requires {required_columns} dense chunk columns, above the {maximum_columns}-column budget"
+            ),
+            Self::DenseVoxelBudgetExceeded {
+                required_voxels,
+                maximum_voxels,
+            } => write!(
+                f,
+                "voxel size requires up to {required_voxels} dense voxels, above the {maximum_voxels}-voxel memory budget"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for VoxelSizeError {}
+
 /// User-tunable knobs for the level generators. All values are multipliers
 /// around the defaults (1.0); 0 disables the feature, ~2 saturates it.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -85,6 +171,71 @@ impl GeneratorConfig {
     pub fn with_anomalies(mut self, anomalies: AnomalyTuning) -> Self {
         self.anomalies = anomalies;
         self
+    }
+
+    /// Applies a user-selected scene voxel size after checking every
+    /// invariant relied upon by chunk generation and GPU traversal.
+    ///
+    /// The override must be finite, positive, tile this profile's chunk edge
+    /// with a whole number of cells, fit the renderer's SVO-depth limit, and
+    /// stay inside the dense pre-compression memory budget. Callers should
+    /// keep the original profile when this returns an error.
+    pub fn try_with_voxel_size(mut self, voxel_size: f32) -> Result<Self, VoxelSizeError> {
+        if !voxel_size.is_finite() {
+            return Err(VoxelSizeError::NotFinite);
+        }
+        if voxel_size <= 0.0 {
+            return Err(VoxelSizeError::NotPositive);
+        }
+
+        let ratio = f64::from(self.chunk_size) / f64::from(voxel_size);
+        let axis_voxels = ratio.round();
+        let reconstructed_chunk = axis_voxels * f64::from(voxel_size);
+        let seam_tolerance = f64::from(self.chunk_size).abs().mul_add(1.0e-6, 1.0e-6);
+        if axis_voxels < 1.0
+            || !ratio.is_finite()
+            || (reconstructed_chunk - f64::from(self.chunk_size)).abs() > seam_tolerance
+        {
+            return Err(VoxelSizeError::DoesNotTileChunk {
+                chunk_size: self.chunk_size,
+                voxel_size,
+            });
+        }
+
+        let axis_voxels = axis_voxels as u32;
+        let required_depth = axis_voxels
+            .checked_next_power_of_two()
+            .map(u32::trailing_zeros)
+            .unwrap_or(u32::BITS);
+        if required_depth > MAX_SUPPORTED_SVO_DEPTH {
+            return Err(VoxelSizeError::SvoDepthExceedsLimit {
+                required: required_depth,
+                maximum: MAX_SUPPORTED_SVO_DEPTH,
+            });
+        }
+
+        let required_columns = u64::from(axis_voxels) * u64::from(axis_voxels);
+        if required_columns > MAX_DENSE_CHUNK_COLUMNS {
+            return Err(VoxelSizeError::DenseChunkBudgetExceeded {
+                required_columns,
+                maximum_columns: MAX_DENSE_CHUNK_COLUMNS,
+            });
+        }
+
+        let height_voxels =
+            (MAX_GENERATED_HEIGHT_WORLD_UNITS / f64::from(voxel_size)).ceil() as u64 + 2;
+        let required_voxels = required_columns
+            .checked_mul(height_voxels)
+            .unwrap_or(u64::MAX);
+        if required_voxels > MAX_DENSE_CHUNK_VOXELS {
+            return Err(VoxelSizeError::DenseVoxelBudgetExceeded {
+                required_voxels,
+                maximum_voxels: MAX_DENSE_CHUNK_VOXELS,
+            });
+        }
+
+        self.voxel_scale = voxel_size;
+        Ok(self)
     }
 
     /// The same chunk at a coarser level of detail: voxels double per LOD
@@ -170,7 +321,12 @@ impl<'a> GenerateChunkArchitectureUseCase<'a> {
                 self.noise_provider,
                 reality,
             );
-            crate::domain::use_cases::calculate_lighting::calculate_voxel_lighting(&mut grid);
+            let lighting =
+                crate::use_cases::bake_voxel_lighting::VoxelLightingSettings::with_default_range(
+                    config.voxel_scale,
+                )
+                .expect("GeneratorConfig voxel_scale must be finite and greater than zero");
+            crate::use_cases::bake_voxel_lighting::bake_voxel_lighting(&mut grid, lighting);
             crate::domain::use_cases::path_tracer::bake_face_occlusion(&mut grid);
 
             let elapsed_micros = self.telemetry.now_micros().saturating_sub(start_micros);
@@ -198,7 +354,9 @@ impl<'a> GenerateChunkArchitectureUseCase<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::entities::voxel_grid::{VOXEL_FLOOR, VOXEL_RED_WALL, VOXEL_WALL};
+    use crate::domain::entities::voxel_grid::{
+        VOXEL_FLOOR, VOXEL_LIGHT, VOXEL_RED_WALL, VOXEL_WALL,
+    };
 
     struct MockNoiseProvider {
         value: f32,
@@ -213,6 +371,89 @@ mod tests {
     fn svo_depth_matches_legacy_values_for_both_specs() {
         assert_eq!(GeneratorConfig::low_spec().svo_depth(), 6);
         assert_eq!(GeneratorConfig::high_spec().svo_depth(), 8);
+    }
+
+    #[test]
+    fn voxel_size_override_accepts_supported_profile_resolutions() {
+        for voxel_size in [0.4, 0.2, 0.1, 0.05] {
+            let config = GeneratorConfig::low_spec()
+                .try_with_voxel_size(voxel_size)
+                .unwrap();
+            assert_eq!(config.voxel_scale, voxel_size);
+            assert!(config.svo_depth() <= MAX_SUPPORTED_SVO_DEPTH);
+        }
+
+        for voxel_size in [0.4, 0.2, 0.1] {
+            assert!(
+                GeneratorConfig::high_spec()
+                    .try_with_voxel_size(voxel_size)
+                    .is_ok()
+            );
+        }
+    }
+
+    #[test]
+    fn voxel_size_override_rejects_invalid_numbers_and_chunk_seams() {
+        let base = GeneratorConfig::low_spec();
+        assert_eq!(
+            base.try_with_voxel_size(f32::NAN).unwrap_err(),
+            VoxelSizeError::NotFinite
+        );
+        assert_eq!(
+            base.try_with_voxel_size(f32::INFINITY).unwrap_err(),
+            VoxelSizeError::NotFinite
+        );
+        assert_eq!(
+            base.try_with_voxel_size(0.0).unwrap_err(),
+            VoxelSizeError::NotPositive
+        );
+        assert!(matches!(
+            base.try_with_voxel_size(0.3),
+            Err(VoxelSizeError::DoesNotTileChunk { .. })
+        ));
+    }
+
+    #[test]
+    fn voxel_size_override_bounds_octree_depth_and_dense_memory() {
+        assert_eq!(
+            GeneratorConfig::high_spec()
+                .try_with_voxel_size(0.05)
+                .unwrap_err(),
+            VoxelSizeError::SvoDepthExceedsLimit {
+                required: 9,
+                maximum: MAX_SUPPORTED_SVO_DEPTH,
+            }
+        );
+
+        let oversized_dense_chunk = GeneratorConfig {
+            chunk_size: 201.0,
+            ..GeneratorConfig::low_spec()
+        };
+        assert_eq!(
+            oversized_dense_chunk.try_with_voxel_size(1.0).unwrap_err(),
+            VoxelSizeError::DenseChunkBudgetExceeded {
+                required_columns: 40_401,
+                maximum_columns: MAX_DENSE_CHUNK_COLUMNS,
+            }
+        );
+
+        let excessively_tall_resolution = GeneratorConfig {
+            chunk_size: 2.0,
+            ..GeneratorConfig::low_spec()
+        };
+        match excessively_tall_resolution
+            .try_with_voxel_size(0.01)
+            .unwrap_err()
+        {
+            VoxelSizeError::DenseVoxelBudgetExceeded {
+                required_voxels,
+                maximum_voxels,
+            } => {
+                assert!(required_voxels > MAX_DENSE_CHUNK_VOXELS);
+                assert_eq!(maximum_voxels, MAX_DENSE_CHUNK_VOXELS);
+            }
+            error => panic!("expected dense voxel budget error, got {error}"),
+        }
     }
 
     #[test]
@@ -286,7 +527,7 @@ mod tests {
     }
 
     #[test]
-    fn test_voxel_native_blueprint_walkable() {
+    fn starting_hub_keeps_light_fixtures_off_the_floor() {
         let noise = MockNoiseProvider { value: 0.0 };
         let generator = GenerateChunkArchitectureUseCase::new(&noise);
         let config = GeneratorConfig::high_spec().with_level(1);
@@ -295,6 +536,16 @@ mod tests {
         assert_eq!(grid.width(), 200);
         assert_eq!(grid.height(), 42);
         assert_eq!(grid.depth(), 200);
+        assert_eq!(grid.get(20, grid.height() - 1, 20), VOXEL_LIGHT);
+        for z in 0..grid.depth() {
+            for x in 0..grid.width() {
+                assert_ne!(
+                    grid.get(x, 0, z),
+                    VOXEL_LIGHT,
+                    "ceiling fixture was duplicated into the floor at ({x}, 0, {z})"
+                );
+            }
+        }
     }
 
     #[test]

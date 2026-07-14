@@ -3,6 +3,7 @@
 //! generation core).
 
 pub mod chunk_codec;
+pub mod collect_emissive_lights;
 pub mod cpu_splatter;
 pub mod face_instances;
 pub mod input;

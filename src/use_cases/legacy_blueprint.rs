@@ -263,14 +263,18 @@ pub(crate) fn generate_legacy_blueprint(
                     grid.set(x, 0, z, VOXEL_FLOOR);
                     grid.set(x, height - 1, z, VOXEL_CEILING);
 
-                    // Add some scattered lights to the ceiling and floor so it's bright
+                    // Scatter ceiling panels without replacing walkable floor material.
                     if x > 0 && z > 0 && x % 20 == 0 && z % 20 == 0 {
                         grid.set(x, height - 1, z, VOXEL_LIGHT);
-                        grid.set(x, 0, z, VOXEL_LIGHT);
                     }
                 }
             }
-            crate::domain::use_cases::calculate_lighting::calculate_voxel_lighting(&mut grid);
+            let lighting =
+                crate::use_cases::bake_voxel_lighting::VoxelLightingSettings::with_default_range(
+                    config.voxel_scale,
+                )
+                .expect("GeneratorConfig voxel_scale must be finite and greater than zero");
+            crate::use_cases::bake_voxel_lighting::bake_voxel_lighting(&mut grid, lighting);
             return grid;
         }
 
@@ -919,9 +923,14 @@ pub(crate) fn generate_legacy_blueprint(
         }
 
         // ==========================================
-        // LIGHTING PROPAGATION (BFS Flood fill only)
+        // PHYSICAL VOXEL LIGHTING BAKE
         // ==========================================
-        crate::domain::use_cases::calculate_lighting::calculate_voxel_lighting(&mut grid);
+        let lighting =
+            crate::use_cases::bake_voxel_lighting::VoxelLightingSettings::with_default_range(
+                config.voxel_scale,
+            )
+            .expect("GeneratorConfig voxel_scale must be finite and greater than zero");
+        crate::use_cases::bake_voxel_lighting::bake_voxel_lighting(&mut grid, lighting);
 
         // Bake directional face occlusion
         crate::domain::use_cases::path_tracer::bake_face_occlusion(&mut grid);

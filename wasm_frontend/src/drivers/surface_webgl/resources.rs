@@ -6,7 +6,7 @@
 use js_sys::{Uint8Array, Uint32Array};
 use web_sys::{WebGl2RenderingContext as Gl, WebGlBuffer, WebGlVertexArrayObject};
 
-use crate::application::ports::{LightSource, SurfaceChunk};
+use crate::application::ports::SurfaceChunk;
 use crate::drivers::gl::light_volume::upload_light_volume;
 
 use super::SurfaceRenderer;
@@ -21,8 +21,8 @@ pub(crate) struct GpuMesh {
     pub index_count: i32,
     pub origin: [f32; 3],
     pub bounds_max: [f32; 3],
+    pub voxel_size: f32,
     pub light_texture: web_sys::WebGlTexture,
-    pub lights: Vec<LightSource>,
 }
 
 impl SurfaceRenderer {
@@ -62,7 +62,11 @@ impl SurfaceRenderer {
 
         gl.bind_buffer(Gl::ELEMENT_ARRAY_BUFFER, Some(&index_buffer));
         let index_data = Uint32Array::from(chunk.mesh.indices.as_slice());
-        gl.buffer_data_with_array_buffer_view(Gl::ELEMENT_ARRAY_BUFFER, &index_data, Gl::STATIC_DRAW);
+        gl.buffer_data_with_array_buffer_view(
+            Gl::ELEMENT_ARRAY_BUFFER,
+            &index_data,
+            Gl::STATIC_DRAW,
+        );
 
         self.bind_attributes();
         gl.bind_vertex_array(None);
@@ -80,8 +84,8 @@ impl SurfaceRenderer {
                 index_count: chunk.mesh.indices.len().min(i32::MAX as usize) as i32,
                 origin: chunk.origin,
                 bounds_max: chunk.mesh.bounds.max,
+                voxel_size: chunk.mesh.voxel_scale,
                 light_texture,
-                lights: chunk.mesh.lights.clone(),
             },
         );
     }

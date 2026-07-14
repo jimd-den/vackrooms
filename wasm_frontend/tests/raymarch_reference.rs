@@ -43,6 +43,8 @@ fn build_atlas(chunks: &[LoadedChunk]) -> AtlasBuild {
             origin: [c.origin.0, 0.0, c.origin.1],
             root_index: (offset + c.payload.root as usize) as i32,
             world_size: c.payload.world_size,
+            voxel_size: c.payload.voxel_size,
+            svo_depth: c.payload.svo_depth,
         });
     }
     let texels = pool.full_texels(|k| {

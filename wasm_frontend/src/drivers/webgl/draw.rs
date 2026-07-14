@@ -9,7 +9,7 @@ use web_sys::WebGl2RenderingContext as Gl;
 use crate::application::atlas::MAX_CHUNKS;
 use crate::application::ports::{ChunkDraw, FrameParams, RendererPort};
 
-use super::{Uniforms, WebGl2Renderer, face_weights, fov_tan};
+use super::{Uniforms, WebGl2Renderer, fov_tan};
 
 /// Reused uniform arrays. Their capacity is fixed at construction so steady
 /// frame submission performs no heap allocations.
@@ -17,6 +17,8 @@ pub(super) struct ChunkUniformBuffers {
     origins: Vec<f32>,
     roots: Vec<i32>,
     sizes: Vec<f32>,
+    voxel_sizes: Vec<f32>,
+    depths: Vec<i32>,
 }
 
 impl ChunkUniformBuffers {
@@ -25,6 +27,8 @@ impl ChunkUniformBuffers {
             origins: Vec::with_capacity(chunks * 3),
             roots: Vec::with_capacity(chunks),
             sizes: Vec::with_capacity(chunks),
+            voxel_sizes: Vec::with_capacity(chunks),
+            depths: Vec::with_capacity(chunks),
         }
     }
 }
@@ -80,14 +84,6 @@ fn upload_camera(gl: &Gl, uniforms: &Uniforms, frame: &FrameParams, width: i32, 
     gl.uniform1f(uniforms.fov_tan.as_ref(), fov_tan());
 }
 
-fn upload_face_shading(gl: &Gl, uniforms: &Uniforms) {
-    let (top, bottom, x, z) = face_weights();
-    gl.uniform1f(uniforms.face_weight_top.as_ref(), top);
-    gl.uniform1f(uniforms.face_weight_bottom.as_ref(), bottom);
-    gl.uniform1f(uniforms.face_weight_x.as_ref(), x);
-    gl.uniform1f(uniforms.face_weight_z.as_ref(), z);
-}
-
 fn upload_environment(gl: &Gl, uniforms: &Uniforms, frame: &FrameParams) {
     let environment = frame.environment;
     gl.uniform1i(
@@ -97,6 +93,30 @@ fn upload_environment(gl: &Gl, uniforms: &Uniforms, frame: &FrameParams) {
     gl.uniform3fv_with_f32_array(uniforms.sky_color.as_ref(), &environment.sky_color);
     gl.uniform3fv_with_f32_array(uniforms.fog_color.as_ref(), &environment.fog_color);
     gl.uniform1f(uniforms.ambient_scale.as_ref(), environment.ambient_scale);
+    gl.uniform1f(uniforms.fog_density.as_ref(), environment.fog_density);
+    gl.uniform1f(uniforms.fog_start.as_ref(), environment.fog_start);
+}
+
+fn upload_scene_lights(gl: &Gl, uniforms: &Uniforms, frame: &FrameParams) {
+    let lights = frame.active_scene_lights();
+    let mut positions = [0.0f32; 24];
+    let mut colors = [0.0f32; 24];
+    let mut params = [0.0f32; 32];
+    let mut kinds = [0i32; 8];
+    for (index, light) in lights.iter().enumerate() {
+        positions[index * 3..index * 3 + 3].copy_from_slice(&light.position);
+        colors[index * 3..index * 3 + 3].copy_from_slice(&light.color);
+        params[index * 4] = light.radius;
+        params[index * 4 + 1] = light.intensity;
+        params[index * 4 + 2] = light.half_size[0];
+        params[index * 4 + 3] = light.half_size[1];
+        kinds[index] = light.kind as i32;
+    }
+    gl.uniform1i(uniforms.light_count.as_ref(), lights.len() as i32);
+    gl.uniform3fv_with_f32_array(uniforms.light_positions.as_ref(), &positions);
+    gl.uniform3fv_with_f32_array(uniforms.light_colors.as_ref(), &colors);
+    gl.uniform4fv_with_f32_array(uniforms.light_params.as_ref(), &params);
+    gl.uniform1iv_with_i32_array(uniforms.light_kinds.as_ref(), &kinds);
 }
 
 fn upload_dynamic_lights(gl: &Gl, uniforms: &Uniforms, frame: &FrameParams) {
@@ -130,14 +150,20 @@ fn upload_chunks(
     buffers.origins.clear();
     buffers.roots.clear();
     buffers.sizes.clear();
+    buffers.voxel_sizes.clear();
+    buffers.depths.clear();
     for chunk in chunks {
         buffers.origins.extend_from_slice(&chunk.origin);
         buffers.roots.push(chunk.root_index);
         buffers.sizes.push(chunk.world_size);
+        buffers.voxel_sizes.push(chunk.voxel_size);
+        buffers.depths.push(chunk.svo_depth as i32);
     }
     gl.uniform3fv_with_f32_array(uniforms.chunk_origins.as_ref(), &buffers.origins);
     gl.uniform1iv_with_i32_array(uniforms.chunk_root_indices.as_ref(), &buffers.roots);
     gl.uniform1fv_with_f32_array(uniforms.chunk_world_sizes.as_ref(), &buffers.sizes);
+    gl.uniform1fv_with_f32_array(uniforms.chunk_voxel_sizes.as_ref(), &buffers.voxel_sizes);
+    gl.uniform1iv_with_i32_array(uniforms.chunk_depths.as_ref(), &buffers.depths);
 }
 
 impl RendererPort for WebGl2Renderer {
@@ -163,7 +189,6 @@ impl RendererPort for WebGl2Renderer {
             clear_target(gl, frame, self.width, self.height);
             gl.use_program(Some(&self.program));
             upload_camera(gl, &self.uniforms, frame, self.width, self.height);
-            upload_face_shading(gl, &self.uniforms);
             gl.uniform1i(
                 self.uniforms.flashlight.as_ref(),
                 if frame.flashlight { 1 } else { 0 },
@@ -172,12 +197,21 @@ impl RendererPort for WebGl2Renderer {
                 self.uniforms.front_to_back.as_ref(),
                 if toggles.front_to_back { 1 } else { 0 },
             );
+            gl.uniform1i(
+                self.uniforms.empty_space_skip.as_ref(),
+                if toggles.empty_space_skip { 1 } else { 0 },
+            );
+            gl.uniform1i(
+                self.uniforms.baked_lighting.as_ref(),
+                if toggles.baked_lighting { 1 } else { 0 },
+            );
             // OPTIMIZATION (rt_dither): optional noise hides color banding.
             gl.uniform1i(
                 self.uniforms.dither.as_ref(),
                 if toggles.dither { 1 } else { 0 },
             );
             upload_environment(gl, &self.uniforms, frame);
+            upload_scene_lights(gl, &self.uniforms, frame);
             upload_dynamic_lights(gl, &self.uniforms, frame);
             upload_chunks(gl, &self.uniforms, &mut self.chunk_uniforms, chunks);
 

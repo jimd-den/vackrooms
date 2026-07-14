@@ -14,7 +14,7 @@
 use crate::application::ports::{FrameParams, LightSource};
 
 /// Maximum shader light slots (matches the GLSL uniform arrays).
-pub const MAX_SHADER_LIGHTS: usize = 4;
+pub const MAX_SHADER_LIGHTS: usize = crate::application::ports::MAX_SCENE_LIGHTS;
 
 /// The frame's selected lights, packed for `uniform[1i|3fv|4fv]` upload.
 pub struct SelectedLights {
@@ -23,6 +23,7 @@ pub struct SelectedLights {
     pub colors: [f32; MAX_SHADER_LIGHTS * 3],
     /// Per light: radius, intensity, half_size.x, half_size.y.
     pub params: [f32; MAX_SHADER_LIGHTS * 4],
+    pub kinds: [i32; MAX_SHADER_LIGHTS],
     /// Slot index of the shadow-casting hero light, or -1.
     pub hero_slot: i32,
     /// Hero light's position/radius (meaningful when `hero_slot >= 0`).
@@ -44,6 +45,7 @@ pub fn dynamic_light_sources(frame: &FrameParams) -> Vec<LightSource> {
             color: d.color,
             radius: d.radius,
             intensity: d.intensity,
+            kind: crate::application::ports::LightKind::Point,
             flicker_mode: 0,
             enabled: true,
         })
@@ -80,6 +82,7 @@ pub fn select_lights<'a>(
         positions: [0.0; MAX_SHADER_LIGHTS * 3],
         colors: [0.0; MAX_SHADER_LIGHTS * 3],
         params: [0.0; MAX_SHADER_LIGHTS * 4],
+        kinds: [0; MAX_SHADER_LIGHTS],
         hero_slot: -1,
         hero_position: [0.0; 3],
         hero_radius: 0.0,
@@ -91,6 +94,7 @@ pub fn select_lights<'a>(
         selected.params[i * 4 + 1] = light.intensity;
         selected.params[i * 4 + 2] = light.half_size[0];
         selected.params[i * 4 + 3] = light.half_size[1];
+        selected.kinds[i] = light.kind as i32;
     }
 
     // Hero shadow: the strongest *fixture* light in the selected slots.

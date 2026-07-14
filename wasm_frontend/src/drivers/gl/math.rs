@@ -61,7 +61,14 @@ pub fn camera_matrices(
     (projection, view)
 }
 
-pub fn ortho_matrix(left: f32, right: f32, bottom: f32, top: f32, near: f32, far: f32) -> [f32; 16] {
+pub fn ortho_matrix(
+    left: f32,
+    right: f32,
+    bottom: f32,
+    top: f32,
+    near: f32,
+    far: f32,
+) -> [f32; 16] {
     let mut m = [0.0; 16];
     m[0] = 2.0 / (right - left);
     m[5] = 2.0 / (top - bottom);

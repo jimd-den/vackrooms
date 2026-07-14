@@ -288,6 +288,8 @@ mod tests {
                 origin: [-receiver_size * 0.5, 1.0 - receiver_size * 0.5, 5.0],
                 root_index: 0,
                 world_size: receiver_size,
+                voxel_size: receiver_size,
+                svo_depth: 0,
             }];
             contributions.push(beam_contribution(
                 &cam,
@@ -319,6 +321,8 @@ mod tests {
             origin: [-0.25, 0.7, 3.0],
             root_index: 0,
             world_size: 0.5,
+            voxel_size: 0.5,
+            svo_depth: 0,
         }];
         let contribution = beam_contribution(
             &cam,
@@ -341,6 +345,8 @@ mod tests {
             origin: [0.5, 0.0, 4.0],
             root_index: 0,
             world_size: 2.0,
+            voxel_size: 2.0,
+            svo_depth: 0,
         }];
         let contribution = beam_contribution(
             &cam,
@@ -366,6 +372,8 @@ mod tests {
             origin: [2.0, -1.0, 6.0],
             root_index: 0,
             world_size: 4.0,
+            voxel_size: 4.0,
+            svo_depth: 0,
         }];
         let receiver = BeamReceiver::cube([4.0, 1.0, 8.0], 4.0, [-0.45, 0.0, -0.89]);
 

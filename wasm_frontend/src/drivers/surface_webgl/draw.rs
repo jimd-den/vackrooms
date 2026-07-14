@@ -12,8 +12,6 @@
 //! Each optional branch is labeled with its `rt_*` switch. Disabling an
 //! optimization keeps the same pipeline and selects its reference path.
 
-use std::collections::HashMap;
-
 use web_sys::WebGl2RenderingContext as Gl;
 
 use crate::application::ports::{
@@ -97,10 +95,20 @@ fn render_frame(renderer: &SurfaceRenderer, frame: &FrameParams, toggles: Render
 
     let resident: Vec<&GpuMesh> = renderer.meshes.values().collect();
     let visible = collect_visible_meshes(&resident, frame, toggles.distance_cull);
-    let lights = select_frame_lights(&resident, frame);
+    // OPTIMIZATION (rt_bake): the bake replaces static analytic fixtures; it
+    // is never added on top of them. Runtime flares stay analytic in both
+    // paths. This prevents the former direct-light double count.
+    let lights = select_frame_lights(frame, !toggles.baked_lighting);
     let shadow = render_shadow_pass(renderer, &resident, &lights, toggles.shadow_pass);
 
-    bind_frame_uniforms(renderer, frame, &lights, &shadow, toggles.dither);
+    bind_frame_uniforms(
+        renderer,
+        frame,
+        &lights,
+        &shadow,
+        toggles.dither,
+        toggles.baked_lighting,
+    );
     draw_visible_meshes(renderer, &visible);
 }
 
@@ -151,20 +159,16 @@ fn collect_visible_meshes<'a>(
         .collect()
 }
 
-/// Deduplicates fixtures shared by neighboring chunks, adds frame-local
-/// dynamic lights, and packs the shader's four most important slots.
-fn select_frame_lights(visible: &[&GpuMesh], frame: &FrameParams) -> SelectedLights {
-    let mut fixtures = HashMap::new();
-    for mesh in visible {
-        for light in &mesh.lights {
-            if light.enabled {
-                fixtures.insert(light.id, light);
-            }
-        }
-    }
-
+/// Selects analytic fixtures when the reference path needs them and always
+/// adds frame-local dynamic lights.
+fn select_frame_lights(frame: &FrameParams, include_static_fixtures: bool) -> SelectedLights {
     let dynamic = dynamic_light_sources(frame);
-    select_lights(fixtures.values().copied(), &dynamic, frame)
+    let fixtures = if include_static_fixtures {
+        frame.active_scene_lights()
+    } else {
+        &[]
+    };
+    select_lights(fixtures.iter(), &dynamic, frame)
 }
 
 /// FEATURE (rt_shadows): renders every resident greedy mesh into the selected
@@ -237,6 +241,7 @@ fn bind_frame_uniforms(
     lights: &SelectedLights,
     shadow: &ShadowState,
     dither_enabled: bool,
+    baked_lighting_enabled: bool,
 ) {
     let gl = &renderer.gl;
     let uniforms = &renderer.uniforms;
@@ -260,6 +265,10 @@ fn bind_frame_uniforms(
         if frame.flashlight { 1 } else { 0 },
     );
     gl.uniform1i(uniforms.dither.as_ref(), if dither_enabled { 1 } else { 0 });
+    gl.uniform1i(
+        uniforms.baked_lighting.as_ref(),
+        if baked_lighting_enabled { 1 } else { 0 },
+    );
 
     let environment = frame.environment;
     gl.uniform1i(
@@ -273,6 +282,8 @@ fn bind_frame_uniforms(
         environment.fog_color[2],
     );
     gl.uniform1f(uniforms.ambient_scale.as_ref(), environment.ambient_scale);
+    gl.uniform1f(uniforms.fog_density.as_ref(), environment.fog_density);
+    gl.uniform1f(uniforms.fog_start.as_ref(), environment.fog_start);
 
     bind_light_uniforms(renderer, frame, lights, shadow);
 }
@@ -296,6 +307,7 @@ fn bind_light_uniforms(
         gl.uniform3fv_with_f32_array(uniforms.light_positions.as_ref(), &lights.positions);
         gl.uniform3fv_with_f32_array(uniforms.light_colors.as_ref(), &lights.colors);
         gl.uniform4fv_with_f32_array(uniforms.light_params.as_ref(), &lights.params);
+        gl.uniform1iv_with_i32_array(uniforms.light_kinds.as_ref(), &lights.kinds);
     }
 
     // Flare cores are independent from the selected shading-light slots, so
@@ -336,12 +348,7 @@ fn draw_mesh(renderer: &SurfaceRenderer, mesh: &GpuMesh) {
         mesh.origin[1],
         mesh.origin[2],
     );
-    gl.uniform3f(
-        uniforms.chunk_size.as_ref(),
-        mesh.bounds_max[0],
-        mesh.bounds_max[1],
-        mesh.bounds_max[2],
-    );
+    gl.uniform1f(uniforms.voxel_size.as_ref(), mesh.voxel_size);
     gl.active_texture(Gl::TEXTURE0);
     gl.bind_texture(Gl::TEXTURE_3D, Some(&mesh.light_texture));
     gl.uniform1i(uniforms.light_volume.as_ref(), 0);

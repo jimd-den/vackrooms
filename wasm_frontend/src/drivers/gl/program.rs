@@ -15,16 +15,17 @@ pub struct ContextOptions {
 
 /// Creates a WebGL2 context with the engine's standard attributes
 /// (no antialiasing, opaque, high-performance GPU preference).
-pub fn create_context(
-    canvas: &HtmlCanvasElement,
-    options: ContextOptions,
-) -> Result<Gl, JsValue> {
+pub fn create_context(canvas: &HtmlCanvasElement, options: ContextOptions) -> Result<Gl, JsValue> {
     let attrs = js_sys::Object::new();
     Reflect::set(&attrs, &"antialias".into(), &false.into())?;
     Reflect::set(&attrs, &"depth".into(), &options.depth.into())?;
     Reflect::set(&attrs, &"stencil".into(), &false.into())?;
     Reflect::set(&attrs, &"alpha".into(), &false.into())?;
-    Reflect::set(&attrs, &"powerPreference".into(), &"high-performance".into())?;
+    Reflect::set(
+        &attrs,
+        &"powerPreference".into(),
+        &"high-performance".into(),
+    )?;
     canvas
         .get_context_with_context_options("webgl2", &attrs)?
         .ok_or_else(|| JsValue::from_str("WebGL2 is not supported on this browser"))?

@@ -39,12 +39,14 @@ pub(crate) struct Uniforms {
     pub cam_forward: Option<WebGlUniformLocation>,
     pub flashlight: Option<WebGlUniformLocation>,
     pub dither: Option<WebGlUniformLocation>,
+    pub baked_lighting: Option<WebGlUniformLocation>,
     pub light_volume: Option<WebGlUniformLocation>,
-    pub chunk_size: Option<WebGlUniformLocation>,
+    pub voxel_size: Option<WebGlUniformLocation>,
     pub light_count: Option<WebGlUniformLocation>,
     pub light_positions: Option<WebGlUniformLocation>,
     pub light_colors: Option<WebGlUniformLocation>,
     pub light_params: Option<WebGlUniformLocation>,
+    pub light_kinds: Option<WebGlUniformLocation>,
     pub core_count: Option<WebGlUniformLocation>,
     pub cores: Option<WebGlUniformLocation>,
     pub core_colors: Option<WebGlUniformLocation>,
@@ -54,6 +56,8 @@ pub(crate) struct Uniforms {
     pub outdoor: Option<WebGlUniformLocation>,
     pub fog_color: Option<WebGlUniformLocation>,
     pub ambient_scale: Option<WebGlUniformLocation>,
+    pub fog_density: Option<WebGlUniformLocation>,
+    pub fog_start: Option<WebGlUniformLocation>,
 }
 
 pub(crate) struct ShadowUniforms {
@@ -89,12 +93,14 @@ impl SurfaceRenderer {
             cam_forward: gl.get_uniform_location(&program, "uCamForward"),
             flashlight: gl.get_uniform_location(&program, "uFlashlightEnabled"),
             dither: gl.get_uniform_location(&program, "uDitherEnabled"),
+            baked_lighting: gl.get_uniform_location(&program, "uBakedLightingEnabled"),
             light_volume: gl.get_uniform_location(&program, "uLightVolume"),
-            chunk_size: gl.get_uniform_location(&program, "uChunkSize"),
+            voxel_size: gl.get_uniform_location(&program, "uVoxelSize"),
             light_count: gl.get_uniform_location(&program, "uLightCount"),
             light_positions: gl.get_uniform_location(&program, "uLightPositions"),
             light_colors: gl.get_uniform_location(&program, "uLightColors"),
             light_params: gl.get_uniform_location(&program, "uLightParams"),
+            light_kinds: gl.get_uniform_location(&program, "uLightKinds"),
             core_count: gl.get_uniform_location(&program, "uCoreCount"),
             cores: gl.get_uniform_location(&program, "uCores"),
             core_colors: gl.get_uniform_location(&program, "uCoreColors"),
@@ -104,6 +110,8 @@ impl SurfaceRenderer {
             outdoor: gl.get_uniform_location(&program, "uOutdoor"),
             fog_color: gl.get_uniform_location(&program, "uFogColor"),
             ambient_scale: gl.get_uniform_location(&program, "uAmbientScale"),
+            fog_density: gl.get_uniform_location(&program, "uFogDensity"),
+            fog_start: gl.get_uniform_location(&program, "uFogStart"),
         };
         let timer = GpuFrameTimer::new(&gl);
 

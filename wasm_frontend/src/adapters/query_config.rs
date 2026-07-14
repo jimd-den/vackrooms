@@ -1,12 +1,14 @@
 //! URL query → generation settings. Lets players share worlds by URL:
 //!
-//! `?seed=1234&pillars=0.5&walls=1.2&anomalies=0.8&remap_intensity=1.2`
+//! `?seed=1234&voxel_size=0.1&pillars=0.5&walls=1.2&anomalies=0.8`
 //!
 //! * `seed`    — world seed (u32; any text is hashed so words work too).
 //! * `pillars` — structural column density multiplier (0 = none).
 //! * `walls`   — office wall density multiplier (0 = open plan).
 //! * `atria`   — how much of the world vaults into tall atria.
 //! * `lights`  — ceiling light panel density.
+//! * `voxel_size` — optional scene resolution in world units. The selected
+//!   profile remains in force when the value violates generator limits.
 //! * `anomalies`, `anomaly_size` and the per-family knobs control Level 0
 //!   phenomena without changing ordinary fabric density.
 //! * `remap_intensity`, `remap_distance` and `anomaly_safe_radius` control
@@ -23,6 +25,7 @@ use vackrooms::use_cases::generate_chunk::{AnomalyTuning, GeneratorConfig, Level
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct GenerationParams {
     pub seed: u32,
+    pub voxel_size: Option<f32>,
     pub tuning: LevelTuning,
     pub anomalies: AnomalyTuning,
 }
@@ -32,6 +35,7 @@ pub struct GenerationParams {
 pub fn parse_generation_params(query: &str, default_seed: u32) -> GenerationParams {
     let mut params = GenerationParams {
         seed: default_seed,
+        voxel_size: None,
         tuning: LevelTuning::default(),
         anomalies: AnomalyTuning::default(),
     };
@@ -57,6 +61,9 @@ pub fn parse_generation_params(query: &str, default_seed: u32) -> GenerationPara
         match key {
             "seed" => {
                 params.seed = value.parse::<u32>().unwrap_or_else(|_| hash_seed(value));
+            }
+            "voxel_size" => {
+                params.voxel_size = value.parse::<f32>().ok().filter(|v| v.is_finite());
             }
             "pillars" => knob(&mut params.tuning.pillars),
             "walls" => knob(&mut params.tuning.walls),
@@ -108,11 +115,14 @@ pub fn generator_setup_from_query(query: &str, default_seed: u32) -> (u32, Gener
     } else {
         GeneratorConfig::low_spec()
     };
-    (
-        params.seed,
-        base.with_tuning(params.tuning)
-            .with_anomalies(params.anomalies),
-    )
+    let configured = base
+        .with_tuning(params.tuning)
+        .with_anomalies(params.anomalies);
+    let configured = params
+        .voxel_size
+        .and_then(|voxel_size| configured.try_with_voxel_size(voxel_size).ok())
+        .unwrap_or(configured);
+    (params.seed, configured)
 }
 
 /// Non-numeric seeds ("?seed=kitten") hash to a stable u32 (FNV-1a).
@@ -133,14 +143,19 @@ mod tests {
     fn defaults_when_query_is_empty() {
         let p = parse_generation_params("", 42);
         assert_eq!(p.seed, 42);
+        assert_eq!(p.voxel_size, None);
         assert_eq!(p.tuning, LevelTuning::default());
         assert_eq!(p.anomalies, AnomalyTuning::default());
     }
 
     #[test]
     fn parses_seed_and_knobs() {
-        let p = parse_generation_params("?seed=7&pillars=0.5&walls=2&atria=0&lights=1.5", 42);
+        let p = parse_generation_params(
+            "?seed=7&voxel_size=0.1&pillars=0.5&walls=2&atria=0&lights=1.5",
+            42,
+        );
         assert_eq!(p.seed, 7);
+        assert_eq!(p.voxel_size, Some(0.1));
         assert_eq!(p.tuning.pillars, 0.5);
         assert_eq!(p.tuning.walls, 2.0);
         assert_eq!(p.tuning.atria, 0.0);
@@ -157,9 +172,40 @@ mod tests {
 
     #[test]
     fn junk_values_are_ignored_and_clamped() {
-        let p = parse_generation_params("?pillars=banana&walls=99&renderer=cpu&spec=high", 42);
+        let p = parse_generation_params(
+            "?pillars=banana&walls=99&voxel_size=banana&renderer=cpu&spec=high",
+            42,
+        );
         assert_eq!(p.tuning.pillars, 1.0);
         assert_eq!(p.tuning.walls, 4.0);
+        assert_eq!(p.voxel_size, None);
+    }
+
+    #[test]
+    fn generator_setup_applies_a_valid_voxel_override_to_both_profiles() {
+        let (_, low) = generator_setup_from_query("?voxel_size=0.1", 42);
+        let (_, high) = generator_setup_from_query("?spec=high&voxel_size=0.2", 42);
+        assert_eq!(low.voxel_scale, 0.1);
+        assert_eq!(high.voxel_scale, 0.2);
+    }
+
+    #[test]
+    fn generator_setup_keeps_profile_default_for_unsupported_voxel_size() {
+        let (_, non_tiling) = generator_setup_from_query("?voxel_size=0.3", 42);
+        let (_, over_budget) = generator_setup_from_query("?spec=high&voxel_size=0.05", 42);
+        let (_, non_positive) = generator_setup_from_query("?voxel_size=-0.1", 42);
+        assert_eq!(
+            non_tiling.voxel_scale,
+            GeneratorConfig::low_spec().voxel_scale
+        );
+        assert_eq!(
+            over_budget.voxel_scale,
+            GeneratorConfig::high_spec().voxel_scale
+        );
+        assert_eq!(
+            non_positive.voxel_scale,
+            GeneratorConfig::low_spec().voxel_scale
+        );
     }
 
     #[test]

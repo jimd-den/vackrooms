@@ -11,7 +11,7 @@
 //! * **Determinism** — same (chunk_pos, seed, config) must always produce the
 //!   same grid; only the injected [`NoiseProvider`] may be used for variety.
 //! * Lighting is NOT the generator's job: place `VOXEL_LIGHT` sources and the
-//!   orchestrating use case runs the BFS lighting pass afterwards.
+//!   orchestrating use case runs the exposed-face lighting bake afterwards.
 
 use crate::domain::entities::anomaly::RealitySnapshot;
 use crate::domain::entities::voxel_grid::VoxelGrid;

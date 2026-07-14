@@ -654,7 +654,8 @@ pub fn generate_region_plan(
     // stay graph reservations until the engine streams below elevation 0.
     // Placed after corruption so no pass can duplicate, abandon, or redden
     // a stair core.
-    if let Some(link) = crate::use_cases::world_topology::vertical_link_for_region(seed, noise, rx, rz)
+    if let Some(link) =
+        crate::use_cases::world_topology::vertical_link_for_region(seed, noise, rx, rz)
         && crate::use_cases::vertical_circulation::link_wants_geometry(&link)
         && let Some(stair) = crate::use_cases::vertical_circulation::place_stairwell(
             id + 2000,
@@ -1119,7 +1120,10 @@ mod tests {
                 }
             }
         }
-        assert!(!realized.is_empty(), "no red-room event realized in 289 regions");
+        assert!(
+            !realized.is_empty(),
+            "no red-room event realized in 289 regions"
+        );
         for (i, a) in realized.iter().enumerate() {
             for b in realized.iter().skip(i + 1) {
                 let chebyshev = (a.0 - b.0).abs().max((a.1 - b.1).abs());
@@ -1157,9 +1161,8 @@ mod tests {
                             assert!(!stair.entrances.is_empty(), "stair core has no entrance");
                             let b = stair.footprint.bounds();
                             let (cx, cz) = ((b.0 + b.2) * 0.5, (b.1 + b.3) * 0.5);
-                            let d = ((cx - link.anchor.x).powi(2)
-                                + (cz - link.anchor.z).powi(2))
-                            .sqrt();
+                            let d = ((cx - link.anchor.x).powi(2) + (cz - link.anchor.z).powi(2))
+                                .sqrt();
                             assert!(
                                 d < REGION_SIZE,
                                 "stair strayed {d} u from its reservation anchor"
