@@ -10,8 +10,9 @@ use crate::use_cases::anomalies::geometry::sample_anomaly;
 use crate::use_cases::generate_chunk::GeneratorConfig;
 use crate::use_cases::ports::NoiseProvider;
 use crate::use_cases::red_rooms::geometry::sample_red_room;
-use crate::use_cases::region_plan::{PLAN_WALL_T, region_index};
+use crate::use_cases::region_plan::{PLAN_WALL_T, region_index, spawn_point};
 
+use super::circulation_sampler::SPAWN_READABLE_RADIUS;
 use super::{BackroomsLevel, ColumnPlan};
 
 #[cfg(test)]
@@ -177,6 +178,20 @@ impl BackroomsLevel {
         }
 
         // -- the endless unplanned office fabric -------------------------------
-        Self::column_plan(noise, seed, tuning, wx, wz)
+        // Ordinary fabric is the Peripheral Shift's territory — with two
+        // sanctuaries. Arch-anchor surroundings are immune by construction
+        // (the same guarantee their hostile-family freeze gives above), and
+        // the spawn opening sequence never rearranges: the first hallways a
+        // wanderer learns are the last ones the level may take away.
+        let sp = spawn_point(seed);
+        let near_spawn = (wx - sp.x) * (wx - sp.x) + (wz - sp.z) * (wz - sp.z)
+            < SPAWN_READABLE_RADIUS * SPAWN_READABLE_RADIUS;
+        let still_fabric = RealitySnapshot::empty();
+        let fabric_reality = if near_anchor || near_spawn {
+            &still_fabric
+        } else {
+            reality
+        };
+        Self::column_plan_in_reality(noise, seed, tuning, fabric_reality, wx, wz)
     }
 }

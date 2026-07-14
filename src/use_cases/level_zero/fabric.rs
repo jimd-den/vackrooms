@@ -4,6 +4,7 @@
 //! porosity-driven wall dropout so no grid is ever readable. Open expanses
 //! and vaults punctuate it; they are never the default.
 
+use crate::domain::entities::anomaly::RealitySnapshot;
 use crate::entities::models::Position;
 use crate::domain::entities::voxel_grid::{VOXEL_FLOOR, VOXEL_LIGHT, VOXEL_WALL};
 use crate::use_cases::generate_chunk::LevelTuning;
@@ -113,12 +114,38 @@ impl BackroomsLevel {
         )
     }
 
-    /// The *fabric* column plan at world position (wx, wz): the endless,
-    /// unplanned office fill between planned corridors and assemblies.
+    /// The fabric plan as it was first observed — Peripheral Shift epoch 0
+    /// everywhere. Kept for callers that deliberately freeze the fabric.
+    #[cfg(test)]
     pub(crate) fn column_plan(
         noise: &dyn NoiseProvider,
         seed: u32,
         tuning: &LevelTuning,
+        wx: f32,
+        wz: f32,
+    ) -> ColumnPlan {
+        Self::column_plan_in_reality(noise, seed, tuning, &RealitySnapshot::empty(), wx, wz)
+    }
+
+    /// The *fabric* column plan at world position (wx, wz): the endless,
+    /// unplanned office fill between planned corridors and assemblies.
+    ///
+    /// This is where the wiki's Peripheral Shift lives: `reality` carries a
+    /// drift epoch per 40 u cell, advanced by the engine whenever territory
+    /// goes unobserved. The epoch re-salts only the *cosmetic and porosity*
+    /// decisions — wall dropout, doorway direction/position/width framing,
+    /// dead lights — while the ceiling territories, porosity climate,
+    /// junction posts, and expanse structure stay fixed, so a returning
+    /// wanderer recognizes the neighborhood but never the hallways. Every
+    /// decision reads its epoch at the deciding lattice cell's own anchor,
+    /// so a wall is rebuilt whole even when a drift-cell boundary crosses it,
+    /// and the binary-tree doorway rule holds per cell at any epoch mix —
+    /// the labyrinth stays globally connected through every rearrangement.
+    pub(crate) fn column_plan_in_reality(
+        noise: &dyn NoiseProvider,
+        seed: u32,
+        tuning: &LevelTuning,
+        reality: &RealitySnapshot,
         wx: f32,
         wz: f32,
     ) -> ColumnPlan {
@@ -172,15 +199,25 @@ impl BackroomsLevel {
             } else if in_w || in_n {
                 let cx = (wx / FABRIC_CELL).floor() as i64;
                 let cz = (wz / FABRIC_CELL).floor() as i64;
+                // The whole fabric cell rearranges as one: its epoch is read
+                // at the cell's own center, never at the sampled column.
+                let epoch = reality.fabric_drift_epoch(
+                    (cx as f32 + 0.5) * FABRIC_CELL,
+                    (cz as f32 + 0.5) * FABRIC_CELL,
+                );
+                let drift = |salt: u32| salt ^ epoch.wrapping_mul(0x9E37_79B9);
                 // 0 = tight labyrinth, 1 = broken-open suites; drifts over
                 // ~180 u so density changes read as neighborhoods, not zones.
+                // The porosity climate is character, not layout: it survives
+                // every Peripheral Shift, so a broken-open neighborhood
+                // rearranges into another broken-open neighborhood.
                 let porosity =
                     (Self::n(noise, seed, 0x9010, wx, wz, 0.11) * 0.5 + 0.5).clamp(0.0, 1.0);
-                let opens_west = Self::cell_hash(noise, seed, 0x9200, cx, cz) < 0.5;
+                let opens_west = Self::cell_hash(noise, seed, drift(0x9200), cx, cz) < 0.5;
                 let (wall_salt, door_salt, opens_here) = if in_w {
-                    (0x9300u32, 0x9500u32, opens_west)
+                    (drift(0x9300u32), drift(0x9500u32), opens_west)
                 } else {
-                    (0x9400u32, 0x9600u32, !opens_west)
+                    (drift(0x9400u32), drift(0x9600u32), !opens_west)
                 };
                 // Whole-wall dropout merges rooms into larger wrong shapes.
                 // Porosity varies along a run, so drops end ragged rather
@@ -225,7 +262,15 @@ impl BackroomsLevel {
             let cell_x = (wx / panel_period).floor() as i64;
             let cell_z = (wz / panel_period).floor() as i64;
             let keep = if expanse { 0.66 } else { 0.78 } * tuning.lights;
-            let alive = Self::cell_hash(noise, seed, 0xE900, cell_x, cell_z) < keep;
+            // Which panels burned out is cosmetic memory, so the Peripheral
+            // Shift re-deals it: the light that guided you out may be dead
+            // when you walk back in.
+            let epoch = reality.fabric_drift_epoch(
+                (cell_x as f32 + 0.5) * panel_period,
+                (cell_z as f32 + 0.5) * panel_period,
+            );
+            let salt = 0xE900 ^ epoch.wrapping_mul(0x9E37_79B9);
+            let alive = Self::cell_hash(noise, seed, salt, cell_x, cell_z) < keep;
             lx < 0.45 && lz < 0.45 && alive
         } else {
             false

@@ -1299,6 +1299,204 @@ fn blackout_cues_are_glimmers_and_floors_pool_fluid() {
     assert!(fluid_seen, "no recessed fluid basin in the blackout core");
 }
 
+/// A reality in which every fabric drift cell of a world window has
+/// rearranged, with epochs deliberately mixed so cell boundaries between
+/// different epochs are exercised.
+fn drifted_reality(min_cell: i64, max_cell: i64) -> RealitySnapshot {
+    let mut reality = RealitySnapshot::empty();
+    for cz in min_cell..=max_cell {
+        for cx in min_cell..=max_cell {
+            for _ in 0..=((cx + cz).rem_euclid(3) as u32) {
+                reality = reality.with_fabric_drift_advanced(cx, cz);
+            }
+        }
+    }
+    reality
+}
+
+/// The Peripheral Shift: after territory drifts, ordinary fabric has
+/// genuinely rearranged — but every planned system (corridors, assemblies
+/// and their thresholds, the spawn opening sequence) is byte-identical.
+/// "Days of traveled hallways" never replay; the navigation skeleton does.
+#[test]
+fn peripheral_shift_rearranges_fabric_but_never_the_plan() {
+    let noise = SimpleNoiseProvider::new();
+    let config = GeneratorConfig::low_spec();
+    let plans =
+        BackroomsLevel::region_plans_for(Position::new(0.0, 0.0), REGION_SIZE, 42, &config, &noise);
+    let plan_for = |wx: f32, wz: f32| {
+        &plans
+            .iter()
+            .find(|(k, _)| *k == (region_index(wx), region_index(wz)))
+            .unwrap()
+            .1
+    };
+    // Drift cells 0..=1 on each axis (world 0..80); leave the rest pristine.
+    let reality = drifted_reality(0, 1);
+    let sp = crate::use_cases::region_plan::spawn_point(42);
+
+    let mut fabric_changed = 0usize;
+    let mut fabric_compared = 0usize;
+    for sz in 0..200 {
+        for sx in 0..200 {
+            let (wx, wz) = (sx as f32 * 0.6 + 0.3, sz as f32 * 0.6 + 0.3);
+            let plan = plan_for(wx, wz);
+            let before = BackroomsLevel::plan_column_in_reality(
+                plan,
+                &noise,
+                42,
+                &config,
+                &RealitySnapshot::empty(),
+                wx,
+                wz,
+            );
+            let after =
+                BackroomsLevel::plan_column_in_reality(plan, &noise, 42, &config, &reality, wx, wz);
+
+            // Corridor interiors never drift. Their edge band is
+            // indeterminate here: where the edge opens, the band is fabric
+            // and may lawfully drift, so the band is asserted neither way.
+            let corridor_interior = plan
+                .corridors
+                .iter()
+                .any(|s| s.distance(wx, wz) <= s.width * 0.5);
+            let corridor_band = !corridor_interior
+                && plan
+                    .corridors
+                    .iter()
+                    .any(|s| s.distance(wx, wz) <= s.width * 0.5 + PLAN_WALL_T);
+            if corridor_band {
+                continue;
+            }
+            let planned = corridor_interior
+                || plan.assemblies.iter().any(|a| {
+                    let b = a.footprint.bounds();
+                    let m = PLAN_WALL_T + 0.05;
+                    wx >= b.0 - m && wx <= b.2 + m && wz >= b.1 - m && wz <= b.3 + m
+                })
+                || plan
+                    .anomalies
+                    .iter()
+                    .any(|a| a.footprint.bounds().expanded(3.2 + 0.1).contains(wx, wz));
+            let near_spawn = (wx - sp.x).powi(2) + (wz - sp.z).powi(2) < 26.0 * 26.0;
+            // Fabric decisions anchor at their own lattice cell's center, so
+            // a column within one fabric cell of the drifted area may share
+            // a decision with it. Only columns clear of that band must be
+            // untouched; columns inside the band are asserted neither way.
+            let drift_edge = 2.0 * 40.0;
+            let outside_drift = wx > drift_edge + FABRIC_CELL || wz > drift_edge + FABRIC_CELL;
+            let boundary_band = !outside_drift && (wx > drift_edge || wz > drift_edge);
+            if boundary_band {
+                continue;
+            }
+
+            if planned || near_spawn || outside_drift {
+                assert_eq!(
+                    before, after,
+                    "Peripheral Shift touched protected space at ({wx}, {wz})"
+                );
+            } else {
+                fabric_compared += 1;
+                if before != after {
+                    fabric_changed += 1;
+                }
+            }
+        }
+    }
+    assert!(fabric_compared > 2000, "sample too small: {fabric_compared}");
+    // Walls are 0.4 u bands on a 7.2 u lattice, so even a full re-deal
+    // moves only a few percent of *columns* — what matters is that many
+    // whole walls and doorways moved, not that the map inverted.
+    assert!(
+        fabric_changed * 50 >= fabric_compared,
+        "drift barely rearranged the fabric: {fabric_changed}/{fabric_compared}"
+    );
+}
+
+/// The binary-tree connectivity rule holds per fabric cell at *any* epoch,
+/// including across boundaries between differently drifted cells: every
+/// warren cell still opens through its west or its north wall.
+#[test]
+fn fabric_stays_connected_through_mixed_drift_epochs() {
+    let noise = SimpleNoiseProvider::new();
+    let tuning = LevelTuning::default();
+    let reality = drifted_reality(-4, 4);
+    let mut cells_checked = 0usize;
+    for cell_x in -20i64..20 {
+        for cell_z in -20i64..20 {
+            let x0 = cell_x as f32 * FABRIC_CELL;
+            let z0 = cell_z as f32 * FABRIC_CELL;
+            let mut open = false;
+            let mut a = PLAN_WALL_T + 0.1;
+            while a < FABRIC_CELL - PLAN_WALL_T {
+                for (wx, wz) in [(x0 + 0.2, z0 + a), (x0 + a, z0 + 0.2)] {
+                    if !BackroomsLevel::column_plan_in_reality(
+                        &noise, 42, &tuning, &reality, wx, wz,
+                    )
+                    .solid
+                    {
+                        open = true;
+                    }
+                }
+                a += 0.2;
+            }
+            assert!(
+                open,
+                "drifted fabric cell ({cell_x},{cell_z}) sealed both its west and north walls"
+            );
+            cells_checked += 1;
+        }
+    }
+    assert!(cells_checked > 1000, "sample too small: {cells_checked}");
+}
+
+/// Inside a blackout the same drift stamps rearrange the substrate — the
+/// space changes behind the player in real time — while the recovery
+/// skeleton stays open in every epoch, so the way out is architecture,
+/// never luck.
+#[test]
+fn blackout_substrate_drifts_but_its_recovery_skeleton_never_does() {
+    let (config, instance) = find_macro_anomaly(AnomalyKind::BlackoutExpanse);
+    let noise = SimpleNoiseProvider::new();
+    let empty = RealitySnapshot::empty();
+    let bounds = instance.footprint.bounds();
+    let min_cx = (bounds.min_x / 40.0).floor() as i64 - 1;
+    let max_cx = (bounds.max_x / 40.0).floor() as i64 + 1;
+    let min_cz = (bounds.min_z / 40.0).floor() as i64 - 1;
+    let max_cz = (bounds.max_z / 40.0).floor() as i64 + 1;
+    let mut reality = RealitySnapshot::empty();
+    for cz in min_cz..=max_cz {
+        for cx in min_cx..=max_cx {
+            reality = reality.with_fabric_drift_advanced(cx, cz);
+        }
+    }
+
+    // Step 0.4 u: the fabric's wall bands are 0.4 u wide on a 7.2 u
+    // lattice, and a coarser stride can cycle past every band forever.
+    let mut changed = 0usize;
+    let half_span = instance.footprint.half_x.min(40.0);
+    let mut lz = -instance.footprint.half_z + 1.0;
+    while lz < instance.footprint.half_z - 1.0 {
+        let mut lx = -half_span;
+        while lx < half_span {
+            let p = instance.world_coords(lx, lz);
+            let before = sample_anomaly(&instance, &noise, 42, &config, &empty, p.x, p.z);
+            let after = sample_anomaly(&instance, &noise, 42, &config, &reality, p.x, p.z);
+            if lz.abs() <= instance.skeleton_half_width {
+                assert!(!before.solid && !after.solid, "recovery skeleton blocked");
+            } else if before.solid != after.solid {
+                changed += 1;
+            }
+            lx += 0.4;
+        }
+        lz += 0.4;
+    }
+    assert!(
+        changed > 40,
+        "blackout interior barely drifted ({changed} columns changed)"
+    );
+}
+
 #[test]
 fn test_print_ascii_map() {
     let noise = SimpleNoiseProvider::new();
@@ -1328,3 +1526,4 @@ fn test_print_ascii_map() {
     }
     std::fs::write("./ascii_map.txt", map).unwrap();
 }
+

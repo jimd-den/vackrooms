@@ -77,9 +77,34 @@ impl AnomalyStateStamp {
     }
 }
 
+/// Side of one fabric-drift cell, world units. Drift is the Peripheral
+/// Shift of the *ordinary* fabric: the unit of territory whose cosmetic and
+/// porosity salts re-derive together when the level rearranges unobserved.
+/// Coarser than a chunk (so a shift reads as a neighborhood changing, not a
+/// tile) and finer than a region (so corridors and assemblies — which never
+/// drift — anchor navigation through any number of shifts).
+pub const FABRIC_DRIFT_CELL: f32 = 40.0;
+
+/// Drift-lattice index of a world coordinate.
+pub fn fabric_drift_cell_of(w: f32) -> i64 {
+    (w / FABRIC_DRIFT_CELL).floor() as i64
+}
+
+/// How many times one drift cell's fabric has rearranged while unobserved.
+/// Only cells that have actually drifted are recorded; epoch 0 is implicit
+/// and means the fabric still matches its first observation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct FabricDriftStamp {
+    pub cell_x: i64,
+    pub cell_z: i64,
+    pub epoch: u32,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct RealitySnapshot {
     stamps: Vec<AnomalyStateStamp>,
+    /// Peripheral Shift state, canonical-sorted by (cell_x, cell_z).
+    drifts: Vec<FabricDriftStamp>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -175,14 +200,19 @@ fn transition_for(
 }
 
 impl RealitySnapshot {
-    const MAGIC: u32 = 0x5254_5902; // "RTY" v2
+    const MAGIC: u32 = 0x5254_5903; // "RTY" v3: v2 plus fabric drift
     const STAMP_WORDS: usize = 7;
+    const DRIFT_WORDS: usize = 5;
 
     pub fn empty() -> Self {
         Self::default()
     }
 
     pub fn new(stamps: Vec<AnomalyStateStamp>) -> Self {
+        Self::with_drifts(stamps, Vec::new())
+    }
+
+    pub fn with_drifts(stamps: Vec<AnomalyStateStamp>, drifts: Vec<FabricDriftStamp>) -> Self {
         let mut by_id: BTreeMap<AnomalyId, AnomalyStateStamp> = BTreeMap::new();
         for stamp in stamps {
             by_id
@@ -194,13 +224,64 @@ impl RealitySnapshot {
                 })
                 .or_insert(stamp);
         }
+        let mut by_cell: BTreeMap<(i64, i64), u32> = BTreeMap::new();
+        for drift in drifts {
+            let epoch = by_cell.entry((drift.cell_x, drift.cell_z)).or_insert(0);
+            *epoch = (*epoch).max(drift.epoch);
+        }
         Self {
             stamps: by_id.into_values().collect(),
+            drifts: by_cell
+                .into_iter()
+                .filter(|(_, epoch)| *epoch > 0)
+                .map(|((cell_x, cell_z), epoch)| FabricDriftStamp {
+                    cell_x,
+                    cell_z,
+                    epoch,
+                })
+                .collect(),
         }
     }
 
     pub fn stamps(&self) -> &[AnomalyStateStamp] {
         &self.stamps
+    }
+
+    pub fn fabric_drifts(&self) -> &[FabricDriftStamp] {
+        &self.drifts
+    }
+
+    /// The Peripheral Shift epoch of the drift cell containing a world point.
+    /// Epoch 0 — the overwhelmingly common answer — means "never rearranged"
+    /// and reproduces the fabric exactly as first observed.
+    pub fn fabric_drift_epoch(&self, wx: f32, wz: f32) -> u32 {
+        let key = (fabric_drift_cell_of(wx), fabric_drift_cell_of(wz));
+        self.drifts
+            .binary_search_by_key(&key, |drift| (drift.cell_x, drift.cell_z))
+            .map(|index| self.drifts[index].epoch)
+            .unwrap_or(0)
+    }
+
+    /// One more unobserved rearrangement of a drift cell. Everything else in
+    /// the snapshot — encounter stamps and other cells — is untouched.
+    pub fn with_fabric_drift_advanced(&self, cell_x: i64, cell_z: i64) -> Self {
+        let mut drifts = self.drifts.clone();
+        match drifts.binary_search_by_key(&(cell_x, cell_z), |drift| (drift.cell_x, drift.cell_z))
+        {
+            Ok(index) => drifts[index].epoch = drifts[index].epoch.saturating_add(1),
+            Err(index) => drifts.insert(
+                index,
+                FabricDriftStamp {
+                    cell_x,
+                    cell_z,
+                    epoch: 1,
+                },
+            ),
+        }
+        Self {
+            stamps: self.stamps.clone(),
+            drifts,
+        }
     }
 
     pub fn lookup(&self, id: AnomalyId) -> Option<&AnomalyStateStamp> {
@@ -245,7 +326,7 @@ impl RealitySnapshot {
             next.loop_count,
             gate.id,
         ));
-        Self::new(stamps)
+        Self::with_drifts(stamps, self.drifts.clone())
     }
 
     fn hash_words(words: &[u32]) -> u64 {
@@ -263,7 +344,9 @@ impl RealitySnapshot {
     }
 
     fn words_without_fingerprint(&self) -> Vec<u32> {
-        let mut out = Vec::with_capacity(2 + self.stamps.len() * Self::STAMP_WORDS);
+        let mut out = Vec::with_capacity(
+            3 + self.stamps.len() * Self::STAMP_WORDS + self.drifts.len() * Self::DRIFT_WORDS,
+        );
         out.push(Self::MAGIC);
         out.push(self.stamps.len() as u32);
         for stamp in &self.stamps {
@@ -280,6 +363,16 @@ impl RealitySnapshot {
                 (stamp.last_gate_id >> 32) as u32,
             ]);
         }
+        out.push(self.drifts.len() as u32);
+        for drift in &self.drifts {
+            out.extend_from_slice(&[
+                drift.cell_x as u32,
+                (drift.cell_x >> 32) as u32,
+                drift.cell_z as u32,
+                (drift.cell_z >> 32) as u32,
+                drift.epoch,
+            ]);
+        }
         out
     }
 
@@ -292,11 +385,16 @@ impl RealitySnapshot {
     }
 
     pub fn from_words(words: &[u32]) -> Result<Self, RealitySnapshotDecodeError> {
-        if words.len() < 4 || words[0] != Self::MAGIC {
+        if words.len() < 5 || words[0] != Self::MAGIC {
             return Err(RealitySnapshotDecodeError::Header);
         }
         let count = words[1] as usize;
-        let body_len = 2 + count.saturating_mul(Self::STAMP_WORDS);
+        let drift_header = 2 + count.saturating_mul(Self::STAMP_WORDS);
+        if words.len() < drift_header + 3 {
+            return Err(RealitySnapshotDecodeError::Length);
+        }
+        let drift_count = words[drift_header] as usize;
+        let body_len = drift_header + 1 + drift_count.saturating_mul(Self::DRIFT_WORDS);
         if words.len() != body_len + 2 {
             return Err(RealitySnapshotDecodeError::Length);
         }
@@ -306,7 +404,7 @@ impl RealitySnapshot {
         }
 
         let mut stamps = Vec::with_capacity(count);
-        for chunk in words[2..body_len].chunks_exact(Self::STAMP_WORDS) {
+        for chunk in words[2..drift_header].chunks_exact(Self::STAMP_WORDS) {
             stamps.push(AnomalyStateStamp {
                 instance_id: chunk[0] as u64 | ((chunk[1] as u64) << 32),
                 epoch: chunk[2],
@@ -320,7 +418,15 @@ impl RealitySnapshot {
                 last_gate_id: chunk[5] as u64 | ((chunk[6] as u64) << 32),
             });
         }
-        let decoded = Self::new(stamps);
+        let mut drifts = Vec::with_capacity(drift_count);
+        for chunk in words[drift_header + 1..body_len].chunks_exact(Self::DRIFT_WORDS) {
+            drifts.push(FabricDriftStamp {
+                cell_x: chunk[0] as u64 as i64 | (((chunk[1] as u64) << 32) as i64),
+                cell_z: chunk[2] as u64 as i64 | (((chunk[3] as u64) << 32) as i64),
+                epoch: chunk[4],
+            });
+        }
+        let decoded = Self::with_drifts(stamps, drifts);
         if decoded.to_words() != words {
             return Err(RealitySnapshotDecodeError::Value);
         }
@@ -456,6 +562,32 @@ mod tests {
         assert_eq!(after.phase, before.phase);
         assert_eq!(after.loop_count, before.loop_count);
         assert_eq!(after.last_gate_id, 2);
+    }
+
+    #[test]
+    fn fabric_drift_advances_per_cell_and_survives_gate_transitions() {
+        let reality = RealitySnapshot::empty()
+            .with_fabric_drift_advanced(2, -3)
+            .with_fabric_drift_advanced(0, 0)
+            .with_fabric_drift_advanced(2, -3);
+        assert_eq!(reality.fabric_drift_epoch(2.5 * 40.0, -2.5 * 40.0), 2);
+        assert_eq!(reality.fabric_drift_epoch(1.0, 1.0), 1);
+        assert_eq!(reality.fabric_drift_epoch(400.0, 400.0), 0, "unvisited");
+
+        // Encounter transitions carry drift along untouched.
+        let sealed = reality.with_advanced_gate(
+            &gate(1, TraversalGateKind::RedThreshold),
+            AxisDirection::Positive,
+        );
+        assert_eq!(sealed.fabric_drift_epoch(2.5 * 40.0, -2.5 * 40.0), 2);
+        assert_eq!(sealed.lookup(77).unwrap().phase, RedRoomPhase::Sealed);
+
+        // And drift is part of transport identity.
+        assert_eq!(
+            RealitySnapshot::from_words(&sealed.to_words()),
+            Ok(sealed.clone())
+        );
+        assert_ne!(reality.fingerprint(), RealitySnapshot::empty().fingerprint());
     }
 
     #[test]

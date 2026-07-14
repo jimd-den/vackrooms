@@ -19,7 +19,10 @@ use crate::application::prepare_frame_lighting::select_scene_lights;
 use crate::application::streaming::{
     ChunkKey, ChunkStore, LoadedChunk, StreamingPolicy, chunk_key,
 };
-use vackrooms::domain::entities::anomaly::{AnomalyKind, RealitySnapshot, TraversalGateKind};
+use vackrooms::domain::entities::anomaly::{
+    AnomalyKind, FABRIC_DRIFT_CELL, RealitySnapshot, TraversalGateKind, WorldBounds,
+    fabric_drift_cell_of,
+};
 
 /// Static configuration chosen by the composition root.
 #[derive(Debug, Clone, Copy)]
@@ -189,6 +192,13 @@ const FLARE_CAP: usize = 12;
 const FLARE_CULL_DISTANCE: f32 = 40.0;
 /// Local warm glow radius of one flare.
 const FLARE_LIGHT_RADIUS: f32 = 9.0;
+
+/// Inside a blackout, drift cells closer than this may still be revealed by
+/// a flare or the flashlight cone, so the rear shift never touches them.
+const BLACKOUT_HIDE_DISTANCE: f32 = 14.0;
+/// Cadence of the in-blackout rear shift. Slow enough that each swap's
+/// rebuild work amortizes; fast enough that backtracking reliably betrays.
+const BLACKOUT_SHIFT_PERIOD_S: f32 = 2.5;
 /// Flare flame height above the floor slab.
 const FLARE_HEIGHT: f32 = 0.3;
 
@@ -244,6 +254,13 @@ pub struct Engine {
     /// ordinary eviction, so directly visible pillar/blackout geometry never
     /// pops.
     forced_reloads: HashSet<ChunkKey>,
+    /// Peripheral Shift bookkeeping: fabric drift cells the player is (or
+    /// recently was) near. A cell that leaves the far radius has become
+    /// genuinely unobserved and its drift epoch advances, so the fabric the
+    /// player walks back into has lawfully rearranged.
+    drift_near: HashSet<(i64, i64)>,
+    /// Seconds until the next in-blackout rear shift may fire.
+    blackout_shift_cooldown: f32,
     /// Last non-hazard eye position used by pit-lattice recovery.
     last_safe_position: [f32; 3],
     /// Active Backrooms level; chunks are requested for this level.
@@ -301,6 +318,8 @@ impl Engine {
             next_request_id: 1,
             reality: RealitySnapshot::default(),
             forced_reloads: HashSet::new(),
+            drift_near: HashSet::new(),
+            blackout_shift_cooldown: 0.0,
             last_safe_position: config.spawn,
             level: config.initial_level,
             push_seconds: 0.0,
@@ -370,6 +389,13 @@ impl Engine {
         self.push_seconds = 0.0;
         // Flares are world objects of the level they were lit in.
         self.flares.clear();
+        // Leaving the level unobserves everything at once: every tracked
+        // drift cell rearranges, so phasing out and back never returns the
+        // wanderer to the hallways they left.
+        let watched: Vec<(i64, i64)> = self.drift_near.drain().collect();
+        for (cx, cz) in watched {
+            self.reality = self.reality.with_fabric_drift_advanced(cx, cz);
+        }
         // Into the grassland you phase in place; the way back drops you at
         // the spawn clearing so you can't rematerialize inside a wall.
         if self.level == LEVEL_BACKROOMS {
@@ -428,6 +454,7 @@ impl Engine {
         }
         self.update_flares(dt, input);
         self.update_anomalies(old_pos);
+        self.update_peripheral_shift(dt);
         self.update_noclip(dt, input, old_pos);
 
         self.stream_chunks();
@@ -660,6 +687,158 @@ impl Engine {
             }
         }
         self.last_safe_position = self.player.position;
+    }
+
+    /// Squared distance from a point to a drift cell's world rectangle
+    /// (0 inside the cell).
+    fn drift_cell_dist2(cell: (i64, i64), px: f32, pz: f32) -> f32 {
+        let x0 = cell.0 as f32 * FABRIC_DRIFT_CELL;
+        let z0 = cell.1 as f32 * FABRIC_DRIFT_CELL;
+        let dx = (x0 - px).max(px - (x0 + FABRIC_DRIFT_CELL)).max(0.0);
+        let dz = (z0 - pz).max(pz - (z0 + FABRIC_DRIFT_CELL)).max(0.0);
+        dx * dx + dz * dz
+    }
+
+    /// Every drift cell any resident chunk could touch counts as observed.
+    /// The far radius adds hysteresis of a couple of cells, so a cell only
+    /// drifts once the player has genuinely abandoned it.
+    fn drift_near_radius(&self) -> f32 {
+        (self.visual_policy.radius as f32 + 1.0) * self.config.chunk_size
+    }
+
+    fn drift_far_radius(&self) -> f32 {
+        self.drift_near_radius() + 2.0 * FABRIC_DRIFT_CELL
+    }
+
+    /// The Peripheral Shift: "whenever not directly observed, the layout can
+    /// warp, stretch, or rearrange itself."
+    ///
+    /// Tier 1 — abandoned territory. Cells the player walks near are marked;
+    /// when one falls beyond the far radius every chunk of it has long been
+    /// evicted, its drift epoch advances, and whatever streams back in later
+    /// is a lawfully different warren (corridors, assemblies, and anomalies
+    /// never move — navigation survives; hallway memory does not).
+    ///
+    /// Tier 2 — inside a blackout the shift stalks the player in real time:
+    /// on a slow cadence, cells that lie entirely behind the player's facing,
+    /// beyond what any light could reveal, and fully inside the blackout's
+    /// bounds advance immediately and their resident chunks rebuild. The
+    /// darkness hides the swap; turning around is never a way back.
+    fn update_peripheral_shift(&mut self, dt: f32) {
+        if self.level != LEVEL_BACKROOMS {
+            return;
+        }
+        let (px, pz) = (self.player.position[0], self.player.position[2]);
+
+        // -- tier 1: mark near cells, drift abandoned ones -------------------
+        let near = self.drift_near_radius();
+        let min_cx = fabric_drift_cell_of(px - near);
+        let max_cx = fabric_drift_cell_of(px + near);
+        let min_cz = fabric_drift_cell_of(pz - near);
+        let max_cz = fabric_drift_cell_of(pz + near);
+        for cz in min_cz..=max_cz {
+            for cx in min_cx..=max_cx {
+                if Self::drift_cell_dist2((cx, cz), px, pz) <= near * near {
+                    self.drift_near.insert((cx, cz));
+                }
+            }
+        }
+        let far2 = self.drift_far_radius() * self.drift_far_radius();
+        let abandoned: Vec<(i64, i64)> = self
+            .drift_near
+            .iter()
+            .copied()
+            .filter(|&cell| Self::drift_cell_dist2(cell, px, pz) > far2)
+            .collect();
+        for cell in abandoned {
+            self.drift_near.remove(&cell);
+            self.reality = self.reality.with_fabric_drift_advanced(cell.0, cell.1);
+        }
+
+        // -- tier 2: the blackout rearranges behind the player ---------------
+        self.blackout_shift_cooldown = (self.blackout_shift_cooldown - dt).max(0.0);
+        if self.blackout_shift_cooldown > 0.0 {
+            return;
+        }
+        let blackout_bounds = self
+            .store
+            .all_traversal_gates()
+            .find(|gate| {
+                gate.anomaly_kind == AnomalyKind::BlackoutExpanse
+                    && gate.affected_bounds.contains(px, pz)
+            })
+            .map(|gate| gate.affected_bounds);
+        let Some(bounds) = blackout_bounds else {
+            return;
+        };
+        let forward = self.player.forward();
+        // The rear shift reaches past the streaming footprint on purpose:
+        // cells it advances beyond residency simply rebuild on approach,
+        // exactly like tier-1 drift.
+        let reach = self.drift_near_radius().max(3.0 * FABRIC_DRIFT_CELL);
+        let mut shifted = Vec::new();
+        for cz in fabric_drift_cell_of(pz - reach)..=fabric_drift_cell_of(pz + reach) {
+            for cx in fabric_drift_cell_of(px - reach)..=fabric_drift_cell_of(px + reach) {
+                let x0 = cx as f32 * FABRIC_DRIFT_CELL;
+                let z0 = cz as f32 * FABRIC_DRIFT_CELL;
+                let inside = bounds.contains(x0, z0)
+                    && bounds.contains(x0 + FABRIC_DRIFT_CELL, z0 + FABRIC_DRIFT_CELL);
+                // "Behind" must hold for the whole cell, with a margin, so
+                // nothing at the edge of vision ever pops.
+                let behind = [x0, x0 + FABRIC_DRIFT_CELL]
+                    .iter()
+                    .all(|&cx_w| {
+                        [z0, z0 + FABRIC_DRIFT_CELL].iter().all(|&cz_w| {
+                            (cx_w - px) * forward[0] + (cz_w - pz) * forward[2] < -2.0
+                        })
+                    });
+                let hidden =
+                    Self::drift_cell_dist2((cx, cz), px, pz) > BLACKOUT_HIDE_DISTANCE.powi(2);
+                if inside && behind && hidden {
+                    shifted.push((cx, cz));
+                }
+            }
+        }
+        if shifted.is_empty() {
+            return;
+        }
+        self.blackout_shift_cooldown = BLACKOUT_SHIFT_PERIOD_S;
+        for &(cx, cz) in &shifted {
+            self.reality = self.reality.with_fabric_drift_advanced(cx, cz);
+        }
+        // Rebuild the resident chunks of the shifted cells in place. The
+        // install path's player-overlap check keeps the swap safe, and the
+        // request carries the advanced reality by construction.
+        let cell_bounds: Vec<WorldBounds> = shifted
+            .iter()
+            .map(|&(cx, cz)| {
+                WorldBounds::new(
+                    cx as f32 * FABRIC_DRIFT_CELL,
+                    cz as f32 * FABRIC_DRIFT_CELL,
+                    (cx + 1) as f32 * FABRIC_DRIFT_CELL,
+                    (cz + 1) as f32 * FABRIC_DRIFT_CELL,
+                )
+            })
+            .collect();
+        let cs = self.config.chunk_size;
+        let targets: Vec<ChunkKey> = self
+            .store
+            .iter_ordered()
+            .filter(|chunk| {
+                let rect = WorldBounds::new(
+                    chunk.origin.0,
+                    chunk.origin.1,
+                    chunk.origin.0 + cs,
+                    chunk.origin.1 + cs,
+                );
+                cell_bounds.iter().any(|cell| cell.intersects(rect))
+            })
+            .map(|chunk| chunk_key(chunk.origin.0, chunk.origin.1))
+            .collect();
+        for key in targets {
+            self.pending.remove(&key);
+            self.forced_reloads.insert(key);
+        }
     }
 
     fn make_request_for(
@@ -1155,6 +1334,12 @@ impl Engine {
 
         let stamps = self.reality.stamps();
         let _ = writeln!(out, "reality: {} stamp(s)", stamps.len());
+        let _ = writeln!(
+            out,
+            "peripheral shift: {} drifted cell(s), {} watched",
+            self.reality.fabric_drifts().len(),
+            self.drift_near.len()
+        );
         for stamp in stamps {
             let _ = writeln!(
                 out,
@@ -1742,6 +1927,118 @@ mod tests {
             engine.tick(1.0 / 60.0, &input);
         }
         assert_eq!(engine.collision_world().len(), 9);
+    }
+
+    /// Tier 1 of the Peripheral Shift: walking far from a neighborhood
+    /// advances its drift epoch, so the fabric that streams back in later is
+    /// keyed to a different reality — while the territory around the player
+    /// stays exactly as observed.
+    #[test]
+    fn abandoned_territory_gains_a_fabric_drift_epoch() {
+        let mut engine = Engine::new(
+            EngineConfig::default(),
+            Box::new(RecordingRenderer::default()),
+            Box::new(FlatChunkSource),
+        );
+        let input = InputFrame::default();
+        engine.tick(1.0 / 60.0, &input);
+        assert!(
+            engine.reality.fabric_drifts().is_empty(),
+            "nothing may drift while the player stands in it"
+        );
+        let origin_cell = (
+            vackrooms::domain::entities::anomaly::fabric_drift_cell_of(5.0),
+            vackrooms::domain::entities::anomaly::fabric_drift_cell_of(5.0),
+        );
+        assert!(engine.drift_near.contains(&origin_cell));
+
+        // Abandon the spawn neighborhood entirely.
+        engine.player.relocate([500.0, 1.7, 500.0]);
+        engine.tick(1.0 / 60.0, &input);
+        assert!(
+            engine
+                .reality
+                .fabric_drift_epoch(5.0, 5.0)
+                >= 1,
+            "abandoned territory must rearrange"
+        );
+        assert_eq!(
+            engine.reality.fabric_drift_epoch(500.0, 500.0),
+            0,
+            "the territory around the player never drifts"
+        );
+        // Returning and leaving again drifts it again.
+        engine.player.relocate([5.0, 1.7, 5.0]);
+        engine.tick(1.0 / 60.0, &input);
+        let first = engine.reality.fabric_drift_epoch(5.0, 5.0);
+        engine.player.relocate([500.0, 1.7, 500.0]);
+        engine.tick(1.0 / 60.0, &input);
+        assert_eq!(engine.reality.fabric_drift_epoch(5.0, 5.0), first + 1);
+    }
+
+    /// Tier 2: inside a blackout, cells wholly behind the player and beyond
+    /// any light's reach shift in real time and their chunks force-rebuild.
+    /// The space ahead and everything outside the blackout hold still.
+    #[test]
+    fn blackout_shifts_the_space_behind_the_player_while_inside() {
+        use vackrooms::domain::entities::anomaly::{
+            AnomalyKind, Axis2, AxisDirection, TraversalGate, TraversalGateKind, WorldBounds,
+        };
+        let mut engine = Engine::new(
+            EngineConfig::default(),
+            Box::new(RecordingRenderer::default()),
+            Box::new(FlatChunkSource),
+        );
+        let gate = TraversalGate {
+            id: 11,
+            instance_id: 401,
+            anomaly_kind: AnomalyKind::BlackoutExpanse,
+            kind: TraversalGateKind::Remap,
+            axis: Axis2::X,
+            plane: 0.0,
+            span_min: -200.0,
+            span_max: 200.0,
+            forward: AxisDirection::Positive,
+            affected_bounds: WorldBounds::new(-200.0, -200.0, 200.0, 200.0),
+        };
+        let mut payload = FlatChunkSource.load(0.0, 0.0, 0, 0);
+        payload.traversal_gates.push(gate);
+        engine.store.insert(
+            chunk_key(0.0, 0.0),
+            LoadedChunk::new((0.0, 0.0), 0, RealitySnapshot::empty(), payload),
+        );
+        // A resident chunk in the rear cell (player at z=5 facing -Z: the
+        // cell z in [40, 80) is wholly behind and beyond the hide distance).
+        engine.store.insert(
+            chunk_key(0.0, 40.0),
+            LoadedChunk::new(
+                (0.0, 40.0),
+                0,
+                RealitySnapshot::empty(),
+                FlatChunkSource.load(0.0, 40.0, 0, 0),
+            ),
+        );
+        engine.player.position = [5.0, 1.7, 5.0];
+        engine.player.yaw = 0.0; // forward = -Z
+        engine.update_peripheral_shift(1.0 / 60.0);
+
+        assert!(
+            engine.reality.fabric_drift_epoch(5.0, 60.0) >= 1,
+            "the cell behind the player must shift"
+        );
+        assert_eq!(
+            engine.reality.fabric_drift_epoch(5.0, -60.0),
+            0,
+            "the cell ahead of the player must hold still"
+        );
+        assert!(
+            engine.forced_reloads.contains(&chunk_key(0.0, 40.0)),
+            "resident chunks of the shifted cell must rebuild"
+        );
+        // The cadence gate: an immediate second pass changes nothing more.
+        let stamps = engine.reality.fabric_drifts().len();
+        engine.update_peripheral_shift(1.0 / 60.0);
+        assert_eq!(engine.reality.fabric_drifts().len(), stamps);
     }
 
     #[test]

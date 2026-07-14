@@ -191,10 +191,16 @@ fn sample_blackout_expanse(context: &SampleContext<'_>) -> ColumnPlan {
     let instance = context.instance;
     let tuning = &context.config.tuning;
     let (local_x, local_z) = (context.local_x, context.local_z);
-    let mut plan = BackroomsLevel::column_plan(
+    // The blackout substrate is ordinary fabric under the profile — and it
+    // drifts under the same Peripheral Shift stamps as ordinary fabric. In
+    // here the engine also advances drift *behind the player in real time*
+    // (the darkness hides the swap), so a blackout rearranges more cruelly
+    // than the level outside it: turning around is never a way back.
+    let mut plan = BackroomsLevel::column_plan_in_reality(
         context.noise,
         context.seed ^ instance.id as u32,
         tuning,
+        context.reality,
         context.world_x,
         context.world_z,
     );

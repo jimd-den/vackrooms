@@ -12,7 +12,7 @@ use super::BackroomsLevel;
 /// edge walls fully intact: the first thing the player reads is an
 /// unambiguous walled corridor, not a dissolved edge into open fabric. The
 /// world only starts opening up once that grammar has been established.
-const SPAWN_READABLE_RADIUS: f32 = 26.0;
+pub(super) const SPAWN_READABLE_RADIUS: f32 = 26.0;
 
 impl BackroomsLevel {
     pub(super) fn corridor_ceiling(
