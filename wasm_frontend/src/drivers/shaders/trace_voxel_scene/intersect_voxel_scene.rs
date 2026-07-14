@@ -41,7 +41,7 @@ float distanceTieTolerance(float distance) {
 float traversalSampleBias(float voxelSize) {
     // This moves classification points off an exactly shared plane; it must
     // remain smaller than nearby, genuinely distinct boundary crossings.
-    // At the finest supported 0.2 m grid, 1e-4 skipped a 13 micrometre
+    // At the 0.2 m reference grid, 1e-4 skipped a 13 micrometre
     // interval between a wall and ceiling and changed the reported face.
     return max(voxelSize * 1e-5, TRACE_MIN_TIE_EPSILON);
 }

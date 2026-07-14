@@ -18,7 +18,10 @@ const backends = [
     query: 'renderer=raymarch&rt_bake=0&rt_skip=0&rt_f2b=0&rt_dither=0&rt_timer=0',
     label: 'GPU raymarch (debug)',
     disabled: ['bake', 'skip', 'f2b', 'dither', 'timer'],
-    viewport: { width: 160, height: 120 },
+    // Finest-cell DDA is the intentionally slow diagnostic path. Its image
+    // correctness is covered at 160x90 in gpu_correctness.spec.ts; this case
+    // only needs enough pixels to prove the backend boots and draws.
+    viewport: { width: 96, height: 54 },
   },
   {
     query: 'renderer=cpu&rt_hiz=0&rt_f2b=0&rt_mips=0&rt_beam_occlusion=0&rt_cull=0',

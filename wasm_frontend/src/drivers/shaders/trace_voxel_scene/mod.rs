@@ -94,6 +94,7 @@ mod tests {
         let source = fragment_source();
         assert!(source.contains("traceChunkDda"));
         assert!(source.contains("traceChunkSkippingEmptyLeaves"));
+        assert!(source.contains("RayBoxHit refinementBox"));
         assert!(source.contains("uEmptySpaceSkipEnabled"));
         assert!(source.contains("directSampleIsVisible"));
         assert!(!source.contains("worldSize > 20.0"));
