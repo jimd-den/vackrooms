@@ -7,7 +7,7 @@
 use crate::domain::entities::anomaly::{AnomalyInstance, Axis2, RealitySnapshot, RedRoomPhase};
 use crate::domain::entities::environment::EnvironmentProfile;
 use crate::domain::entities::voxel_grid::VOXEL_STICKY_CARPET;
-use crate::use_cases::backrooms_level::ColumnPlan;
+use crate::use_cases::level_zero::ColumnPlan;
 use crate::use_cases::generate_chunk::GeneratorConfig;
 use crate::use_cases::region_plan::PLAN_WALL_T;
 

@@ -1,9 +1,7 @@
 //! Materialize sampled Level 0 columns at the requested voxel size.
 
-use crate::domain::entities::voxel_grid::{VOXEL_CEILING, VOXEL_LIGHT, VOXEL_RED_LIGHT, VoxelGrid};
+use crate::domain::entities::voxel_grid::{VOXEL_CEILING, VOXEL_RED_LIGHT, VoxelGrid};
 use crate::use_cases::level_zero::ColumnField;
-
-const SCONCE_HEIGHT_UNITS: f32 = 2.4;
 
 /// Writes geometry and fixture voxels without knowing seeds, regions,
 /// anomalies, chunks, or recursive branches.  Those are planning concerns;
@@ -31,10 +29,6 @@ pub(crate) fn voxelize_columns(grid: &mut VoxelGrid, field: &ColumnField, voxel_
             if plan.solid {
                 for y in 1..ceiling_y {
                     grid.set(x, y, z, plan.wall_material);
-                }
-                if plan.sconce {
-                    let y = to_voxel(SCONCE_HEIGHT_UNITS).min(ceiling_y - 1);
-                    grid.set(x, y, z, VOXEL_LIGHT);
                 }
             } else if let Some(lintel_height) = plan.lintel_from_units {
                 for y in to_voxel(lintel_height)..ceiling_y {
@@ -73,6 +67,43 @@ pub(crate) fn voxelize_columns(grid: &mut VoxelGrid, field: &ColumnField, voxel_
                 };
                 grid.set(x, ceiling_y, z, material);
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::entities::voxel_grid::{EMISSIVE_MATERIALS, VOXEL_FLOOR, VOXEL_WALL};
+    use crate::use_cases::level_zero::ColumnPlan;
+
+    /// Level 0 currently has one authored emitter contract: fixtures are
+    /// exposed panels in open ceiling columns. A fixture request on a solid
+    /// column must therefore remain ordinary architecture, never a buried
+    /// emissive voxel or a second light on the floor.
+    #[test]
+    fn solid_columns_cannot_voxelize_fake_emitters() {
+        let mut column = ColumnPlan::open(4.0);
+        column.solid = true;
+        column.light = true;
+        column.red_light = true;
+        column.light_material = VOXEL_RED_LIGHT;
+
+        let field = ColumnField::sample(1, 1, |_, _| column);
+        let mut grid = VoxelGrid::new(1, 6, 1);
+        voxelize_columns(&mut grid, &field, 1.0);
+
+        assert_eq!(grid.get(0, 0, 0), VOXEL_FLOOR);
+        for y in 0..grid.height() {
+            let material = grid.get(0, y, 0);
+            assert!(
+                !EMISSIVE_MATERIALS.contains(&material),
+                "solid column contains buried emitter {material} at y={y}"
+            );
+        }
+        for y in 1..=4 {
+            let material = grid.get(0, y, 0);
+            assert_eq!(material, VOXEL_WALL);
         }
     }
 }

@@ -1,6 +1,6 @@
 //! A sampled Level 0 area plus the one-column halo needed for clean caps.
 
-use crate::use_cases::backrooms_level::ColumnPlan;
+use crate::use_cases::level_zero::ColumnPlan;
 
 /// Resolution-dependent samples of a resolution-independent world plan.
 ///

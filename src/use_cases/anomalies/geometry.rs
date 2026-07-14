@@ -10,7 +10,7 @@ use crate::domain::entities::anomaly::{
 };
 use crate::domain::entities::environment::{EnvironmentProfile, FloorState};
 use crate::domain::entities::voxel_grid::{VOXEL_FLUID, VOXEL_GLIMMER, VOXEL_LIGHT};
-use crate::use_cases::backrooms_level::{BackroomsLevel, ColumnPlan};
+use crate::use_cases::level_zero::{BackroomsLevel, ColumnPlan};
 use crate::use_cases::generate_chunk::GeneratorConfig;
 use crate::use_cases::ports::NoiseProvider;
 use crate::use_cases::region_plan::PLAN_WALL_T;

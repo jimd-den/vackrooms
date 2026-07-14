@@ -31,7 +31,7 @@ use crate::domain::entities::architecture::{
 };
 use crate::domain::entities::world_topology::{VerticalLink, VerticalLinkKind};
 use crate::entities::models::Position;
-use crate::use_cases::backrooms_level::ColumnPlan;
+use crate::use_cases::level_zero::ColumnPlan;
 
 /// Stairwell frontage along its corridor, world units.
 const STAIR_WIDTH: f32 = 4.8;

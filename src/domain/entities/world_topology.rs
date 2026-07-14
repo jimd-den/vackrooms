@@ -14,7 +14,7 @@
 //!   -> MacroFields        multi-octave parameter fields (this file: data)
 //!     -> MacroCell        160 u graph cell: nodes, portals, vertical links
 //!       -> RegionPlan     80 u architectural plan (entities::architecture)
-//!         -> ColumnPlan   one voxel column (use_cases::backrooms_level)
+//!         -> ColumnPlan   one voxel column (use_cases::level_zero)
 //! ```
 //!
 //! Determinism contract: everything here is derived from

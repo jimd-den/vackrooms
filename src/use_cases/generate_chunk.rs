@@ -330,7 +330,7 @@ impl<'a> GenerateChunkArchitectureUseCase<'a> {
         // Level 0 is the architecturally *planned* Backrooms: region plans
         // (circulation -> assemblies -> corruption) drive the voxelization.
         if config.level == 0 || config.level == 34 {
-            use crate::use_cases::backrooms_level::BackroomsLevel;
+            use crate::use_cases::level_zero::BackroomsLevel;
             use crate::use_cases::grassland_level::GrasslandLevel;
             use crate::use_cases::level_generator::LevelGenerator;
 
