@@ -197,8 +197,8 @@ world seed
   -> MacroFields         multi-octave parameter fields (world_topology)
     -> MacroCell graph   160 u cells: nodes, portals, red-room events,
                          vertical links (use_cases/world_topology.rs)
-      -> RegionPlan      80 u architectural plan (use_cases/region_plan.rs)
-        -> ColumnPlan    one voxel column (use_cases/backrooms_level.rs)
+      -> RegionPlan      80 u architectural plan (use_cases/region_plan/)
+        -> ColumnPlan    one voxel column (use_cases/level_zero/)
           -> VoxelGrid   resolution-dependent output (level_zero/voxelize.rs)
 ```
 
@@ -243,8 +243,11 @@ half changes ceiling regime, floor grammar, and lintel height, and a
 expressed only through legal architectural vocabulary — never impossible
 collision or repainted walls.
 
-Within one region, the planner works as before
-(`use_cases/region_plan.rs` + `use_cases/backrooms_level.rs`):
+Both stages are split by intent, one module per planning concern:
+`use_cases/region_plan/` (genome, circulation, suites, corruption, debug)
+and `use_cases/level_zero/` (fabric, circulation_sampler, assembly_sampler,
+compose_column, generate, column_field, voxelize). Within one region, the
+planner works as follows:
 
 1. **Region plans.** The world tiles into fixed 80 u regions. A pure function
    of `(seed, region)` derives 1–3 `ArchitectGenome`s (circulation style,
@@ -267,6 +270,28 @@ Within one region, the planner works as before
    holds the visual baseline at 3.2–3.6 u, with 3.8–4.4 u expanses, 4.5–5.4 u
    vaults, and rare 2.5–2.8 u compression zones. This keeps cheap office
    finishes at an implausible scale instead of producing a low office maze.
+
+**The Peripheral Shift.** "Whenever not directly observed, the layout can
+warp, stretch, or rearrange itself." `RealitySnapshot` (RTY v3) carries one
+drift epoch per 40 u fabric cell. The epoch re-salts only the fabric's
+cosmetic and porosity decisions — wall dropout, doorway
+direction/position/framing, dead lights — read at each deciding lattice
+cell's own anchor, so walls rebuild whole and the binary-tree doorway rule
+(hence global connectivity) holds at any epoch mix. Corridors, portals,
+assemblies, anomaly identities, arch-anchor surroundings, and the spawn
+opening sequence never drift: navigation survives; hallway memory does not.
+The engine advances epochs two ways: territory abandoned beyond the
+streaming footprint (plus hysteresis) drifts on departure, and *inside a
+blackout* the shift runs in real time — cells wholly behind the player's
+facing, beyond any light's reach, and fully inside the blackout advance on
+a slow cadence and force-rebuild in place, hidden by the dark.
+
+**Fixture decay and flicker.** The `institution_age` field steers the
+fabric's dead-light ratio (young wings ~1.15x survival, ancient wings
+~0.6x). A deterministic share of warm panels carries a `flicker_mode`
+authored at light collection (tired-ballast shimmer, dying tubes); the
+engine pre-flickers intensity CPU-side once per frame, like flares, so all
+renderers agree and no shader needs a clock.
 
 All plan geometry snaps to a 0.4 u lattice (one coarse voxel) so every LOD
 of a chunk voxelizes the same architecture. Debug hook:
