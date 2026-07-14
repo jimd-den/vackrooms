@@ -82,6 +82,7 @@ float exitDistanceFromBox(
     vec3 rayDirection,
     vec3 boundsMin,
     vec3 boundsMax,
+    float tieEpsilon,
     out vec3 nextNormal
 ) {
     vec3 exitTimes = vec3(TRACE_INFINITY);
@@ -89,16 +90,21 @@ float exitDistanceFromBox(
     if (abs(rayDirection.y) >= 1e-20) exitTimes.y = ((rayDirection.y > 0.0 ? boundsMax.y : boundsMin.y) - rayOrigin.y) / rayDirection.y;
     if (abs(rayDirection.z) >= 1e-20) exitTimes.z = ((rayDirection.z > 0.0 ? boundsMax.z : boundsMin.z) - rayOrigin.z) / rayDirection.z;
 
-    if (exitTimes.x <= exitTimes.y && exitTimes.x <= exitTimes.z) {
+    float nearest = min(exitTimes.x, min(exitTimes.y, exitTimes.z));
+    float tolerance = max(abs(nearest) * 1e-6, tieEpsilon);
+    // Use the same tolerant X/Y/Z precedence as finest-cell DDA. Without
+    // this, a mathematically tied edge ray can acquire a different face
+    // normal solely because one path jumped across a larger empty leaf.
+    if (abs(exitTimes.x - nearest) <= tolerance) {
         nextNormal = vec3(rayDirection.x > 0.0 ? -1.0 : 1.0, 0.0, 0.0);
-        return exitTimes.x;
+        return nearest;
     }
-    if (exitTimes.y <= exitTimes.z) {
+    if (abs(exitTimes.y - nearest) <= tolerance) {
         nextNormal = vec3(0.0, rayDirection.y > 0.0 ? -1.0 : 1.0, 0.0);
-        return exitTimes.y;
+        return nearest;
     }
     nextNormal = vec3(0.0, 0.0, rayDirection.z > 0.0 ? -1.0 : 1.0);
-    return exitTimes.z;
+    return nearest;
 }
 
 VoxelHit traceChunkSkippingEmptyLeaves(
@@ -124,7 +130,7 @@ VoxelHit traceChunkSkippingEmptyLeaves(
 
         vec3 crossedNormal;
         float nextDistance = exitDistanceFromBox(
-            rayOrigin, rayDirection, leaf.boundsMin, leaf.boundsMax, crossedNormal
+            rayOrigin, rayDirection, leaf.boundsMin, leaf.boundsMax, epsilon, crossedNormal
         );
         if (nextDistance <= distance + epsilon * 0.25) nextDistance = distance + epsilon;
         distance = nextDistance;
