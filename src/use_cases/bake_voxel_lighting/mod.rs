@@ -3,7 +3,7 @@
 //! This use case deliberately separates four physically meaningful stages:
 //!
 //! 1. erase the previous bake;
-//! 2. inject emission through emissive faces that actually border air;
+//! 2. inject emission through exposed downward faces of ceiling fixtures;
 //! 3. find shortest unobstructed paths through air in world-space units;
 //! 4. project that air irradiance onto the first solid surface it reaches.
 //!
@@ -11,6 +11,10 @@
 //! on its near side without becoming a light source for the room behind it.
 //! The working calculation is floating point; quantization happens only when
 //! the result is written back to the grid's established RGB 0--15 contract.
+//! This field is deliberately an approximate, finite-range diffuse fill. The
+//! renderer's analytic area lights remain authoritative for direct lighting;
+//! this bake neither invents omnidirectional emitters nor requires unbounded
+//! cross-chunk propagation halos.
 
 mod clear_previous_bake;
 mod exposed_emissive_faces;
@@ -29,7 +33,8 @@ pub use settings::{
 
 /// Replaces every prior light sample in `grid` with a deterministic bake.
 ///
-/// Attenuation is symmetric in all six cardinal directions. Its independent
+/// Once light has entered the air below a fixture, approximate diffuse fill
+/// attenuates symmetrically along face-connected paths. Its independent
 /// variable is shortest unobstructed path length in world units, so changing
 /// voxel resolution does not silently change a fixture's physical reach.
 pub fn bake_voxel_lighting(grid: &mut VoxelGrid, settings: VoxelLightingSettings) {

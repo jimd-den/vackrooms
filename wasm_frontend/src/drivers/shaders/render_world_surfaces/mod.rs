@@ -4,9 +4,12 @@
 //! mathematical responsibilities. Shader assembly is the only string work
 //! and happens once, when WebGL links the program.
 
+mod compose_surface_lighting;
+mod hero_shadow_visibility;
+mod present_surface_frame;
 mod reconstruct_surface;
 mod sample_static_irradiance;
-mod shade_visible_surface;
+mod surface_material_semantics;
 
 use super::{
     apply_distance_fog, chunks, encode_display_color, evaluate_scene_lighting, sample_scene_lights,
@@ -74,7 +77,10 @@ pub fn fragment_source() -> String {
         sample_scene_lights::GLSL,
         apply_distance_fog::GLSL,
         sample_static_irradiance::GLSL,
-        shade_visible_surface::GLSL,
+        surface_material_semantics::GLSL,
+        hero_shadow_visibility::GLSL,
+        compose_surface_lighting::GLSL,
+        present_surface_frame::GLSL,
     ]
     .concat()
 }
@@ -97,5 +103,27 @@ mod tests {
         assert!(!source.contains("quantize5"));
         assert!(!source.contains("heightFactor"));
         assert!(source.contains("isDownwardEmittingFace"));
+    }
+
+    #[test]
+    fn surface_pipeline_is_assembled_from_named_responsibilities() {
+        let source = fragment_source();
+        let stages = [
+            "bool isEmissiveMaterial(",
+            "float shadowVisibility(",
+            "vec3 composeSurfaceLighting(",
+            "void main()",
+        ];
+
+        let mut previous = 0;
+        for stage in stages {
+            let position = source.find(stage).expect("missing shader responsibility");
+            assert!(
+                position >= previous,
+                "shader responsibilities are out of order"
+            );
+            previous = position;
+        }
+        assert_eq!(source.matches("void main()").count(), 1);
     }
 }

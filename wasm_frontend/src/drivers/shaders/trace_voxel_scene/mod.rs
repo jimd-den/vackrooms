@@ -4,8 +4,12 @@
 //! optimization swaps only the stepping policy: both paths use the same
 //! stateless SVO lookup, hit record, lighting, fog, and display transform.
 
+mod collect_ordered_chunk_intervals;
+mod construct_camera_ray;
 mod decode_voxel_atlas;
 mod intersect_voxel_scene;
+mod present_voxel_frame;
+mod select_nearest_voxel_hit;
 mod shade_voxel_hit;
 mod trace_direct_light_visibility;
 
@@ -80,7 +84,11 @@ pub fn fragment_source() -> String {
         decode_voxel_atlas::GLSL,
         intersect_voxel_scene::GLSL,
         trace_direct_light_visibility::GLSL,
+        construct_camera_ray::GLSL,
+        collect_ordered_chunk_intervals::GLSL,
+        select_nearest_voxel_hit::GLSL,
         shade_voxel_hit::GLSL,
+        present_voxel_frame::GLSL,
     ]
     .concat()
 }
@@ -99,6 +107,29 @@ mod tests {
         assert!(source.contains("directSampleIsVisible"));
         assert!(!source.contains("worldSize > 20.0"));
         assert!(!source.contains("vec2 cell_center"));
+    }
+
+    #[test]
+    fn camera_trace_pipeline_is_assembled_from_named_responsibilities() {
+        let source = fragment_source();
+        let stages = [
+            "vec3 constructCameraRay()",
+            "int collectOrderedChunkIntervals(",
+            "VoxelHit selectNearestVoxelHit(",
+            "vec3 shadeVoxel(",
+            "void main()",
+        ];
+
+        let mut previous = 0;
+        for stage in stages {
+            let position = source.find(stage).expect("missing shader responsibility");
+            assert!(
+                position >= previous,
+                "shader responsibilities are out of order"
+            );
+            previous = position;
+        }
+        assert_eq!(source.matches("void main()").count(), 1);
     }
 
     #[test]

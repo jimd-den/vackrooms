@@ -2,7 +2,9 @@ use std::collections::VecDeque;
 
 use crate::domain::entities::voxel_grid::{VOXEL_AIR, VoxelGrid};
 
-use super::exposed_emissive_faces::{EMISSION_PROFILES, EmissionProfile, exposed_air_cells};
+use super::exposed_emissive_faces::{
+    EMISSION_PROFILES, EmissionProfile, exposed_downward_air_cells,
+};
 use super::settings::VoxelLightingSettings;
 use super::voxel_neighborhood::{GridDimensions, for_each_face_neighbor};
 
@@ -38,7 +40,7 @@ pub(crate) fn propagate_through_air(
         // An exposed air center is half a voxel from the emitting face. Do
         // not inject a sample that is already beyond the requested range.
         if settings.voxel_size_world_units() * 0.5 < settings.max_range_world_units() {
-            for seed in exposed_air_cells(grid, dimensions, profile) {
+            for seed in exposed_downward_air_cells(grid, dimensions, profile) {
                 let index = dimensions.index(seed);
                 if distance_steps[index] == UNREACHABLE {
                     distance_steps[index] = 0;

@@ -1,4 +1,4 @@
-//! Select the nearest scene hit, shade it in linear space, then apply fog.
+//! Turn one selected voxel hit into linear scene radiance.
 
 pub const GLSL: &str = r#"
 bool isEmissiveVoxel(uint material) {
@@ -75,84 +75,5 @@ vec3 shadeVoxel(
         );
     }
     return radiance;
-}
-
-void main() {
-    vec2 ndc = vUv * 2.0 - 1.0;
-    vec3 rayDirection = normalize(
-        uCamRight * (ndc.x * uAspect * uFovTan)
-        + uCamUp * (ndc.y * uFovTan)
-        + uCamForward
-    );
-
-    ChunkInterval intervals[25];
-    int intervalCount = 0;
-    for (int chunkIndex = 0; chunkIndex < uNumChunks; ++chunkIndex) {
-        vec3 localOrigin = uCameraPosition - uChunkOrigins[chunkIndex];
-        RayBoxHit box = intersectBox(
-            localOrigin,
-            rayDirection,
-            vec3(0.0),
-            vec3(uChunkWorldSizes[chunkIndex])
-        );
-        if (!box.hit) continue;
-
-        int insertion = intervalCount;
-        if (uFrontToBackEnabled == 1) {
-            while (insertion > 0 && intervals[insertion - 1].entry > box.entry) {
-                intervals[insertion] = intervals[insertion - 1];
-                insertion--;
-            }
-        }
-        intervals[insertion] = ChunkInterval(chunkIndex, box.entry, box.exit, box.entryNormal);
-        intervalCount++;
-    }
-
-    VoxelHit closest = VoxelHit(false, TRACE_INFINITY, vec3(0.0), 0u, 0u, 0u);
-    int closestChunkIndex = -1;
-    for (int intervalIndex = 0; intervalIndex < intervalCount; ++intervalIndex) {
-        ChunkInterval interval = intervals[intervalIndex];
-        // Sorted traversal may stop only after every remaining AABB begins
-        // beyond the nearest solid hit. Breaking after the first hit is wrong
-        // because power-of-two padded chunk boxes overlap.
-        if (uFrontToBackEnabled == 1 && interval.entry >= closest.distance) break;
-
-        int chunkIndex = interval.chunkIndex;
-        vec3 localOrigin = uCameraPosition - uChunkOrigins[chunkIndex];
-        RayBoxHit box = RayBoxHit(true, interval.entry, interval.exit, interval.entryNormal);
-        VoxelHit candidate = traceChunk(
-            localOrigin,
-            rayDirection,
-            uChunkRootIndices[chunkIndex],
-            uChunkWorldSizes[chunkIndex],
-            uChunkVoxelSizes[chunkIndex],
-            uChunkDepths[chunkIndex],
-            box
-        );
-        if (candidate.hit && candidate.distance < closest.distance) {
-            closest = candidate;
-            closestChunkIndex = chunkIndex;
-        }
-    }
-
-    if (!closest.hit) {
-        vec3 missRadiance = uOutdoor == 1 ? uSkyColor : uFogColor;
-        fragColor = vec4(encodeDisplayColor(missRadiance), 1.0);
-        return;
-    }
-
-    vec3 worldPosition = uCameraPosition + rayDirection * closest.distance;
-    float receiverVoxelSize = uChunkVoxelSizes[closestChunkIndex];
-    vec3 radiance = shadeVoxel(
-        closest, worldPosition, receiverVoxelSize, closestChunkIndex
-    );
-    radiance = applyDistanceFog(
-        radiance, uFogColor, closest.distance, uFogStart, uFogDensity
-    );
-    vec3 displayColor = encodeDisplayColor(radiance);
-    if (uDitherEnabled == 1) {
-        displayColor += (ign(gl_FragCoord.xy) - 0.5) * (1.0 / 255.0);
-    }
-    fragColor = vec4(clamp(displayColor, 0.0, 1.0), 1.0);
 }
 "#;
