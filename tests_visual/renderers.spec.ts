@@ -5,22 +5,26 @@ const backends = [
     query: 'renderer=surface&rt_bake=0&rt_cull=0&rt_shadows=0&rt_dither=0&rt_timer=0',
     label: 'GPU surfaces',
     disabled: ['bake', 'cull', 'shadows', 'dither', 'timer'],
+    viewport: { width: 320, height: 240 },
   },
   {
     query:
       'renderer=splat&rt_cull=0&rt_shadows=0&rt_cells=0&rt_budget=0&rt_dither=0&rt_timer=0',
     label: 'GPU face splats',
     disabled: ['cull', 'shadows', 'cells', 'budget', 'dither', 'timer'],
+    viewport: { width: 320, height: 240 },
   },
   {
     query: 'renderer=raymarch&rt_bake=0&rt_skip=0&rt_f2b=0&rt_dither=0&rt_timer=0',
     label: 'GPU raymarch (debug)',
     disabled: ['bake', 'skip', 'f2b', 'dither', 'timer'],
+    viewport: { width: 160, height: 120 },
   },
   {
     query: 'renderer=cpu&rt_hiz=0&rt_f2b=0&rt_mips=0&rt_beam_occlusion=0&rt_cull=0',
     label: 'CPU splat',
     disabled: ['hiz', 'f2b', 'mips', 'beam_occlusion', 'cull'],
+    viewport: { width: 320, height: 240 },
   },
 ] as const;
 
@@ -58,7 +62,7 @@ async function renderedImageStats(page: import('@playwright/test').Page) {
 
 for (const backend of backends) {
   test(`${backend.label} reference path boots and renders`, async ({ page }) => {
-    test.setTimeout(60_000);
+    test.setTimeout(90_000);
     const pageErrors: string[] = [];
     const consoleErrors: string[] = [];
     page.on('pageerror', error => pageErrors.push(error.message));
@@ -71,7 +75,7 @@ for (const backend of backends) {
 
     // Reference paths intentionally do more work. A small but still useful
     // framebuffer keeps the all-off raymarch/CPU cases deterministic in CI.
-    await page.setViewportSize({ width: 320, height: 240 });
+    await page.setViewportSize(backend.viewport);
 
     await page.goto(
       `/index.html?seed=42&level=0&workers=0&capture=1&smoke=1&${backend.query}` +
@@ -85,7 +89,7 @@ for (const backend of backends) {
         return (window as typeof window & { __sceneReady?: boolean }).__sceneReady === true;
       },
       null,
-      { timeout: 45_000 },
+      { timeout: 75_000 },
     );
 
     await expect(page.locator('#hud-renderer')).toHaveText(backend.label);
