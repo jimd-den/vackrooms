@@ -38,6 +38,14 @@ float distanceTieTolerance(float distance) {
     return max(abs(distance) * 1e-6, TRACE_MIN_TIE_EPSILON);
 }
 
+float traversalSampleBias(float voxelSize) {
+    // This moves classification points off an exactly shared plane; it must
+    // remain smaller than nearby, genuinely distinct boundary crossings.
+    // At the finest supported 0.2 m grid, 1e-4 skipped a 13 micrometre
+    // interval between a wall and ceiling and changed the reported face.
+    return max(voxelSize * 1e-5, TRACE_MIN_TIE_EPSILON);
+}
+
 RayBoxHit intersectBox(vec3 rayOrigin, vec3 rayDirection, vec3 boundsMin, vec3 boundsMax) {
     // Parallel axes are handled explicitly so a boundary value never forms
     // the undefined product 0 * infinity.
@@ -125,11 +133,11 @@ VoxelHit traceChunkSkippingEmptyLeaves(
 ) {
     float distance = chunkBox.entry;
     vec3 normal = chunkBox.entryNormal;
-    float epsilon = max(voxelSize * 1e-4, 1e-7);
+    float sampleBias = traversalSampleBias(voxelSize);
 
     for (int stepIndex = 0; stepIndex < 768; ++stepIndex) {
         if (distance > chunkBox.exit) break;
-        vec3 samplePoint = rayOrigin + rayDirection * min(distance + epsilon, chunkBox.exit);
+        vec3 samplePoint = rayOrigin + rayDirection * min(distance + sampleBias, chunkBox.exit);
         VoxelLeaf leaf = lookupVoxelLeaf(samplePoint, rootIndex, worldSize, svoDepth);
         if (leaf.material != 0u) {
             return VoxelHit(true, distance, normal, leaf.material, leaf.color, leaf.lightWord);
@@ -139,7 +147,9 @@ VoxelHit traceChunkSkippingEmptyLeaves(
         float nextDistance = exitDistanceFromBox(
             rayOrigin, rayDirection, leaf.boundsMin, leaf.boundsMax, crossedNormal
         );
-        if (nextDistance <= distance + epsilon * 0.25) nextDistance = distance + epsilon;
+        if (nextDistance <= distance + sampleBias * 0.25) {
+            nextDistance = distance + sampleBias;
+        }
         distance = nextDistance;
         normal = crossedNormal;
     }
@@ -155,16 +165,16 @@ VoxelHit traceChunkDda(
     int svoDepth,
     RayBoxHit chunkBox
 ) {
-    float epsilon = max(voxelSize * 1e-4, 1e-7);
+    float sampleBias = traversalSampleBias(voxelSize);
     float distance = chunkBox.entry;
-    vec3 samplePoint = rayOrigin + rayDirection * min(distance + epsilon, chunkBox.exit);
+    vec3 samplePoint = rayOrigin + rayDirection * min(distance + sampleBias, chunkBox.exit);
     vec3 cell = floor(samplePoint / voxelSize);
     vec3 directionStep = sign(rayDirection);
     vec3 normal = chunkBox.entryNormal;
 
     for (int stepIndex = 0; stepIndex < 768; ++stepIndex) {
         if (distance > chunkBox.exit) break;
-        samplePoint = rayOrigin + rayDirection * min(distance + epsilon, chunkBox.exit);
+        samplePoint = rayOrigin + rayDirection * min(distance + sampleBias, chunkBox.exit);
         VoxelLeaf leaf = lookupVoxelLeaf(samplePoint, rootIndex, worldSize, svoDepth);
         if (leaf.material != 0u) {
             return VoxelHit(true, distance, normal, leaf.material, leaf.color, leaf.lightWord);
