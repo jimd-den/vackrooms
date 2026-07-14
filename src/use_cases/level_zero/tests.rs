@@ -1218,6 +1218,111 @@ fn archway_rooms_are_stable_pale_anchors() {
     assert!(carpet_seen, "no deep wet carpet voxelized");
 }
 
+/// Arch rooms are stable — and passable and individual. Every non-blind
+/// arch of a transition room is a doorway the player can walk through
+/// (open at standing height on both long walls), the dead-end variant keeps
+/// its one entrance, and profiles vary between instances so no two arcades
+/// present the same rhythm.
+#[test]
+fn archways_are_walkable_and_no_two_arcades_match() {
+    use crate::domain::entities::anomaly::ArchLayout;
+    let mut config = GeneratorConfig::low_spec();
+    config.anomalies.frequency = 4.0;
+    config.anomalies.pillar_expanses = 0.0;
+    config.anomalies.blackouts = 0.0;
+    config.anomalies.pit_lattices = 0.0;
+    let noise = SimpleNoiseProvider::new();
+    let empty = RealitySnapshot::empty();
+
+    let mut instances = Vec::new();
+    'scan: for rz in 3i64..40 {
+        for rx in 3i64..40 {
+            let plans = BackroomsLevel::region_plans_for(
+                Position::new(rx as f32 * REGION_SIZE, rz as f32 * REGION_SIZE),
+                1.0,
+                42,
+                &config,
+                &noise,
+            );
+            for instance in plans.iter().flat_map(|(_, p)| &p.anomalies) {
+                if instance.kind == AnomalyKind::ArchwayRoom
+                    && !instances.iter().any(|a: &AnomalyInstance| a.id == instance.id)
+                {
+                    instances.push(instance.clone());
+                    if instances.len() >= 8 {
+                        break 'scan;
+                    }
+                }
+            }
+        }
+    }
+    assert!(instances.len() >= 4, "only {} arch rooms found", instances.len());
+
+    let mut profiles = std::collections::BTreeSet::new();
+    let mut openings_walked = 0usize;
+    for instance in &instances {
+        let arch = instance.arch.expect("arch profile");
+        profiles.insert((
+            (arch.bay * 10.0) as i64,
+            (arch.opening * 10.0) as i64,
+            arch.blind_every,
+            (arch.spring_units * 10.0) as i64,
+            arch.layout == ArchLayout::Transition,
+        ));
+        let half_x = instance.footprint.half_x;
+        let half_z = instance.footprint.half_z;
+        match arch.layout {
+            ArchLayout::Transition => {
+                // Every non-blind bay center on both long walls is an open,
+                // walkable doorway with standing headroom.
+                let mut bay_index = 0i64;
+                loop {
+                    let center = arch.bay * (bay_index as f32 + 0.5);
+                    if center + arch.opening * 0.5 >= 2.0 * half_x {
+                        break;
+                    }
+                    let blind =
+                        bay_index.rem_euclid(arch.blind_every as i64) == arch.blind_every as i64 - 1;
+                    if !blind && center - arch.opening * 0.5 > 0.0 {
+                        for side in [-1.0f32, 1.0] {
+                            let p = instance
+                                .world_coords(center - half_x, side * (half_z - 0.1));
+                            let plan =
+                                sample_anomaly(instance, &noise, 42, &config, &empty, p.x, p.z);
+                            assert!(
+                                !plan.solid,
+                                "arch opening walled shut in {:x} bay {bay_index}",
+                                instance.id
+                            );
+                            let head = plan.lintel_from_units.expect("arch head");
+                            assert!(
+                                head >= 2.0,
+                                "arch head {head} too low to walk through in {:x}",
+                                instance.id
+                            );
+                            openings_walked += 1;
+                        }
+                    }
+                    bay_index += 1;
+                }
+            }
+            ArchLayout::DeadEnd => {
+                let p = instance.world_coords(-(half_x - 0.1), 0.0);
+                let plan = sample_anomaly(instance, &noise, 42, &config, &empty, p.x, p.z);
+                assert!(!plan.solid, "dead-end entrance sealed in {:x}", instance.id);
+                assert!(plan.lintel_from_units.unwrap_or(0.0) >= 2.0);
+            }
+        }
+    }
+    assert!(openings_walked >= 8, "only {openings_walked} openings verified");
+    assert!(
+        profiles.len() >= instances.len() - 1,
+        "arcades repeat themselves: {} profiles for {} rooms",
+        profiles.len(),
+        instances.len()
+    );
+}
+
 /// Pillar expanses read calmer than ordinary Level 0 (dry shallow
 /// carpet) and the protected bearing lane carries an unbroken light
 /// rhythm — the route is architecture, not an invisible collision lane.

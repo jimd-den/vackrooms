@@ -160,7 +160,9 @@ fn macro_instance(
         depth: 2.4,
     });
     let arch = (kind == AnomalyKind::ArchwayRoom).then(|| {
-        let layout = if h(0xA0) & 1 == 0 {
+        // Most arch rooms are walk-through connectors; the sheltered dead
+        // end is the rarer find. Both stay immutable anchors.
+        let layout = if unit(h(0xA0)) < 0.7 {
             ArchLayout::Transition
         } else {
             ArchLayout::DeadEnd
@@ -177,12 +179,19 @@ fn macro_instance(
                 _ => ArchBehavior::ScaleBreach,
             }
         };
+        // Every instance is its own arcade: rhythm, clear width, springing
+        // height, and blind cadence all vary, so no two arch rooms present
+        // the same silhouette — yet every non-blind opening stays walkable
+        // (the opening is capped so piers survive, and the head springs at
+        // standing height before rising toward the center).
+        let bay = snap(2.4 + 2.0 * unit(h(0xA1)));
         ArchProfile {
             layout,
             behavior,
-            bay: snap(2.4 + 0.8 * unit(h(0xA1))),
-            opening: snap(1.6 + 0.4 * unit(h(0xA2))),
-            blind_every: 3 + (h(0xA3) % 2) as u8,
+            bay,
+            opening: snap((1.4 + 1.4 * unit(h(0xA2))).min(bay - 0.8)),
+            blind_every: 3 + (h(0xA3) % 4) as u8,
+            spring_units: ((2.0 + 0.8 * unit(h(0xA5))) / 0.2).round() * 0.2,
         }
     });
     let mut instance = AnomalyInstance {

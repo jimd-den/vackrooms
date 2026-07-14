@@ -355,7 +355,7 @@ fn sample_archway_anchor(context: &SampleContext<'_>) -> ColumnPlan {
     let blind = bay_index.rem_euclid(arch.blind_every as i64) == arch.blind_every as i64 - 1;
     let arch_head = {
         let t = ((along - arch.bay * 0.5).abs() / (effective_opening * 0.5)).clamp(0.0, 1.0);
-        (((2.0 - head_drop) + 0.6 * (1.0 - t)) / 0.2).round() * 0.2
+        (((arch.spring_units - head_drop) + 0.6 * (1.0 - t)) / 0.2).round() * 0.2
     };
 
     if context.perimeter {
@@ -372,8 +372,9 @@ fn sample_archway_anchor(context: &SampleContext<'_>) -> ColumnPlan {
                 let on_entrance_wall = half_x - local_x.abs() <= PLAN_WALL_T && local_x < 0.0;
                 if on_entrance_wall && local_z.abs() < 1.0 {
                     plan.solid = false;
-                    plan.lintel_from_units = (tuning.walls > 0.0)
-                        .then_some(((2.0 + 0.6 * (1.0 - local_z.abs())) / 0.2).round() * 0.2);
+                    plan.lintel_from_units = (tuning.walls > 0.0).then_some(
+                        ((arch.spring_units + 0.6 * (1.0 - local_z.abs())) / 0.2).round() * 0.2,
+                    );
                 }
             }
         }
@@ -437,6 +438,7 @@ mod tests {
                 bay: 2.8,
                 opening: 1.6,
                 blind_every: 4,
+                spring_units: 2.0,
             }),
             gates: Vec::new(),
             skeleton_half_width: 0.0,

@@ -105,6 +105,10 @@ pub struct ArchProfile {
     /// Every `blind_every`-th arch is blind (a shelter niche reads as a
     /// skipped opening in the same rhythm).
     pub blind_every: u8,
+    /// Height at which the arch springs from its jambs, world units. The
+    /// head rises another 0.6 u toward the opening's center, so every
+    /// non-blind arch is walkable through its middle by construction.
+    pub spring_units: f32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
