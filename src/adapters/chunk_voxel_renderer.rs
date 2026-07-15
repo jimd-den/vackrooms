@@ -257,9 +257,14 @@ pub fn render_chunk_voxel_blueprint_svg(
                 let mut winning_pri: u8 = 0;
                 for vy in 0..gh {
                     let v = grid.get(vx, vy, vz);
-                    // Skip ceiling/light voxels when show_ceiling is off.
+                    // Skip ceiling/fixture voxels when show_ceiling is off.
+                    // Glimmers are ceiling fixtures too: leaving them in made
+                    // blackout debug captures look like floor-level lights.
                     if !options.show_ceiling
-                        && (v == VOXEL_CEILING || v == VOXEL_LIGHT || v == VOXEL_RED_LIGHT)
+                        && (v == VOXEL_CEILING
+                            || v == VOXEL_LIGHT
+                            || v == VOXEL_RED_LIGHT
+                            || v == crate::domain::entities::voxel_grid::VOXEL_GLIMMER)
                     {
                         continue;
                     }

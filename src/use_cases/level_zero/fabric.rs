@@ -223,7 +223,20 @@ impl BackroomsLevel {
                 // Porosity varies along a run, so drops end ragged rather
                 // than on clean cell boundaries. The walls knob scales
                 // survival: 0 empties the fabric, 2 approaches a full grid.
-                let survive = (0.92 - 0.42 * porosity) * tuning.walls.clamp(0.0, 1.5);
+                //
+                // A Peripheral Shift is not a reshuffle of the same maze: an
+                // epoch-salted neighborhood field biases wall survival ±0.16
+                // (smooth like porosity, zero at epoch 0), so a returning
+                // wanderer finds warren where they remember openness and
+                // openness where they remember warren — a different tree of
+                // a map, still inside the porosity climate's character.
+                let shift_bias = if epoch == 0 {
+                    0.0
+                } else {
+                    0.16 * Self::n(noise, seed, drift(0x9700), wx, wz, 0.07)
+                };
+                let survive =
+                    (0.92 - 0.42 * porosity + shift_bias) * tuning.walls.clamp(0.0, 1.5);
                 if Self::cell_hash(noise, seed, wall_salt, cx, cz) < survive {
                     let along = if in_w { fz } else { fx };
                     // The binary-tree wall always gets its doorway; porous

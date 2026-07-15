@@ -1555,6 +1555,67 @@ fn fabric_stays_connected_through_mixed_drift_epochs() {
     assert!(cells_checked > 1000, "sample too small: {cells_checked}");
 }
 
+/// Geometry priority is not presentation priority: the main corridor stays
+/// carved open through a blackout (you can always walk it), but past the
+/// approach band the blackout owns the dark — the corridor's light strips
+/// die like every other fixture, so circulation never reads as a lit
+/// tunnel through the anomaly.
+#[test]
+fn a_blackout_owns_the_dark_even_over_the_main_corridor() {
+    use crate::domain::entities::architecture::{CirculationSpine, RegionPlan};
+    let (config, instance) = find_macro_anomaly(AnomalyKind::BlackoutExpanse);
+    let noise = SimpleNoiseProvider::new();
+    let center = instance.footprint.center;
+    let start_x = center.x - 300.0;
+    let plan = RegionPlan {
+        origin_world: Position::new(0.0, 0.0),
+        size_world: 80.0,
+        architects: Vec::new(),
+        assemblies: Vec::new(),
+        corridors: vec![CirculationSpine {
+            id: 0,
+            spine_kind: SpaceProgram::MainCorridor,
+            path: vec![
+                Position::new(start_x, center.z),
+                Position::new(center.x + 300.0, center.z),
+            ],
+            width: 5.6,
+        }],
+        anomalies: vec![instance.clone()],
+    };
+    let reality = RealitySnapshot::empty();
+
+    let mut dark_deep_modules = 0usize;
+    let mut lit_outside_modules = 0usize;
+    let first_module = (start_x / 4.0).ceil() * 4.0;
+    for k in 0..150i64 {
+        // Strip modules follow the corridor in *world* space: light where
+        // the absolute coordinate along the run satisfies along % 4 < 1.
+        let wx = first_module + 4.0 * k as f32 + 0.5;
+        let wz = center.z;
+        let column =
+            BackroomsLevel::plan_column_in_reality(&plan, &noise, 42, &config, &reality, wx, wz);
+        assert!(!column.solid, "main corridor blocked at ({wx}, {wz})");
+        if instance.contains(wx, wz) && instance.normalized_depth(wx, wz) > 0.25 {
+            assert!(
+                !column.light,
+                "corridor light strip survives deep blackout at ({wx}, {wz})"
+            );
+            dark_deep_modules += 1;
+        } else if !instance.contains(wx, wz) {
+            lit_outside_modules += usize::from(column.light);
+        }
+    }
+    assert!(
+        dark_deep_modules >= 5,
+        "corridor barely crossed the dark core ({dark_deep_modules} modules)"
+    );
+    assert!(
+        lit_outside_modules >= 10,
+        "corridor strips outside the blackout must stay lit ({lit_outside_modules})"
+    );
+}
+
 /// Inside a blackout the same drift stamps rearrange the substrate — the
 /// space changes behind the player in real time — while the recovery
 /// skeleton stays open in every epoch, so the way out is architecture,

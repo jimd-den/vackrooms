@@ -223,10 +223,13 @@ fn fixture_flicker_gain(id: u64, mode: u8, time: f32) -> f32 {
 
 /// Inside a blackout, drift cells closer than this may still be revealed by
 /// a flare or the flashlight cone, so the rear shift never touches them.
-const BLACKOUT_HIDE_DISTANCE: f32 = 14.0;
-/// Cadence of the in-blackout rear shift. Slow enough that each swap's
-/// rebuild work amortizes; fast enough that backtracking reliably betrays.
-const BLACKOUT_SHIFT_PERIOD_S: f32 = 2.5;
+/// Blackout ambient is near-black past a few units; 8 u is already beyond
+/// anything the player can resolve behind their own shoulder.
+const BLACKOUT_HIDE_DISTANCE: f32 = 8.0;
+/// Cadence of the in-blackout rear shift. Fast enough that backtracking
+/// reliably betrays; each firing's rebuild work is metered by the ordinary
+/// install budget.
+const BLACKOUT_SHIFT_PERIOD_S: f32 = 2.0;
 /// Flare flame height above the floor slab.
 const FLARE_HEIGHT: f32 = 0.3;
 
@@ -289,6 +292,9 @@ pub struct Engine {
     drift_near: HashSet<(i64, i64)>,
     /// Seconds until the next in-blackout rear shift may fire.
     blackout_shift_cooldown: f32,
+    /// Debug telemetry for the rear shift: (player inside a blackout,
+    /// eligible cells at last firing, total cells shifted this session).
+    blackout_shift_debug: (bool, usize, usize),
     /// Last non-hazard eye position used by pit-lattice recovery.
     last_safe_position: [f32; 3],
     /// Active Backrooms level; chunks are requested for this level.
@@ -348,6 +354,7 @@ impl Engine {
             forced_reloads: HashSet::new(),
             drift_near: HashSet::new(),
             blackout_shift_cooldown: 0.0,
+            blackout_shift_debug: (false, 0, 0),
             last_safe_position: config.spawn,
             level: config.initial_level,
             push_seconds: 0.0,
@@ -792,9 +799,6 @@ impl Engine {
 
         // -- tier 2: the blackout rearranges behind the player ---------------
         self.blackout_shift_cooldown = (self.blackout_shift_cooldown - dt).max(0.0);
-        if self.blackout_shift_cooldown > 0.0 {
-            return;
-        }
         let blackout_bounds = self
             .store
             .all_traversal_gates()
@@ -804,8 +808,13 @@ impl Engine {
             })
             .map(|gate| gate.affected_bounds);
         let Some(bounds) = blackout_bounds else {
+            self.blackout_shift_debug.0 = false;
             return;
         };
+        self.blackout_shift_debug.0 = true;
+        if self.blackout_shift_cooldown > 0.0 {
+            return;
+        }
         let forward = self.player.forward();
         // The rear shift reaches past the streaming footprint on purpose:
         // cells it advances beyond residency simply rebuild on approach,
@@ -814,19 +823,16 @@ impl Engine {
         let mut shifted = Vec::new();
         for cz in fabric_drift_cell_of(pz - reach)..=fabric_drift_cell_of(pz + reach) {
             for cx in fabric_drift_cell_of(px - reach)..=fabric_drift_cell_of(px + reach) {
-                let x0 = cx as f32 * FABRIC_DRIFT_CELL;
-                let z0 = cz as f32 * FABRIC_DRIFT_CELL;
-                let inside = bounds.contains(x0, z0)
-                    && bounds.contains(x0 + FABRIC_DRIFT_CELL, z0 + FABRIC_DRIFT_CELL);
-                // "Behind" must hold for the whole cell, with a margin, so
-                // nothing at the edge of vision ever pops.
-                let behind = [x0, x0 + FABRIC_DRIFT_CELL]
-                    .iter()
-                    .all(|&cx_w| {
-                        [z0, z0 + FABRIC_DRIFT_CELL].iter().all(|&cz_w| {
-                            (cx_w - px) * forward[0] + (cz_w - pz) * forward[2] < -2.0
-                        })
-                    });
+                let cx_w = (cx as f32 + 0.5) * FABRIC_DRIFT_CELL;
+                let cz_w = (cz as f32 + 0.5) * FABRIC_DRIFT_CELL;
+                // Center-based checks on purpose: a 40 u cell near the
+                // blackout's edge or the player's flank still shifts. The
+                // sliver a check this loose can expose sits in blackout
+                // darkness — and a half-glimpsed wall that wasn't there is
+                // the intended experience, not a bug.
+                let inside = bounds.contains(cx_w, cz_w);
+                let behind =
+                    (cx_w - px) * forward[0] + (cz_w - pz) * forward[2] < -4.0;
                 let hidden =
                     Self::drift_cell_dist2((cx, cz), px, pz) > BLACKOUT_HIDE_DISTANCE.powi(2);
                 if inside && behind && hidden {
@@ -834,9 +840,11 @@ impl Engine {
                 }
             }
         }
+        self.blackout_shift_debug = (true, shifted.len(), self.blackout_shift_debug.2);
         if shifted.is_empty() {
             return;
         }
+        self.blackout_shift_debug.2 += shifted.len();
         self.blackout_shift_cooldown = BLACKOUT_SHIFT_PERIOD_S;
         for &(cx, cz) in &shifted {
             self.reality = self.reality.with_fabric_drift_advanced(cx, cz);
@@ -1374,6 +1382,13 @@ impl Engine {
             "peripheral shift: {} drifted cell(s), {} watched",
             self.reality.fabric_drifts().len(),
             self.drift_near.len()
+        );
+        let (inside, eligible, total) = self.blackout_shift_debug;
+        let _ = writeln!(
+            out,
+            "blackout shift: inside={inside} eligible={eligible} \
+             shifted_total={total} cooldown={:.1}s",
+            self.blackout_shift_cooldown
         );
         for stamp in stamps {
             let _ = writeln!(

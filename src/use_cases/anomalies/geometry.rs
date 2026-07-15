@@ -282,6 +282,42 @@ fn sample_blackout_expanse(context: &SampleContext<'_>) -> ColumnPlan {
             plan.light = false;
         }
     }
+
+    // The dark owns a structural layer the Peripheral Shift re-deals: past
+    // the approach band, room-scale partitions stand on the instance's own
+    // lattice. Their epoch comes from the fabric drift stamps, so the
+    // engine's rear shift does not merely nudge 0.4 u fabric bands — it
+    // rearranges *rooms* behind the player. Every drawn partition is
+    // pierced by its own doorway, so no shift can seal space it creates,
+    // and the recovery skeleton stays exempt below.
+    if depth > 0.25 && !context.skeleton && tuning.walls > 0.0 {
+        const PARTITION_CELL: f32 = 9.6;
+        let cell_x = (local_x / PARTITION_CELL).floor() as i64;
+        let cell_z = (local_z / PARTITION_CELL).floor() as i64;
+        let anchor = instance.world_coords(
+            (cell_x as f32 + 0.5) * PARTITION_CELL,
+            (cell_z as f32 + 0.5) * PARTITION_CELL,
+        );
+        let epoch = context.reality.fabric_drift_epoch(anchor.x, anchor.z);
+        let within_x = local_x.rem_euclid(PARTITION_CELL);
+        let within_z = local_z.rem_euclid(PARTITION_CELL);
+        for (in_band, along, wall_salt, door_salt) in [
+            (within_x < PLAN_WALL_T, within_z, 0xB1D0u64, 0xB1D1u64),
+            (within_z < PLAN_WALL_T, within_x, 0xB1D2u64, 0xB1D3u64),
+        ] {
+            if !in_band {
+                continue;
+            }
+            if anomaly_hash(instance, epoch, wall_salt, cell_x, cell_z) < 0.5 {
+                let gap = anomaly_hash(instance, epoch, door_salt, cell_x, cell_z);
+                let gap_pos = 0.8 + (PARTITION_CELL - 3.2) * gap;
+                if along < gap_pos || along >= gap_pos + 1.6 {
+                    plan.solid = true;
+                    plan.light = false;
+                }
+            }
+        }
+    }
     plan
 }
 

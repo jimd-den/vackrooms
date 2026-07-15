@@ -78,10 +78,36 @@ impl BackroomsLevel {
             }
         }
         if in_corridor {
-            return ColumnPlan {
+            let mut column = ColumnPlan {
                 light: corridor_light && tuning.lights > 0.0,
                 ..ColumnPlan::open(corridor_ceiling)
             };
+            // Geometry priority and presentation priority are different
+            // things: the corridor owns passability — its route through a
+            // blackout stays carved open — but a blackout owns the *dark*.
+            // Past the approach band the corridor's light strips die like
+            // every other fixture, thinning through the same gradient, so
+            // circulation never reads as a lit tunnel through the anomaly.
+            if let Some(blackout) = plan
+                .anomalies
+                .iter()
+                .find(|a| a.kind == AnomalyKind::BlackoutExpanse && a.contains(wx, wz))
+            {
+                let depth = blackout.normalized_depth(wx, wz);
+                if depth > 0.22 {
+                    column.light = false;
+                } else if depth > 0.0 && column.light {
+                    let module = (wx.floor() as i64) ^ ((wz.floor() as i64) << 17);
+                    let hash = {
+                        let mut h = (blackout.id ^ module as u64)
+                            .wrapping_mul(0x9E37_79B9_7F4A_7C15);
+                        h ^= h >> 33;
+                        (h >> 40) as f32 / (1u64 << 24) as f32
+                    };
+                    column.light = hash < 1.0 - depth / 0.22;
+                }
+            }
+            return column;
         }
 
         // Archway anchors take precedence over every hostile family, and any
