@@ -4,8 +4,8 @@
     "maxFileSize": 52428800
   },
   "output": {
-    "filePath": "repomix-output.json",
-    "style": "json",
+    "filePath": "repomix-output.md",
+    "style": "markdown",
     "filePathStyle": "cwd-relative",
     "parsableStyle": true,
     "fileSummary": true,

@@ -4,7 +4,8 @@
   "description": "Visual regression tests for Vackrooms",
   "main": "index.js",
   "scripts": {
-    "test:visual": "playwright test"
+    "build:wasm": "node scripts/build-wasm.mjs",
+    "test:visual": "npm run build:wasm && playwright test"
   },
   "devDependencies": {
     "@playwright/test": "^1.40.0"

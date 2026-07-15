@@ -22,8 +22,8 @@
 
 pub mod adapters;
 pub mod application;
+pub mod core;
 
-#[cfg(target_arch = "wasm32")]
 pub mod drivers;
 
 #[cfg(target_arch = "wasm32")]
@@ -44,6 +44,16 @@ pub static MOUSE_SENSITIVITY_BITS: AtomicU32 = AtomicU32::new(0x3F80_0000); // 1
 /// (adaptive governor).
 #[cfg(target_arch = "wasm32")]
 pub static RENDER_SCALE_BITS: AtomicU32 = AtomicU32::new(0);
+
+/// Anomaly debug overlay visibility (settings switch and the F3 key).
+#[cfg(target_arch = "wasm32")]
+pub static ANOMALY_DEBUG: AtomicBool = AtomicBool::new(false);
+
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen::prelude::wasm_bindgen]
+pub fn set_anomaly_debug(enabled: bool) {
+    ANOMALY_DEBUG.store(enabled, Ordering::Relaxed);
+}
 
 #[cfg(target_arch = "wasm32")]
 #[wasm_bindgen::prelude::wasm_bindgen]
@@ -101,28 +111,44 @@ pub static CPU_SHADOWS: AtomicU32 = AtomicU32::new(0);
 #[cfg(target_arch = "wasm32")]
 #[wasm_bindgen::prelude::wasm_bindgen]
 pub fn set_cpu_scale(scale: f32) {
-    let s = if scale.is_finite() { scale.clamp(0.25, 1.0) } else { 1.0 };
+    let s = if scale.is_finite() {
+        scale.clamp(0.25, 1.0)
+    } else {
+        1.0
+    };
     CPU_SCALE_BITS.store(s.to_bits(), Ordering::Relaxed);
 }
 
 #[cfg(target_arch = "wasm32")]
 #[wasm_bindgen::prelude::wasm_bindgen]
 pub fn set_cpu_lod_cutoff(cutoff: f32) {
-    let c = if cutoff.is_finite() { cutoff.clamp(0.25, 2.0) } else { 1.0 };
+    let c = if cutoff.is_finite() {
+        cutoff.clamp(0.25, 2.0)
+    } else {
+        1.0
+    };
     CPU_LOD_CUTOFF_BITS.store(c.to_bits(), Ordering::Relaxed);
 }
 
 #[cfg(target_arch = "wasm32")]
 #[wasm_bindgen::prelude::wasm_bindgen]
 pub fn set_cpu_max_splat_half(half: f32) {
-    let h = if half.is_finite() { half.clamp(2.0, 16.0) } else { 12.0 };
+    let h = if half.is_finite() {
+        half.clamp(2.0, 16.0)
+    } else {
+        12.0
+    };
     CPU_MAX_SPLAT_HALF_BITS.store(h.to_bits(), Ordering::Relaxed);
 }
 
 #[cfg(target_arch = "wasm32")]
 #[wasm_bindgen::prelude::wasm_bindgen]
 pub fn set_cpu_max_draw_distance(dist: f32) {
-    let d = if dist.is_finite() { dist.clamp(16.0, 256.0) } else { 96.0 };
+    let d = if dist.is_finite() {
+        dist.clamp(16.0, 256.0)
+    } else {
+        96.0
+    };
     CPU_MAX_DRAW_DISTANCE_BITS.store(d.to_bits(), Ordering::Relaxed);
 }
 
@@ -130,6 +156,52 @@ pub fn set_cpu_max_draw_distance(dist: f32) {
 #[wasm_bindgen::prelude::wasm_bindgen]
 pub fn set_cpu_shadows(mode: u32) {
     CPU_SHADOWS.store(mode, Ordering::Relaxed);
+}
+
+/// Renderer optimization toggles as a bitfield — see
+/// [`application::render_settings::RenderToggles`]. Initialized from the URL
+/// query at boot; the settings menu flips individual switches afterwards.
+#[cfg(target_arch = "wasm32")]
+pub static RENDER_TOGGLE_BITS: AtomicU32 = AtomicU32::new(u32::MAX);
+
+/// Flips one renderer optimization switch by name (`"hiz"`, `"f2b"`,
+/// `"skip"`, `"mips"`, `"beam_occlusion"`, `"shadows"`, `"cells"`,
+/// `"cull"`, `"budget"`, `"dither"`, `"bake"`, `"timer"`). Unknown names
+/// are ignored.
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen::prelude::wasm_bindgen]
+pub fn set_render_toggle(name: &str, enabled: bool) {
+    let mut toggles = get_render_toggles();
+    toggles.set(name, enabled);
+    RENDER_TOGGLE_BITS.store(toggles.to_bits(), Ordering::Relaxed);
+}
+
+/// Returns one renderer switch by its short URL name. This small diagnostic
+/// export lets the settings UI and browser smoke tests verify the effective
+/// state after URL and local-preference overrides have been composed.
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen::prelude::wasm_bindgen]
+pub fn render_toggle_enabled(name: &str) -> Option<bool> {
+    get_render_toggles().enabled(name)
+}
+
+/// Snapshot of the toggle switchboard, taken once per frame by each driver
+/// and passed by value into the platform-free render code.
+#[cfg(target_arch = "wasm32")]
+pub fn get_render_toggles() -> crate::application::render_settings::RenderToggles {
+    let bits = RENDER_TOGGLE_BITS.load(Ordering::Relaxed);
+    if bits == u32::MAX {
+        crate::application::render_settings::RenderToggles::default()
+    } else {
+        crate::application::render_settings::RenderToggles::from_bits(bits)
+    }
+}
+
+/// Boot-time initialization from the URL query (`?rt_<name>=0|1`).
+#[cfg(target_arch = "wasm32")]
+pub fn init_render_toggles(query: &str) {
+    let toggles = crate::application::render_settings::parse_render_toggles(query);
+    RENDER_TOGGLE_BITS.store(toggles.to_bits(), Ordering::Relaxed);
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -145,7 +217,11 @@ pub fn get_cpu_settings() -> crate::adapters::cpu_splatter::CpuRenderSettings {
         lod_cutoff_px: lod_cutoff,
         max_splat_half_px: max_splat_half,
         max_draw_distance: max_draw_dist,
-        shadows: if shadow_mode == 1 { crate::adapters::cpu_splatter::CpuShadowMode::Hero } else { crate::adapters::cpu_splatter::CpuShadowMode::Off },
+        shadows: if shadow_mode == 1 {
+            crate::adapters::cpu_splatter::CpuShadowMode::Hero
+        } else {
+            crate::adapters::cpu_splatter::CpuShadowMode::Off
+        },
         ..crate::adapters::cpu_splatter::CpuRenderSettings::default()
     }
 }
@@ -156,10 +232,7 @@ pub fn get_blueprint_svg(seed: u32, rx: i32, rz: i32, voxel_scale: f32, size_wor
     let noise = vackrooms::frameworks_drivers::simple_noise::SimpleNoiseProvider::new();
     let plan = vackrooms::use_cases::region_plan::generate_region_plan(
         seed,
-        vackrooms::entities::models::Position::new(
-            rx as f32 * size_world,
-            rz as f32 * size_world,
-        ),
+        vackrooms::entities::models::Position::new(rx as f32 * size_world, rz as f32 * size_world),
         size_world,
         &vackrooms::use_cases::generate_chunk::GeneratorConfig::low_spec(),
         &noise,
@@ -192,7 +265,11 @@ pub fn get_blueprint_svg(seed: u32, rx: i32, rz: i32, voxel_scale: f32, size_wor
         level: 0,
         voxel_scale,
     };
-    vackrooms::adapters::blueprint_renderer::render_region_blueprint_svg(&plan, &chunk_bounds, options)
+    vackrooms::adapters::blueprint_renderer::render_region_blueprint_svg(
+        &plan,
+        &chunk_bounds,
+        options,
+    )
 }
 
 /// Compact geometry feed for the canvas debug map. This deliberately returns
@@ -206,55 +283,111 @@ pub fn get_debug_region_json(seed: u32, region_x: i32, region_z: i32) -> String 
 
     let noise = vackrooms::frameworks_drivers::simple_noise::SimpleNoiseProvider::new();
     let size = vackrooms::use_cases::region_plan::REGION_SIZE;
-    let origin = vackrooms::entities::models::Position::new(
-        region_x as f32 * size,
-        region_z as f32 * size,
-    );
+    let origin =
+        vackrooms::entities::models::Position::new(region_x as f32 * size, region_z as f32 * size);
     let config = vackrooms::use_cases::generate_chunk::GeneratorConfig::low_spec();
     let plan = vackrooms::use_cases::region_plan::generate_region_plan(
         seed, origin, size, &config, &noise,
     );
     let mut out = String::with_capacity(8192);
-    write!(out, "{{\"origin\":[{:.1},{:.1}],\"size\":{:.1},\"walls\":[", origin.x, origin.z, size).unwrap();
+    write!(
+        out,
+        "{{\"origin\":[{:.1},{:.1}],\"size\":{:.1},\"walls\":[",
+        origin.x, origin.z, size
+    )
+    .unwrap();
     let mut first = true;
     for assembly in &plan.assemblies {
         let vertices = &assembly.footprint.vertices;
-        for pair in vertices.iter().zip(vertices.iter().cycle().skip(1)).take(vertices.len()) {
-            if !first { out.push(','); }
+        for pair in vertices
+            .iter()
+            .zip(vertices.iter().cycle().skip(1))
+            .take(vertices.len())
+        {
+            if !first {
+                out.push(',');
+            }
             first = false;
-            write!(out, "[{:.1},{:.1},{:.1},{:.1}]", pair.0.0, pair.0.1, pair.1.0, pair.1.1).unwrap();
+            write!(
+                out,
+                "[{:.1},{:.1},{:.1},{:.1}]",
+                pair.0.0, pair.0.1, pair.1.0, pair.1.1
+            )
+            .unwrap();
         }
     }
     out.push_str("],\"corridors\":[");
     first = true;
     for corridor in &plan.corridors {
         for pair in corridor.path.windows(2) {
-            if !first { out.push(','); }
+            if !first {
+                out.push(',');
+            }
             first = false;
-            write!(out, "[{:.1},{:.1},{:.1},{:.1},{:.1}]", pair[0].x, pair[0].z, pair[1].x, pair[1].z, corridor.width).unwrap();
+            write!(
+                out,
+                "[{:.1},{:.1},{:.1},{:.1},{:.1}]",
+                pair[0].x, pair[0].z, pair[1].x, pair[1].z, corridor.width
+            )
+            .unwrap();
         }
     }
     out.push_str("],\"lights\":[");
     first = true;
     for assembly in &plan.assemblies {
         for fixture in &assembly.fixtures {
-            if !first { out.push(','); }
+            if !first {
+                out.push(',');
+            }
             first = false;
-            write!(out, "[{:.1},{:.1},{:.1},{:.1},{}]", fixture.at.x, fixture.at.z, fixture.half_x, fixture.half_z, fixture.lit).unwrap();
+            write!(
+                out,
+                "[{:.1},{:.1},{:.1},{:.1},{}]",
+                fixture.at.x, fixture.at.z, fixture.half_x, fixture.half_z, fixture.lit
+            )
+            .unwrap();
         }
     }
     out.push_str("],\"rooms\":[");
     first = true;
     for assembly in &plan.assemblies {
         let b = assembly.footprint.bounds();
-        if !first { out.push(','); }
+        if !first {
+            out.push(',');
+        }
         first = false;
         let kind = match assembly.program {
             SpaceProgram::MainCorridor => "corridor",
             SpaceProgram::AbandonedExpansion => "abandoned",
             _ => "room",
         };
-        write!(out, "[{:.1},{:.1},{:.1},{:.1},\"{}\"]", b.0, b.1, b.2, b.3, kind).unwrap();
+        write!(
+            out,
+            "[{:.1},{:.1},{:.1},{:.1},\"{}\"]",
+            b.0, b.1, b.2, b.3, kind
+        )
+        .unwrap();
+    }
+    out.push_str("],\"anomalies\":[");
+    first = true;
+    for anomaly in &plan.anomalies {
+        if !first {
+            out.push(',');
+        }
+        first = false;
+        let b = anomaly.footprint.bounds();
+        write!(
+            out,
+            "[\"{:?}\",\"{:016x}\",{:.1},{:.1},{:.1},{:.1},{}]",
+            anomaly.kind,
+            anomaly.id,
+            b.min_x,
+            b.min_z,
+            b.max_x,
+            b.max_z,
+            anomaly.gates.len(),
+        )
+        .unwrap();
     }
     out.push_str("]}");
     out
@@ -267,7 +400,11 @@ pub fn get_debug_region_json(seed: u32, region_x: i32, region_z: i32) -> String 
 pub fn get_debug_chunk_json(seed: u32, chunk_x: f32, chunk_z: f32, voxel_scale: f32) -> String {
     use std::fmt::Write;
     use vackrooms::domain::entities::architecture::SpaceProgram;
-    use vackrooms::domain::entities::voxel_grid::{VOXEL_CEILING, VOXEL_FLOOR, VOXEL_GRASS, VOXEL_LIGHT, VOXEL_RED_LIGHT, VOXEL_RED_WALL, VOXEL_TREE, VOXEL_WALL, VOXEL_WATER};
+    use vackrooms::domain::entities::voxel_grid::{
+        VOXEL_CEILING, VOXEL_DAMAGED_WALL, VOXEL_DEEP_CARPET, VOXEL_DRY_CARPET, VOXEL_FLOOR,
+        VOXEL_FLUID, VOXEL_GLIMMER, VOXEL_GRASS, VOXEL_LIGHT, VOXEL_PALE_WALL, VOXEL_RED_LIGHT,
+        VOXEL_RED_WALL, VOXEL_STICKY_CARPET, VOXEL_TREE, VOXEL_WALL, VOXEL_WATER,
+    };
 
     let noise = vackrooms::frameworks_drivers::simple_noise::SimpleNoiseProvider::new();
     let config = if voxel_scale <= 0.1 {
@@ -276,18 +413,30 @@ pub fn get_debug_chunk_json(seed: u32, chunk_x: f32, chunk_z: f32, voxel_scale: 
         vackrooms::use_cases::generate_chunk::GeneratorConfig::low_spec()
     };
     let chunk_origin = vackrooms::entities::models::Position::new(chunk_x, chunk_z);
-    let generator = vackrooms::use_cases::generate_chunk::GenerateChunkArchitectureUseCase::new(&noise);
+    let generator =
+        vackrooms::use_cases::generate_chunk::GenerateChunkArchitectureUseCase::new(&noise);
     let grid = generator.execute(chunk_origin, seed, config.clone());
     let region_size = vackrooms::use_cases::region_plan::REGION_SIZE;
     let region_origin = vackrooms::entities::models::Position::new(
         (chunk_x / region_size).floor() * region_size,
         (chunk_z / region_size).floor() * region_size,
     );
-    let plan = vackrooms::use_cases::region_plan::generate_region_plan(seed, region_origin, region_size, &config, &noise);
+    let plan = vackrooms::use_cases::region_plan::generate_region_plan(
+        seed,
+        region_origin,
+        region_size,
+        &config,
+        &noise,
+    );
     let width = grid.width().saturating_sub(2);
     let depth = grid.depth().saturating_sub(2);
     let mut out = String::with_capacity(width * depth + 4096);
-    write!(out, "{{\"origin\":[{:.1},{:.1}],\"scale\":{:.3},\"width\":{},\"depth\":{},\"cells\":\"", chunk_x, chunk_z, voxel_scale, width, depth).unwrap();
+    write!(
+        out,
+        "{{\"origin\":[{:.1},{:.1}],\"scale\":{:.3},\"width\":{},\"depth\":{},\"cells\":\"",
+        chunk_x, chunk_z, voxel_scale, width, depth
+    )
+    .unwrap();
     // One top-down material per column. Priority keeps red lights and walls
     // visible while still exposing floor/ceiling coverage in the same slice.
     for z in 0..depth {
@@ -295,10 +444,48 @@ pub fn get_debug_chunk_json(seed: u32, chunk_x: f32, chunk_z: f32, voxel_scale: 
             let mut material = b'.';
             for y in 0..grid.height() {
                 material = match grid.get(x + 1, y, z + 1) {
-                    VOXEL_RED_LIGHT => b'R', VOXEL_LIGHT => b'L',
-                    VOXEL_RED_WALL => b'X', VOXEL_WALL | VOXEL_TREE => b'#',
-                    VOXEL_CEILING => if material == b'.' { b'^' } else { material },
-                    VOXEL_FLOOR | VOXEL_GRASS | VOXEL_WATER => if material == b'.' { b'_' } else { material },
+                    VOXEL_RED_LIGHT => b'R',
+                    VOXEL_LIGHT => b'L',
+                    VOXEL_GLIMMER => b'g',
+                    VOXEL_RED_WALL => b'X',
+                    VOXEL_WALL | VOXEL_TREE => b'#',
+                    VOXEL_PALE_WALL => b'P',
+                    VOXEL_DAMAGED_WALL => b'D',
+                    VOXEL_CEILING => {
+                        if material == b'.' {
+                            b'^'
+                        } else {
+                            material
+                        }
+                    }
+                    VOXEL_FLOOR | VOXEL_GRASS | VOXEL_WATER => {
+                        if material == b'.' {
+                            b'_'
+                        } else {
+                            material
+                        }
+                    }
+                    VOXEL_DRY_CARPET => {
+                        if material == b'.' {
+                            b','
+                        } else {
+                            material
+                        }
+                    }
+                    VOXEL_DEEP_CARPET | VOXEL_STICKY_CARPET => {
+                        if material == b'.' {
+                            b'~'
+                        } else {
+                            material
+                        }
+                    }
+                    VOXEL_FLUID => {
+                        if material == b'.' {
+                            b'w'
+                        } else {
+                            material
+                        }
+                    }
                     _ => material,
                 };
             }
@@ -309,37 +496,157 @@ pub fn get_debug_chunk_json(seed: u32, chunk_x: f32, chunk_z: f32, voxel_scale: 
     let mut first = true;
     for corridor in &plan.corridors {
         for pair in corridor.path.windows(2) {
-            if !first { out.push(','); } first = false;
-            write!(out, "[{:.2},{:.2},{:.2},{:.2},{:.2},{}]", (pair[0].x-chunk_x)/voxel_scale, (pair[0].z-chunk_z)/voxel_scale, (pair[1].x-chunk_x)/voxel_scale, (pair[1].z-chunk_z)/voxel_scale, corridor.width/voxel_scale, if corridor.spine_kind == SpaceProgram::MainCorridor { 0 } else { 1 }).unwrap();
+            if !first {
+                out.push(',');
+            }
+            first = false;
+            write!(
+                out,
+                "[{:.2},{:.2},{:.2},{:.2},{:.2},{}]",
+                (pair[0].x - chunk_x) / voxel_scale,
+                (pair[0].z - chunk_z) / voxel_scale,
+                (pair[1].x - chunk_x) / voxel_scale,
+                (pair[1].z - chunk_z) / voxel_scale,
+                corridor.width / voxel_scale,
+                if corridor.spine_kind == SpaceProgram::MainCorridor {
+                    0
+                } else {
+                    1
+                }
+            )
+            .unwrap();
         }
     }
     out.push_str("],\"boxes\":[");
     first = true;
-    let mut box_out = |kind: &str, label: &str, bounds: (f32,f32,f32,f32), color: u8| {
-        if !first { out.push(','); } first = false;
-        write!(out, "[\"{}\",\"{}\",{:.2},{:.2},{:.2},{:.2},{}]", kind, label, (bounds.0-chunk_x)/voxel_scale, (bounds.1-chunk_z)/voxel_scale, (bounds.2-bounds.0)/voxel_scale, (bounds.3-bounds.1)/voxel_scale, color).unwrap();
+    let mut box_out = |kind: &str, label: &str, bounds: (f32, f32, f32, f32), color: u8| {
+        if !first {
+            out.push(',');
+        }
+        first = false;
+        write!(
+            out,
+            "[\"{}\",\"{}\",{:.2},{:.2},{:.2},{:.2},{}]",
+            kind,
+            label,
+            (bounds.0 - chunk_x) / voxel_scale,
+            (bounds.1 - chunk_z) / voxel_scale,
+            (bounds.2 - bounds.0) / voxel_scale,
+            (bounds.3 - bounds.1) / voxel_scale,
+            color
+        )
+        .unwrap();
     };
     for assembly in &plan.assemblies {
         let b = assembly.footprint.bounds();
-        let label = match assembly.program { SpaceProgram::AbandonedExpansion => "ABANDONED", _ => "ASSEMBLY" };
+        let label = match assembly.program {
+            SpaceProgram::AbandonedExpansion => "ABANDONED",
+            _ => "ASSEMBLY",
+        };
         box_out("assembly", label, b, 0);
-        for space in &assembly.spaces { box_out("space", "SUB-ROOM", space.footprint.bounds(), 0); }
-        for ceiling in &assembly.ceiling_zones { box_out("ceiling", "CEILING ZONE", ceiling.area.bounds(), 0); }
+        for space in &assembly.spaces {
+            box_out("space", "SUB-ROOM", space.footprint.bounds(), 0);
+        }
+        for ceiling in &assembly.ceiling_zones {
+            box_out("ceiling", "CEILING ZONE", ceiling.area.bounds(), 0);
+        }
         let s = &assembly.structure;
         let b = assembly.footprint.bounds();
-        box_out("structure", "COLUMN GRID", (b.0+s.phase.0, b.1+s.phase.1, b.2, b.3), 0);
+        box_out(
+            "structure",
+            "COLUMN GRID",
+            (b.0 + s.phase.0, b.1 + s.phase.1, b.2, b.3),
+            0,
+        );
         for opening in &assembly.entrances {
             let half = opening.width * 0.5;
-            let b = if opening.through_x_wall { (opening.center.x-half, opening.center.z-0.12, opening.center.x+half, opening.center.z+0.12) } else { (opening.center.x-0.12, opening.center.z-half, opening.center.x+0.12, opening.center.z+half) };
+            let b = if opening.through_x_wall {
+                (
+                    opening.center.x - half,
+                    opening.center.z - 0.12,
+                    opening.center.x + half,
+                    opening.center.z + 0.12,
+                )
+            } else {
+                (
+                    opening.center.x - 0.12,
+                    opening.center.z - half,
+                    opening.center.x + 0.12,
+                    opening.center.z + half,
+                )
+            };
             box_out("portal", "PORTAL", b, 0);
+        }
+    }
+    for anomaly in &plan.anomalies {
+        let b = anomaly.footprint.bounds();
+        let label = match anomaly.kind {
+            vackrooms::domain::entities::anomaly::AnomalyKind::PillarExpanse => "PILLAR EXPANSE",
+            vackrooms::domain::entities::anomaly::AnomalyKind::BlackoutExpanse => "BLACKOUT",
+            vackrooms::domain::entities::anomaly::AnomalyKind::PitLattice => "PIT LATTICE",
+            vackrooms::domain::entities::anomaly::AnomalyKind::RedRoom => "RED LOOP",
+            vackrooms::domain::entities::anomaly::AnomalyKind::ArchwayRoom => "ARCH ANCHOR",
+        };
+        box_out("anomaly", label, (b.min_x, b.min_z, b.max_x, b.max_z), 1);
+        // Anomaly-aware developer visibility: gates (threshold planes) and
+        // the immutable skeleton lane, keyed by instance id in the label.
+        for gate in anomaly.traversal_gates() {
+            let gb = match gate.axis {
+                vackrooms::domain::entities::anomaly::Axis2::X => {
+                    (gate.plane - 0.1, gate.span_min, gate.plane + 0.1, gate.span_max)
+                }
+                vackrooms::domain::entities::anomaly::Axis2::Z => {
+                    (gate.span_min, gate.plane - 0.1, gate.span_max, gate.plane + 0.1)
+                }
+            };
+            let glabel = format!(
+                "{} {:08X}",
+                match gate.kind {
+                    vackrooms::domain::entities::anomaly::TraversalGateKind::Remap => "GATE",
+                    vackrooms::domain::entities::anomaly::TraversalGateKind::RedThreshold =>
+                        "THRESHOLD",
+                    vackrooms::domain::entities::anomaly::TraversalGateKind::RedLoop => "RED LOOP",
+                    vackrooms::domain::entities::anomaly::TraversalGateKind::RedEscape => "ESCAPE",
+                },
+                (gate.instance_id & 0xFFFF_FFFF) as u32
+            );
+            box_out("gate", &glabel, gb, 1);
+        }
+        if anomaly.kind != vackrooms::domain::entities::anomaly::AnomalyKind::RedRoom
+            && anomaly.kind != vackrooms::domain::entities::anomaly::AnomalyKind::ArchwayRoom
+        {
+            let lane_a = anomaly.world_coords(-anomaly.footprint.half_x, 0.0);
+            let lane_b = anomaly.world_coords(anomaly.footprint.half_x, 0.0);
+            let hw = anomaly.skeleton_half_width;
+            let lane = (
+                lane_a.x.min(lane_b.x) - hw,
+                lane_a.z.min(lane_b.z) - hw,
+                lane_a.x.max(lane_b.x) + hw,
+                lane_a.z.max(lane_b.z) + hw,
+            );
+            box_out("skeleton", "PROTECTED ROUTE", lane, 1);
         }
     }
     out.push_str("],\"fixtures\":[");
     first = true;
-    for assembly in &plan.assemblies { for fixture in &assembly.fixtures {
-        if !first { out.push(','); } first = false;
-        write!(out, "[{:.2},{:.2},{:.2},{:.2},{}]", (fixture.at.x-chunk_x)/voxel_scale, (fixture.at.z-chunk_z)/voxel_scale, fixture.half_x/voxel_scale, fixture.half_z/voxel_scale, fixture.lit).unwrap();
-    }}
+    for assembly in &plan.assemblies {
+        for fixture in &assembly.fixtures {
+            if !first {
+                out.push(',');
+            }
+            first = false;
+            write!(
+                out,
+                "[{:.2},{:.2},{:.2},{:.2},{}]",
+                (fixture.at.x - chunk_x) / voxel_scale,
+                (fixture.at.z - chunk_z) / voxel_scale,
+                fixture.half_x / voxel_scale,
+                fixture.half_z / voxel_scale,
+                fixture.lit
+            )
+            .unwrap();
+        }
+    }
     out.push_str("]}");
     out
 }
@@ -355,14 +662,15 @@ pub fn get_chunk_blueprint_svg(
 ) -> String {
     let noise = vackrooms::frameworks_drivers::simple_noise::SimpleNoiseProvider::new();
     let chunk_pos = vackrooms::entities::models::Position::new(chunk_x, chunk_z);
-    
+
     let config = if voxel_scale <= 0.1 {
         vackrooms::use_cases::generate_chunk::GeneratorConfig::high_spec()
     } else {
         vackrooms::use_cases::generate_chunk::GeneratorConfig::low_spec()
     };
-    
-    let generator = vackrooms::use_cases::generate_chunk::GenerateChunkArchitectureUseCase::new(&noise);
+
+    let generator =
+        vackrooms::use_cases::generate_chunk::GenerateChunkArchitectureUseCase::new(&noise);
     let grid = generator.execute(chunk_pos, seed, config);
 
     let region_size = vackrooms::use_cases::region_plan::REGION_SIZE;
@@ -429,7 +737,8 @@ pub fn get_chunk_voxel_blueprint_svg(
     };
 
     // Generate the voxel grid for this single chunk.
-    let generator = vackrooms::use_cases::generate_chunk::GenerateChunkArchitectureUseCase::new(&noise);
+    let generator =
+        vackrooms::use_cases::generate_chunk::GenerateChunkArchitectureUseCase::new(&noise);
     let grid = generator.execute(chunk_pos, seed, config.clone());
 
     // Generate the region plan covering this chunk (for semantic overlays).
@@ -473,13 +782,13 @@ pub fn get_large_voxel_blueprint_svg(
     layer: String,
 ) -> String {
     let noise = vackrooms::frameworks_drivers::simple_noise::SimpleNoiseProvider::new();
-    
+
     let config = if voxel_scale <= 0.1 {
         vackrooms::use_cases::generate_chunk::GeneratorConfig::high_spec()
     } else {
         vackrooms::use_cases::generate_chunk::GeneratorConfig::low_spec()
     };
-    
+
     let chunk_size = config.chunk_size;
     let steps = (size_world / chunk_size).round() as i32;
 
@@ -495,14 +804,15 @@ pub fn get_large_voxel_blueprint_svg(
     );
 
     // Generate all chunks and combine them
-    let generator = vackrooms::use_cases::generate_chunk::GenerateChunkArchitectureUseCase::new(&noise);
-    
+    let generator =
+        vackrooms::use_cases::generate_chunk::GenerateChunkArchitectureUseCase::new(&noise);
+
     let chunk_w = (chunk_size / voxel_scale).round() as usize;
     let chunk_d = (chunk_size / voxel_scale).round() as usize;
-    
+
     let total_w = steps as usize * chunk_w;
     let total_d = steps as usize * chunk_d;
-    
+
     let mut combined_cells = vec![0u8; total_w * total_d];
 
     let slice = match layer.as_str() {
@@ -558,7 +868,13 @@ pub fn get_large_voxel_blueprint_svg(
                             if has_wall || has_red_wall || has_tree {
                                 if has_red_wall { 2 } else { 1 }
                             } else if has_floor || has_grass || has_water {
-                                if has_water { 7 } else if has_grass { 6 } else { 5 }
+                                if has_water {
+                                    7
+                                } else if has_grass {
+                                    6
+                                } else {
+                                    5
+                                }
                             } else {
                                 0
                             }
@@ -585,7 +901,13 @@ pub fn get_large_voxel_blueprint_svg(
                             } else if has_light || has_red_light {
                                 if has_red_light { 4 } else { 3 }
                             } else if has_floor || has_grass || has_water {
-                                if has_water { 7 } else if has_grass { 6 } else { 5 }
+                                if has_water {
+                                    7
+                                } else if has_grass {
+                                    6
+                                } else {
+                                    5
+                                }
                             } else {
                                 0
                             }
@@ -643,7 +965,7 @@ mod entry {
 /// same wasm module: `worker_init` builds a chunk source from the *same*
 /// URL query the main thread used (identical world by construction), and
 /// `worker_generate` runs the full chunk pipeline — architectural
-/// generation, BFS lighting, greedy mesh + face instances, SVO build and
+/// generation, voxel diffuse bake, greedy mesh + face instances, SVO build and
 /// serialization, collision extraction — returning one transferable byte
 /// buffer (see `adapters::chunk_codec`).
 #[cfg(target_arch = "wasm32")]
@@ -656,6 +978,7 @@ mod worker_entry {
     use crate::adapters::local_chunk_source::LocalChunkSource;
     use crate::adapters::query_config::generator_setup_from_query;
     use crate::application::ports::ChunkSourcePort;
+    use vackrooms::domain::entities::anomaly::RealitySnapshot;
     use vackrooms::frameworks_drivers::simple_noise::SimpleNoiseProvider;
 
     thread_local! {
@@ -677,13 +1000,24 @@ mod worker_entry {
     }
 
     #[wasm_bindgen]
-    pub fn worker_generate(origin_x: f32, origin_z: f32, level: u32, lod: u8) -> Vec<u8> {
+    pub fn worker_generate(
+        _request_id: u32,
+        origin_x: f32,
+        origin_z: f32,
+        level: u32,
+        lod: u8,
+        reality_words: Vec<u32>,
+    ) -> Vec<u8> {
+        let reality = RealitySnapshot::from_words(&reality_words)
+            .expect("worker_generate received an invalid reality snapshot");
         SOURCE.with(|s| {
             let source = s.borrow();
             let source = source
                 .as_ref()
                 .expect("worker_generate called before worker_init");
-            encode_chunk_payload(&source.load(origin_x, origin_z, level, lod))
+            encode_chunk_payload(
+                &source.load_with_reality(origin_x, origin_z, level, lod, &reality),
+            )
         })
     }
 }

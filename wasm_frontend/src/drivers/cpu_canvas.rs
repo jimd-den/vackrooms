@@ -35,7 +35,8 @@ impl CpuCanvasRenderer {
         // Impose a low CPU backing resolution cap (480x270 max), keeping aspect ratio
         let max_w = 480.0;
         let max_h = 270.0;
-        let scale = (max_w / width as f32).min(max_h / height as f32).min(1.0) * self.settings.internal_scale;
+        let scale = (max_w / width as f32).min(max_h / height as f32).min(1.0)
+            * self.settings.internal_scale;
         let w = ((width as f32 * scale).round() as usize).max(1);
         let h = ((height as f32 * scale).round() as usize).max(1);
 
@@ -68,6 +69,9 @@ impl RendererPort for CpuCanvasRenderer {
         let old_scale = self.settings.internal_scale;
         self.settings = crate::get_cpu_settings();
         self.settings.fov_tan = crate::drivers::webgl::fov_tan();
+        // The optimization switchboard is sampled once per frame here; the
+        // platform-free rasterizer itself never reads globals.
+        self.settings.toggles = crate::get_render_toggles();
         if self.settings.internal_scale != old_scale {
             if let Some(canvas) = self.ctx.canvas() {
                 self.resize(canvas.width(), canvas.height());
@@ -78,12 +82,8 @@ impl RendererPort for CpuCanvasRenderer {
         let width = self.rasterizer.width() as u32;
         let height = self.rasterizer.height() as u32;
         let fb = self.rasterizer.framebuffer();
-        
-        if let Ok(image) = ImageData::new_with_u8_clamped_array_and_sh(
-            Clamped(fb),
-            width,
-            height,
-        ) {
+
+        if let Ok(image) = ImageData::new_with_u8_clamped_array_and_sh(Clamped(fb), width, height) {
             let _ = self.ctx.put_image_data(&image, 0.0, 0.0);
         }
     }

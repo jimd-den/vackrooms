@@ -4,10 +4,12 @@
 
 use vackrooms::adapters::voxel_mapper::{FaceDirection, MergedQuad, VoxelMapper, VoxelType};
 use vackrooms::domain::entities::voxel_grid::{
-    VOXEL_CEILING, VOXEL_FLOOR, VOXEL_GRASS, VOXEL_LIGHT, VOXEL_RED_LIGHT, VOXEL_RED_WALL,
-    VOXEL_TREE, VOXEL_WALL, VOXEL_WATER, VoxelGrid,
+    VOXEL_CEILING, VOXEL_DAMAGED_WALL, VOXEL_DEEP_CARPET, VOXEL_DRY_CARPET, VOXEL_FLOOR,
+    VOXEL_FLUID, VOXEL_GLIMMER, VOXEL_GRASS, VOXEL_LIGHT, VOXEL_PALE_WALL, VOXEL_RED_LIGHT,
+    VOXEL_RED_WALL, VOXEL_STICKY_CARPET, VOXEL_TREE, VOXEL_WALL, VOXEL_WATER, VoxelGrid,
 };
 
+use crate::adapters::collect_emissive_lights::collect_emissive_lights;
 use crate::application::collision::Aabb;
 use crate::application::ports::{POSITION_FIXED_SCALE, PackedVertex, SurfaceMeshPayload};
 
@@ -18,6 +20,7 @@ pub fn build_surface_mesh(
     voxel_scale: f32,
     lod: u8,
     lateral_padding: usize,
+    halo_world_origin: [f32; 3],
 ) -> SurfaceMeshPayload {
     let mapper = VoxelMapper::new(voxel_scale);
     let quads = mapper.map_voxel_grid_with_padding(halo_grid, lateral_padding);
@@ -31,35 +34,31 @@ pub fn build_surface_mesh(
             depth as f32 * voxel_scale,
         ],
     );
-    let mut lights = Vec::new();
-    for rl in &halo_grid.runtime_lights {
-        lights.push(crate::application::ports::LightSource {
-            id: ((rl.world_pos[0].to_bits() as u64) << 32) | rl.world_pos[2].to_bits() as u64,
-            position: rl.world_pos,
-            half_size: rl.half_size,
-            color: rl.rgb,
-            radius: rl.range,
-            intensity: rl.intensity,
-            flicker_mode: 0,
-            enabled: rl.enabled,
-        });
-    }
+    let lights =
+        collect_emissive_lights(halo_grid, voxel_scale, halo_world_origin, lateral_padding);
 
     let mut mesh = SurfaceMeshPayload {
         vertices: Vec::with_capacity(quads.len() * 4),
         indices: Vec::with_capacity(quads.len() * 6),
         bounds,
         lod,
-        light_volume: Vec::with_capacity(width * halo_grid.height() * depth * 3),
-        light_volume_size: [width as u32, halo_grid.height() as u32, depth as u32],
+        light_volume: Vec::with_capacity(
+            halo_grid.width() * halo_grid.height() * halo_grid.depth() * 3,
+        ),
+        light_volume_size: [
+            halo_grid.width() as u32,
+            halo_grid.height() as u32,
+            halo_grid.depth() as u32,
+        ],
+        light_volume_padding: lateral_padding.min(u8::MAX as usize) as u8,
         lights,
         faces: crate::adapters::face_instances::build_face_instances(&quads, voxel_scale),
         voxel_scale,
     };
-    for z in 0..depth {
+    for z in 0..halo_grid.depth() {
         for y in 0..halo_grid.height() {
-            for x in 0..width {
-                let [r, g, b] = halo_grid.get_light_rgb(x + lateral_padding, y, z + lateral_padding);
+            for x in 0..halo_grid.width() {
+                let [r, g, b] = halo_grid.get_light_rgb(x, y, z);
                 // The grid light is 0-15, WebGL expects 0-255 for gl.UNSIGNED_BYTE RGB textures.
                 mesh.light_volume.push(r * 17);
                 mesh.light_volume.push(g * 17);
@@ -171,6 +170,13 @@ pub(crate) fn material_id(v_type: VoxelType) -> u8 {
         VoxelType::Water => VOXEL_WATER,
         VoxelType::Tree => VOXEL_TREE,
         VoxelType::RedLight => VOXEL_RED_LIGHT,
+        VoxelType::PaleWall => VOXEL_PALE_WALL,
+        VoxelType::DamagedWall => VOXEL_DAMAGED_WALL,
+        VoxelType::DryCarpet => VOXEL_DRY_CARPET,
+        VoxelType::DeepCarpet => VOXEL_DEEP_CARPET,
+        VoxelType::StickyCarpet => VOXEL_STICKY_CARPET,
+        VoxelType::Fluid => VOXEL_FLUID,
+        VoxelType::Glimmer => VOXEL_GLIMMER,
     }
 }
 
@@ -182,8 +188,22 @@ mod tests {
     fn isolated_voxel_becomes_indexed_closed_surface() {
         let mut grid = VoxelGrid::new(3, 2, 3);
         grid.set(1, 0, 1, VOXEL_WALL);
-        let mesh = build_surface_mesh(&grid, 1.0, 0, 1);
+        let mesh = build_surface_mesh(&grid, 1.0, 0, 1, [0.0; 3]);
         assert_eq!(mesh.vertices.len(), 24);
         assert_eq!(mesh.indices.len(), 36);
+    }
+
+    #[test]
+    fn baked_volume_retains_the_air_halo_needed_by_boundary_faces() {
+        let mut grid = VoxelGrid::new(4, 2, 4);
+        grid.set(1, 0, 1, VOXEL_WALL);
+        grid.set_light_rgb(0, 0, 1, [7, 5, 3]);
+
+        let mesh = build_surface_mesh(&grid, 1.0, 0, 1, [-1.0, 0.0, -1.0]);
+
+        assert_eq!(mesh.light_volume_padding, 1);
+        assert_eq!(mesh.light_volume_size, [4, 2, 4]);
+        let texel = ((grid.height() * grid.width()) + 0) * 3;
+        assert_eq!(&mesh.light_volume[texel..texel + 3], &[119, 85, 51]);
     }
 }

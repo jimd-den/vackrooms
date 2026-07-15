@@ -20,8 +20,7 @@ edition = "2024"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-# Inner-ring engine core: entities (VoxelGrid, SparseVoxelOctree),
-# use cases (GenerateChunk, BuildOctree, lighting) and the GPU serializer.
+image = { version = "0.25.10", default-features = false, features = ["png"] }
 vackrooms = { path = ".." }
 
 # Browser bindings are wasm-only so `cargo test` on the host runs the pure

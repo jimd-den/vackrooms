@@ -1,6 +1,6 @@
 //! In-wasm chunk source: implements the application's [`ChunkSourcePort`] by
 //! driving the core engine use cases directly. There is no server round-trip;
-//! the entire pipeline — procedural generation, BFS lighting, SVO build, GPU
+//! the entire pipeline — procedural generation, voxel diffuse bake, SVO build, GPU
 //! serialization, collision extraction — runs inside the wasm module.
 //!
 //! Pipeline per chunk:
@@ -10,6 +10,7 @@
 //!     -> collision walk               (solid leaves -> world-space AABBs)
 
 use vackrooms::adapters::octree_gpu_serializer::OctreeGpuSerializer;
+use vackrooms::domain::entities::anomaly::RealitySnapshot;
 use vackrooms::domain::entities::sparse_voxel_octree::{SparseVoxelOctree, SvoNode};
 use vackrooms::domain::entities::voxel_grid::VoxelGrid;
 use vackrooms::domain::use_cases::build_octree::BuildOctreeUseCase;
@@ -21,14 +22,11 @@ use crate::adapters::surface_mesh::build_surface_mesh;
 use crate::application::collision::Aabb;
 use crate::application::ports::{ChunkPayload, ChunkSourcePort};
 
-/// Voxel types that block the player. FLOOR/CEILING/LIGHT/GRASS/WATER are
-/// visual-only: including them would make the player collide with the floor
-/// they stand on.
-const SOLID_TYPES: [u8; 3] = [
-    vackrooms::domain::entities::voxel_grid::VOXEL_WALL,
-    vackrooms::domain::entities::voxel_grid::VOXEL_RED_WALL,
-    vackrooms::domain::entities::voxel_grid::VOXEL_TREE,
-];
+/// Voxel types that block the player. FLOOR/CEILING/LIGHT/GRASS/WATER and
+/// the carpet/fluid classes are visual-only: including them would make the
+/// player collide with the floor they stand on. Shared with the core so a
+/// new wall class can never render solid but collide hollow.
+const SOLID_TYPES: [u8; 5] = vackrooms::domain::entities::voxel_grid::SOLID_MATERIALS;
 
 pub struct LocalChunkSource<N: NoiseProvider> {
     noise: N,
@@ -60,10 +58,15 @@ impl<N: NoiseProvider> LocalChunkSource<N> {
             config,
         }
     }
-}
 
-impl<N: NoiseProvider> ChunkSourcePort for LocalChunkSource<N> {
-    fn load(&self, origin_x: f32, origin_z: f32, level: u32, lod: u8) -> ChunkPayload {
+    fn generate_payload(
+        &self,
+        origin_x: f32,
+        origin_z: f32,
+        level: u32,
+        lod: u8,
+        reality: &RealitySnapshot,
+    ) -> ChunkPayload {
         let config = self.config.with_level(level).at_lod(lod);
         let generator =
             GenerateChunkArchitectureUseCase::with_telemetry(&self.noise, self.telemetry);
@@ -76,16 +79,22 @@ impl<N: NoiseProvider> ChunkSourcePort for LocalChunkSource<N> {
             chunk_size: config.chunk_size + config.voxel_scale * 2.0,
             ..config
         };
-        let halo_grid = generator.execute(
-            Position::new(origin_x - config.voxel_scale, origin_z - config.voxel_scale),
+        let halo_world_origin = [
+            origin_x - config.voxel_scale,
+            0.0,
+            origin_z - config.voxel_scale,
+        ];
+        let halo_grid = generator.execute_with_reality(
+            Position::new(halo_world_origin[0], halo_world_origin[2]),
             self.seed,
             halo_config,
+            reality,
         );
         let grid = crop_lateral_halo(&halo_grid, 1);
-        let surface = build_surface_mesh(&halo_grid, config.voxel_scale, lod, 1);
+        let surface = build_surface_mesh(&halo_grid, config.voxel_scale, lod, 1, halo_world_origin);
 
-        let svo =
-            BuildOctreeUseCase::new().execute(&grid, config.svo_depth(), config.svo_world_size());
+        let svo_depth = config.svo_depth();
+        let svo = BuildOctreeUseCase::new().execute(&grid, svo_depth, config.svo_world_size());
 
         let gpu = OctreeGpuSerializer::serialize_to_gpu_data(&svo);
         let collision = extract_collision_boxes(&svo, origin_x, origin_z, config.voxel_scale);
@@ -94,9 +103,30 @@ impl<N: NoiseProvider> ChunkSourcePort for LocalChunkSource<N> {
             root: svo.root as u32,
             nodes: gpu.texel_data,
             world_size: config.svo_world_size(),
+            voxel_size: config.voxel_scale,
+            svo_depth: svo_depth as u8,
             surface,
             collision,
+            traversal_gates: halo_grid.traversal_gates.clone(),
+            pit_hazards: halo_grid.pit_hazards.clone(),
         }
+    }
+}
+
+impl<N: NoiseProvider> ChunkSourcePort for LocalChunkSource<N> {
+    fn load(&self, origin_x: f32, origin_z: f32, level: u32, lod: u8) -> ChunkPayload {
+        self.generate_payload(origin_x, origin_z, level, lod, &RealitySnapshot::default())
+    }
+
+    fn load_with_reality(
+        &self,
+        origin_x: f32,
+        origin_z: f32,
+        level: u32,
+        lod: u8,
+        reality: &RealitySnapshot,
+    ) -> ChunkPayload {
+        self.generate_payload(origin_x, origin_z, level, lod, reality)
     }
 }
 
@@ -234,6 +264,30 @@ mod tests {
             !payload.collision.is_empty(),
             "a maze chunk must have walls"
         );
+    }
+
+    #[test]
+    fn generated_ceiling_panels_reach_the_runtime_light_contract() {
+        let source =
+            LocalChunkSource::new(SimpleNoiseProvider::new(), 42, GeneratorConfig::low_spec());
+        // Seed 42's main-spine chunk contains the fixtures visible from the
+        // deterministic browser spawn used by the GPU regression tests.
+        let payload = source.load(0.0, 30.0, 0, 0);
+
+        assert!(
+            !payload.surface.lights.is_empty(),
+            "voxelized emissive panels must not disappear before frame lighting"
+        );
+        for light in &payload.surface.lights {
+            assert!(light.enabled);
+            assert!(light.position[1] > payload.voxel_size);
+            assert!(light.half_size.into_iter().all(|extent| extent > 0.0));
+            assert!(
+                light.intensity > 1.0,
+                "panel radiance was normalized to darkness"
+            );
+            assert_ne!(light.kind, crate::application::ports::LightKind::Point);
+        }
     }
 
     #[test]

@@ -10,12 +10,13 @@
 
 use crate::application::collision::Aabb;
 use crate::application::ports::{
-    ChunkPayload, FaceCellRange, FaceInstanceSet, LightSource, PackedFaceInstance, PackedVertex,
-    SurfaceMeshPayload,
+    ChunkPayload, FaceCellRange, FaceInstanceSet, LightKind, LightSource, PackedFaceInstance,
+    PackedVertex, SurfaceMeshPayload,
 };
+use vackrooms::domain::entities::anomaly::{PitHazard, TraversalGate};
 
-/// "VKC" + version 2. Version 2 adds authored light intensity.
-const MAGIC: u32 = 0x564B_4302;
+/// "VKC" + version 5. Version 5 retains the baked light-volume halo.
+const MAGIC: u32 = 0x564B_4305;
 
 pub fn encode_chunk_payload(payload: &ChunkPayload) -> Vec<u8> {
     let mut out = Vec::with_capacity(
@@ -24,11 +25,15 @@ pub fn encode_chunk_payload(payload: &ChunkPayload) -> Vec<u8> {
             + payload.surface.indices.len() * 4
             + payload.surface.light_volume.len()
             + payload.surface.faces.instances.len() * 16
-            + payload.collision.len() * 24,
+            + payload.collision.len() * 24
+            + payload.traversal_gates.len() * TraversalGate::WORDS * 4
+            + payload.pit_hazards.len() * PitHazard::TRANSPORT_WORDS * 4,
     );
     put_u32(&mut out, MAGIC);
     put_u32(&mut out, payload.root);
     put_f32(&mut out, payload.world_size);
+    put_f32(&mut out, payload.voxel_size);
+    out.push(payload.svo_depth);
 
     put_u32(&mut out, payload.nodes.len() as u32);
     for &n in &payload.nodes {
@@ -53,6 +58,7 @@ pub fn encode_chunk_payload(payload: &ChunkPayload) -> Vec<u8> {
     for d in s.light_volume_size {
         put_u32(&mut out, d);
     }
+    out.push(s.light_volume_padding);
     put_u32(&mut out, s.light_volume.len() as u32);
     out.extend_from_slice(&s.light_volume);
 
@@ -70,6 +76,7 @@ pub fn encode_chunk_payload(payload: &ChunkPayload) -> Vec<u8> {
         }
         put_f32(&mut out, l.radius);
         put_f32(&mut out, l.intensity);
+        out.push(l.kind as u8);
         out.push(l.flicker_mode);
         out.push(u8::from(l.enabled));
     }
@@ -101,6 +108,21 @@ pub fn encode_chunk_payload(payload: &ChunkPayload) -> Vec<u8> {
     for aabb in &payload.collision {
         put_aabb(&mut out, aabb);
     }
+
+    put_u32(&mut out, payload.traversal_gates.len() as u32);
+    for gate in &payload.traversal_gates {
+        for word in gate.to_words() {
+            put_u32(&mut out, word);
+        }
+    }
+    put_u32(&mut out, payload.pit_hazards.len() as u32);
+    for hazard in &payload.pit_hazards {
+        let mut words = Vec::with_capacity(PitHazard::TRANSPORT_WORDS);
+        hazard.write_words(&mut words);
+        for word in words {
+            put_u32(&mut out, word);
+        }
+    }
     out
 }
 
@@ -111,6 +133,8 @@ pub fn decode_chunk_payload(bytes: &[u8]) -> Option<ChunkPayload> {
     }
     let root = r.u32()?;
     let world_size = r.f32()?;
+    let voxel_size = r.f32()?;
+    let svo_depth = r.u8()?;
 
     let node_count = r.len(4)?;
     let mut nodes = Vec::with_capacity(node_count);
@@ -138,10 +162,11 @@ pub fn decode_chunk_payload(bytes: &[u8]) -> Option<ChunkPayload> {
     let lod = r.u8()?;
     let voxel_scale = r.f32()?;
     let light_volume_size = [r.u32()?, r.u32()?, r.u32()?];
+    let light_volume_padding = r.u8()?;
     let volume_len = r.len(1)?;
     let light_volume = r.slice(volume_len)?.to_vec();
 
-    let light_count = r.len(39)?;
+    let light_count = r.len(51)?;
     let mut lights = Vec::with_capacity(light_count);
     for _ in 0..light_count {
         lights.push(LightSource {
@@ -151,6 +176,7 @@ pub fn decode_chunk_payload(bytes: &[u8]) -> Option<ChunkPayload> {
             color: [r.f32()?, r.f32()?, r.f32()?],
             radius: r.f32()?,
             intensity: r.f32()?,
+            kind: LightKind::from_u8(r.u8()?)?,
             flicker_mode: r.u8()?,
             enabled: r.u8()? != 0,
         });
@@ -188,10 +214,31 @@ pub fn decode_chunk_payload(bytes: &[u8]) -> Option<ChunkPayload> {
         collision.push(r.aabb()?);
     }
 
+    let gate_count = r.len(TraversalGate::WORDS * 4)?;
+    let mut traversal_gates = Vec::with_capacity(gate_count);
+    for _ in 0..gate_count {
+        let mut words = [0u32; TraversalGate::WORDS];
+        for word in &mut words {
+            *word = r.u32()?;
+        }
+        traversal_gates.push(TraversalGate::from_words(&words)?);
+    }
+    let hazard_count = r.len(PitHazard::TRANSPORT_WORDS * 4)?;
+    let mut pit_hazards = Vec::with_capacity(hazard_count);
+    for _ in 0..hazard_count {
+        let mut words = [0u32; PitHazard::TRANSPORT_WORDS];
+        for word in &mut words {
+            *word = r.u32()?;
+        }
+        pit_hazards.push(PitHazard::from_transport_words(&words)?);
+    }
+
     Some(ChunkPayload {
         root,
         nodes,
         world_size,
+        voxel_size,
+        svo_depth,
         surface: SurfaceMeshPayload {
             vertices,
             indices,
@@ -199,6 +246,7 @@ pub fn decode_chunk_payload(bytes: &[u8]) -> Option<ChunkPayload> {
             lod,
             light_volume,
             light_volume_size,
+            light_volume_padding,
             lights,
             faces: FaceInstanceSet {
                 instances,
@@ -208,6 +256,8 @@ pub fn decode_chunk_payload(bytes: &[u8]) -> Option<ChunkPayload> {
             voxel_scale,
         },
         collision,
+        traversal_gates,
+        pit_hazards,
     })
 }
 
@@ -309,5 +359,42 @@ mod tests {
             assert!(decode_chunk_payload(&bytes[..cut]).is_none(), "cut={cut}");
         }
         assert!(decode_chunk_payload(&[0u8; 16]).is_none(), "bad magic");
+    }
+
+    #[test]
+    fn anomaly_semantics_roundtrip_exactly() {
+        use vackrooms::domain::entities::anomaly::{
+            AnomalyKind, Axis2, AxisDirection, PitHazard, TraversalGate, TraversalGateKind,
+            WorldBounds,
+        };
+        use vackrooms::entities::models::Position;
+
+        let source =
+            LocalChunkSource::new(SimpleNoiseProvider::new(), 42, GeneratorConfig::low_spec());
+        let mut payload = source.load(0.0, 0.0, 0, 1);
+        payload.traversal_gates = vec![TraversalGate {
+            id: u64::MAX - 3,
+            instance_id: 0x1234_5678_90AB_CDEF,
+            anomaly_kind: AnomalyKind::PillarExpanse,
+            kind: TraversalGateKind::Remap,
+            axis: Axis2::Z,
+            plane: -12.4,
+            span_min: 3.2,
+            span_max: 19.6,
+            forward: AxisDirection::Negative,
+            affected_bounds: WorldBounds::new(-20.0, -30.0, 40.0, 50.0),
+        }];
+        payload.pit_hazards = vec![PitHazard {
+            id: 77,
+            instance_id: 88,
+            center: Position::new(-1.2, 9.6),
+            half_side: 0.6,
+            depth: 2.4,
+            recovery: Position::new(0.8, 10.8),
+        }];
+        let decoded = decode_chunk_payload(&encode_chunk_payload(&payload)).unwrap();
+        assert_eq!(decoded.traversal_gates, payload.traversal_gates);
+        assert_eq!(decoded.pit_hazards, payload.pit_hazards);
+        assert_eq!(decoded, payload);
     }
 }

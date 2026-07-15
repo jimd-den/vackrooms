@@ -9,10 +9,13 @@ test("main spine scene matches approved visual", async ({ page }) => {
     console.error(`[BROWSER PAGE ERROR]: ${err.message}`);
   });
 
-  // Navigate to our main game page with the capture configuration
+  // Navigate to our main game page with the capture configuration.
+  // Camera = the real spawn: on the main corridor of region (0,0)
+  // (see vackrooms::use_cases::region_plan::spawn_point), facing east
+  // down the corridor like the player does on their first frame.
   await page.goto(
     "/index.html?seed=42&level=0&renderer=surface&workers=0" +
-    "&camera=5,1.7,5&yaw=1.5708&pitch=-0.05&capture=1"
+    "&camera=6,1.7,31.2&yaw=-1.5708&pitch=-0.05&capture=1"
   );
 
   // Wait for the WASM WebGL scene to fully load and compile

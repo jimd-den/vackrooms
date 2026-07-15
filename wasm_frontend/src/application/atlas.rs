@@ -157,8 +157,12 @@ mod tests {
             root,
             nodes: vec![0; node_count * 4],
             world_size: 12.8,
+            voxel_size: 0.2,
+            svo_depth: 6,
             surface: crate::application::ports::SurfaceMeshPayload::empty(0),
             collision: vec![],
+            traversal_gates: vec![],
+            pit_hazards: vec![],
         }
     }
 
