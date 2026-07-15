@@ -1,4 +1,4 @@
-//! Write square splats into a reusable, depth-tested CPU framebuffer.
+//! Framebuffer, depth buffer, and conservative hierarchical-Z storage.
 //!
 //! This module knows only pixels. Traversal decides *what* to draw and owns
 //! frame policy; the target clips a square splat, performs fine depth tests,
@@ -37,7 +37,7 @@ pub(super) struct SplatWrite {
 
 /// Reusable CPU render target. Infinity in `depth` means an uncovered pixel;
 /// infinity in `coarse_depth` therefore means the tile is not fully covered.
-pub(super) struct DepthTestedSplatTarget {
+pub(super) struct RenderTarget {
     width: usize,
     height: usize,
     rgba: Vec<u8>,
@@ -50,7 +50,7 @@ pub(super) struct DepthTestedSplatTarget {
     coarse_height: usize,
 }
 
-impl DepthTestedSplatTarget {
+impl RenderTarget {
     pub(super) fn new(width: usize, height: usize) -> Self {
         let mut target = Self {
             width: 0,
@@ -209,11 +209,11 @@ impl DepthTestedSplatTarget {
 
 #[cfg(test)]
 mod tests {
-    use super::{DepthTestedSplatTarget, SquareSplat};
+    use super::{RenderTarget, SquareSplat};
 
     #[test]
     fn a_partially_covered_tile_never_occludes_a_subtree() {
-        let mut target = DepthTestedSplatTarget::new(8, 8);
+        let mut target = RenderTarget::new(8, 8);
         target.clear([0; 3]);
         target.write_splat(
             SquareSplat::new(1.0, 1.0, 0.4, 1.0, [255; 3]),
@@ -229,7 +229,7 @@ mod tests {
 
     #[test]
     fn a_fully_covered_near_tile_occludes_farther_geometry() {
-        let mut target = DepthTestedSplatTarget::new(8, 8);
+        let mut target = RenderTarget::new(8, 8);
         target.clear([0; 3]);
         target.write_splat(
             SquareSplat::new(4.0, 4.0, 4.0, 1.0, [255; 3]),
@@ -242,7 +242,7 @@ mod tests {
 
     #[test]
     fn edge_tile_uses_its_actual_pixel_count() {
-        let mut target = DepthTestedSplatTarget::new(10, 10);
+        let mut target = RenderTarget::new(10, 10);
         target.clear([0; 3]);
         // The bottom-right coarse tile is only 2x2, not 8x8.
         target.write_splat(
@@ -256,7 +256,7 @@ mod tests {
 
     #[test]
     fn later_nearer_writes_keep_a_conservative_upper_bound() {
-        let mut target = DepthTestedSplatTarget::new(8, 8);
+        let mut target = RenderTarget::new(8, 8);
         target.clear([0; 3]);
         target.write_splat(
             SquareSplat::new(4.0, 4.0, 4.0, 5.0, [100; 3]),
@@ -278,7 +278,7 @@ mod tests {
 
     #[test]
     fn pixel_write_budget_stops_inside_the_splat_loop() {
-        let mut target = DepthTestedSplatTarget::new(8, 8);
+        let mut target = RenderTarget::new(8, 8);
         target.clear([0; 3]);
         let write = target.write_splat(SquareSplat::new(4.0, 4.0, 4.0, 1.0, [255; 3]), 7, true);
 
