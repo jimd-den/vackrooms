@@ -5,6 +5,7 @@
   "main": "index.js",
   "scripts": {
     "build:wasm": "node scripts/build-wasm.mjs",
+    "build:single": "npm run build:wasm && node scripts/build-single-file.mjs",
     "test:visual": "npm run build:wasm && playwright test"
   },
   "devDependencies": {

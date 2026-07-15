@@ -46,6 +46,13 @@ impl WorkerChunkSource {
         let pool_size = ((concurrency as i32) - 1).clamp(1, 4) as usize;
 
         let completed: Rc<RefCell<Vec<CompletedChunk>>> = Rc::new(RefCell::new(Vec::new()));
+        // The single-file bundle (scripts/build-single-file.mjs) has no
+        // sibling worker.js on disk; it publishes a blob: URL for the inlined
+        // worker script on the global scope instead.
+        let script_url = Reflect::get(&js_sys::global(), &"__VACKROOMS_WORKER_URL__".into())
+            .ok()
+            .and_then(|value| value.as_string())
+            .unwrap_or_else(|| "worker.js".to_string());
         let mut workers = Vec::with_capacity(pool_size);
         let mut handlers = Vec::with_capacity(pool_size);
         for _ in 0..pool_size {
@@ -55,7 +62,7 @@ impl WorkerChunkSource {
             // URL, so this still finds the sibling file when the site is
             // served from a subpath (e.g. a GitHub Pages project page at
             // `<user>.github.io/<repo>/`) instead of the domain root.
-            let worker = Worker::new_with_options("worker.js", &options)?;
+            let worker = Worker::new_with_options(&script_url, &options)?;
 
             let sink = completed.clone();
             let handler = Closure::<dyn FnMut(MessageEvent)>::new(move |event: MessageEvent| {
