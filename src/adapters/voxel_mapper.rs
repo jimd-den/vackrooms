@@ -1,8 +1,9 @@
 use crate::domain::entities::voxel_grid::{
-    MATERIAL_COLORS, VOXEL_AIR, VOXEL_CEILING, VOXEL_DAMAGED_WALL, VOXEL_DEEP_CARPET,
-    VOXEL_DRY_CARPET, VOXEL_FLOOR, VOXEL_FLUID, VOXEL_GLIMMER, VOXEL_GRASS, VOXEL_LIGHT,
-    VOXEL_PALE_WALL, VOXEL_RED_LIGHT, VOXEL_RED_WALL, VOXEL_STICKY_CARPET, VOXEL_TREE, VOXEL_WALL,
-    VOXEL_WATER, VoxelGrid,
+    FACE_OCCLUDED_NEGATIVE_X, FACE_OCCLUDED_NEGATIVE_Y, FACE_OCCLUDED_NEGATIVE_Z,
+    FACE_OCCLUDED_POSITIVE_X, FACE_OCCLUDED_POSITIVE_Y, FACE_OCCLUDED_POSITIVE_Z, MATERIAL_COLORS,
+    VOXEL_AIR, VOXEL_CEILING, VOXEL_DAMAGED_WALL, VOXEL_DEEP_CARPET, VOXEL_DRY_CARPET, VOXEL_FLOOR,
+    VOXEL_FLUID, VOXEL_GLIMMER, VOXEL_GRASS, VOXEL_LIGHT, VOXEL_PALE_WALL, VOXEL_RED_LIGHT,
+    VOXEL_RED_WALL, VOXEL_STICKY_CARPET, VOXEL_TREE, VOXEL_WALL, VOXEL_WATER, VoxelGrid,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -38,12 +39,12 @@ pub enum FaceDirection {
 impl FaceDirection {
     fn occlusion_bit(self) -> u8 {
         match self {
-            FaceDirection::East => 1,
-            FaceDirection::West => 2,
-            FaceDirection::Up => 4,
-            FaceDirection::Down => 8,
-            FaceDirection::South => 16,
-            FaceDirection::North => 32,
+            FaceDirection::East => FACE_OCCLUDED_POSITIVE_X,
+            FaceDirection::West => FACE_OCCLUDED_NEGATIVE_X,
+            FaceDirection::Up => FACE_OCCLUDED_POSITIVE_Y,
+            FaceDirection::Down => FACE_OCCLUDED_NEGATIVE_Y,
+            FaceDirection::South => FACE_OCCLUDED_POSITIVE_Z,
+            FaceDirection::North => FACE_OCCLUDED_NEGATIVE_Z,
         }
     }
 }

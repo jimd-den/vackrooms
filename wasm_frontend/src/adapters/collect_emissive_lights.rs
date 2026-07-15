@@ -8,7 +8,8 @@
 //! downward-facing emissive surface exists.
 
 use vackrooms::domain::entities::voxel_grid::{
-    VOXEL_AIR, VOXEL_GLIMMER, VOXEL_LIGHT, VOXEL_RED_LIGHT, VoxelGrid, material_color_f32,
+    VOXEL_AIR, VOXEL_GLIMMER, VOXEL_LIGHT, VOXEL_RED_LIGHT, VoxelGrid,
+    material_color_f32, material_emission_strength,
 };
 use vackrooms::use_cases::bake_voxel_lighting::DEFAULT_MAX_LIGHT_RANGE_WORLD_UNITS;
 
@@ -245,15 +246,14 @@ fn flicker_mode_for(material: u8, id: u64) -> u8 {
 }
 
 fn emission_profile(material: u8) -> Option<EmissionProfile> {
-    let (radiance, kind) = match material {
-        VOXEL_LIGHT => (10.0, LightKind::CeilingPanel),
-        VOXEL_RED_LIGHT => (8.0, LightKind::CeilingPanel),
-        VOXEL_GLIMMER => (0.9, LightKind::Emergency),
+    let kind = match material {
+        VOXEL_LIGHT | VOXEL_RED_LIGHT => LightKind::CeilingPanel,
+        VOXEL_GLIMMER => LightKind::Emergency,
         _ => return None,
     };
     Some(EmissionProfile {
         linear_rgb: material_color_f32(material).map(srgb_channel_to_linear),
-        radiance,
+        radiance: material_emission_strength(material)?,
         kind,
     })
 }

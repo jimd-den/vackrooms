@@ -11,6 +11,9 @@
 // (worker -> main):
 //   { type: "done", requestId, ox, oz, level, lod, reality, ms, buf }
 //                                   buf transferred, encoded by chunk_codec
+//   { type: "failed", requestId, ox, oz, level, lod, reality, message }
+//                                   one request failed and may be retried
+//   { type: "fatal", message }      worker initialization failed
 import init, { worker_init, worker_generate } from "./pkg/wasm_frontend.js";
 
 let wasmReady = null;
@@ -20,41 +23,80 @@ function ensureWasm() {
 }
 
 let queue = Promise.resolve();
-onmessage = (event) => {
-  const m = event.data;
-  queue = queue.then(async () => {
-    await ensureWasm();
-    if (m.type === "init") {
-      worker_init(m.query, m.seed >>> 0);
-    } else if (m.type === "gen") {
-      const t0 = performance.now();
-      const reality = new Uint32Array(m.reality);
-      const bytes = worker_generate(
-        m.requestId >>> 0,
-        m.ox,
-        m.oz,
-        m.level,
-        m.lod,
-        reality
-      );
-      const ms = performance.now() - t0;
-      console.debug(
-        `[WORKER] chunk (${m.ox}, ${m.oz}) lod ${m.lod} generated in ${ms.toFixed(1)} ms`
-      );
-      postMessage(
-        {
-          type: "done",
-          requestId: m.requestId,
-          ox: m.ox,
-          oz: m.oz,
-          level: m.level,
-          lod: m.lod,
-          reality,
-          ms,
-          buf: bytes.buffer,
-        },
-        [bytes.buffer]
-      );
+
+function errorMessage(error) {
+  if (error instanceof Error) return error.message;
+  return String(error);
+}
+
+function reportFailure(message, error) {
+  const description = errorMessage(error);
+  console.error("[WORKER] generation failure:", description);
+  try {
+    if (message?.type === "gen") {
+      postMessage({
+        type: "failed",
+        requestId: message.requestId,
+        ox: message.ox,
+        oz: message.oz,
+        level: message.level,
+        lod: message.lod,
+        reality: new Uint32Array(message.reality),
+        message: description,
+      });
+    } else {
+      postMessage({ type: "fatal", message: description });
     }
-  });
+  } catch (reportError) {
+    // The browser's Worker error event is the final recovery path when even
+    // the structured failure message cannot be cloned or delivered.
+    console.error("[WORKER] could not report generation failure:", reportError);
+  }
+}
+
+async function processMessage(message) {
+  await ensureWasm();
+  if (message.type === "init") {
+    worker_init(message.query, message.seed >>> 0);
+    return;
+  }
+  if (message.type !== "gen") return;
+
+  const t0 = performance.now();
+  const reality = new Uint32Array(message.reality);
+  const bytes = worker_generate(
+    message.requestId >>> 0,
+    message.ox,
+    message.oz,
+    message.level,
+    message.lod,
+    reality
+  );
+  const ms = performance.now() - t0;
+  console.debug(
+    `[WORKER] chunk (${message.ox}, ${message.oz}) lod ${message.lod} generated in ${ms.toFixed(1)} ms`
+  );
+  postMessage(
+    {
+      type: "done",
+      requestId: message.requestId,
+      ox: message.ox,
+      oz: message.oz,
+      level: message.level,
+      lod: message.lod,
+      reality,
+      ms,
+      buf: bytes.buffer,
+    },
+    [bytes.buffer]
+  );
+}
+
+onmessage = (event) => {
+  const message = event.data;
+  // Catch each queue item independently. A failed request must not leave the
+  // promise chain rejected, which would silently skip every later request.
+  queue = queue
+    .then(() => processMessage(message))
+    .catch((error) => reportFailure(message, error));
 };

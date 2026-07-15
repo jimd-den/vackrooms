@@ -22,6 +22,7 @@ use crate::adapters::local_chunk_source::LocalChunkSource;
 use crate::adapters::query_config::generator_setup_from_query;
 use crate::adapters::section_locator::SectionLocator;
 use crate::application::engine::{Engine, EngineConfig};
+use crate::application::generation_worker_policy::parse_generation_worker_preference;
 use crate::application::ports::{
     ChunkDraw, FrameParams, RendererPort, SurfaceChunk, SurfaceChunkKey,
 };
@@ -60,16 +61,16 @@ impl DriverRenderer {
         }
     }
 
-    /// Base internal-resolution multiplier (further scaled by the adaptive
-    /// governor). Splatting every pixel on the CPU is far more expensive
-    /// than rasterizing a quad, so the CPU path renders much smaller and
-    /// lets CSS upscale with `image-rendering: pixelated`.
+    /// Internal-resolution multiplier (further scaled by the adaptive
+    /// governor). The CPU quality model owns its bounded fraction so the
+    /// canvas and software framebuffer always have identical dimensions;
+    /// CSS then presents that complete image over the viewport.
     fn resolution_factor(&self) -> f64 {
         match self {
             DriverRenderer::Surface(_) | DriverRenderer::Splat(_) | DriverRenderer::Raymarch(_) => {
                 1.0
             }
-            DriverRenderer::Cpu(_) => 0.25,
+            DriverRenderer::Cpu(_) => crate::get_cpu_settings().canvas_resolution_factor(),
         }
     }
 
@@ -81,6 +82,19 @@ impl DriverRenderer {
             DriverRenderer::Cpu(_) => "CPU splat",
         }
     }
+}
+
+/// Complete backing-store scale after the global governor/override and the
+/// selected renderer's own bounded workload factor are composed.
+fn effective_resolution_scale(renderer: &DriverRenderer, governor_scale: f32) -> f64 {
+    let forced =
+        f32::from_bits(crate::RENDER_SCALE_BITS.load(std::sync::atomic::Ordering::Relaxed));
+    let global_scale = if forced > 0.0 {
+        forced as f64
+    } else {
+        governor_scale as f64
+    };
+    global_scale * renderer.resolution_factor()
 }
 
 impl RendererPort for DriverRenderer {
@@ -136,9 +150,7 @@ impl RendererPort for DriverRenderer {
         match self {
             DriverRenderer::Surface(_) | DriverRenderer::Splat(_) => false,
             DriverRenderer::Raymarch(r) => r.upload_atlas_rows(first_row, texels),
-            // The CPU splatter rebuilds its mip pyramid from the whole
-            // atlas, so it only supports full uploads.
-            DriverRenderer::Cpu(_) => false,
+            DriverRenderer::Cpu(r) => r.upload_atlas_rows(first_row, texels),
         }
     }
     fn draw(&mut self, frame: &FrameParams, chunks: &[ChunkDraw]) {
@@ -274,7 +286,8 @@ pub fn boot() -> Result<(), JsValue> {
     // fog — the player knows immediately that this is the Backrooms.
     let spawn_at = vackrooms::use_cases::region_plan::spawn_point(resolved_seed);
     let spawn = [spawn_at.x, 1.7, spawn_at.z];
-    let spawn_yaw = -std::f32::consts::FRAC_PI_2; // face +X
+    // Face east along +X.
+    let spawn_yaw = -std::f32::consts::FRAC_PI_2;
     // ?level=34 boots straight into the grassland (debugging any level in
     // any renderer without waiting on a noclip roll).
     let initial_level = query
@@ -317,41 +330,50 @@ pub fn boot() -> Result<(), JsValue> {
         resolved_seed,
         generator_config,
     )));
-    // Chunk generation runs on a Web Worker pool so crossing a streaming
-    // boundary never stalls the frame loop. `?workers=0` forces the old
-    // synchronous in-thread source (also the fallback if workers fail).
-    let source: Box<dyn crate::application::ports::ChunkSourcePort> = if query.contains("workers=0")
-    {
-        Box::new(LocalChunkSource::with_telemetry(
-            SimpleNoiseProvider::new(),
-            resolved_seed,
-            generator_config,
-            &CONSOLE_TELEMETRY,
-        ))
-    } else {
-        match crate::drivers::worker_source::WorkerChunkSource::new(&query, WORLD_SEED) {
-            Ok(pool) => {
-                web_sys::console::log_1(
-                    &format!("chunk generation: {} worker threads", pool.pool_size()).into(),
-                );
-                Box::new(pool)
+    // This pool parallelizes chunk generation/lighting/SVO construction,
+    // never the renderer. The pure policy reserves the main thread and
+    // clamps explicit requests to reported hardware. Zero selects the
+    // synchronous source, which is also the worker-startup fallback.
+    let worker_preference = parse_generation_worker_preference(&query);
+    let hardware_concurrency = window.navigator().hardware_concurrency();
+    let generation_worker_count = worker_preference.resolve(hardware_concurrency);
+    let source: Box<dyn crate::application::ports::ChunkSourcePort> =
+        if generation_worker_count == 0 {
+            web_sys::console::log_1(&"chunk generation: synchronous main thread".into());
+            Box::new(LocalChunkSource::with_telemetry(
+                SimpleNoiseProvider::new(),
+                resolved_seed,
+                generator_config,
+                &CONSOLE_TELEMETRY,
+            ))
+        } else {
+            match crate::drivers::worker_source::WorkerChunkSource::new(
+                &query,
+                WORLD_SEED,
+                generation_worker_count,
+            ) {
+                Ok(pool) => {
+                    web_sys::console::log_1(
+                        &format!("chunk generation: {} worker threads", pool.pool_size()).into(),
+                    );
+                    Box::new(pool)
+                }
+                Err(err) => {
+                    web_sys::console::warn_2(
+                        &JsValue::from_str(
+                            "worker pool unavailable, falling back to in-thread generation:",
+                        ),
+                        &err,
+                    );
+                    Box::new(LocalChunkSource::with_telemetry(
+                        SimpleNoiseProvider::new(),
+                        resolved_seed,
+                        generator_config,
+                        &CONSOLE_TELEMETRY,
+                    ))
+                }
             }
-            Err(err) => {
-                web_sys::console::warn_2(
-                    &JsValue::from_str(
-                        "worker pool unavailable, falling back to in-thread generation:",
-                    ),
-                    &err,
-                );
-                Box::new(LocalChunkSource::with_telemetry(
-                    SimpleNoiseProvider::new(),
-                    resolved_seed,
-                    generator_config,
-                    &CONSOLE_TELEMETRY,
-                ))
-            }
-        }
-    };
+        };
     let engine = Rc::new(RefCell::new(Engine::new(
         engine_config,
         Box::new(SharedRenderer(renderer.clone())),
@@ -730,38 +752,24 @@ fn run_frame_loop(
         // window * governor scale * renderer base factor. A non-zero
         // user override (settings menu) replaces the governor scale.
         {
-            let forced =
-                f32::from_bits(crate::RENDER_SCALE_BITS.load(std::sync::atomic::Ordering::Relaxed));
-            let governor_scale = if forced > 0.0 {
-                forced as f64
-            } else {
-                engine.borrow().stats().resolution_scale as f64
-            };
-            let scale = governor_scale * renderer.borrow().resolution_factor();
-            let mut target_w = (loop_window
+            let scale = effective_resolution_scale(
+                &renderer.borrow(),
+                engine.borrow().stats().resolution_scale,
+            );
+            let target_w = (loop_window
                 .inner_width()
                 .ok()
                 .and_then(|v| v.as_f64())
                 .unwrap_or(800.0)
                 * scale)
                 .max(1.0) as u32;
-            let mut target_h = (loop_window
+            let target_h = (loop_window
                 .inner_height()
                 .ok()
                 .and_then(|v| v.as_f64())
                 .unwrap_or(600.0)
                 * scale)
                 .max(1.0) as u32;
-
-            if matches!(*renderer.borrow(), DriverRenderer::Cpu(_)) {
-                let max_w = 480.0;
-                let max_h = 270.0;
-                let cap_scale = (max_w / target_w as f32)
-                    .min(max_h as f32 / target_h as f32)
-                    .min(1.0);
-                target_w = (target_w as f32 * cap_scale).round() as u32;
-                target_h = (target_h as f32 * cap_scale).round() as u32;
-            }
 
             if canvas.width() != target_w || canvas.height() != target_h {
                 canvas.set_width(target_w);
@@ -795,7 +803,9 @@ fn run_frame_loop(
                 stats.fine_chunks, stats.resident_chunks
             )));
             hud_nodes.set_text_content(Some(&stats.atlas_nodes.to_string()));
-            hud_scale.set_text_content(Some(&format!("{:.0}%", stats.resolution_scale * 100.0)));
+            let effective_scale =
+                effective_resolution_scale(&renderer.borrow(), stats.resolution_scale);
+            hud_scale.set_text_content(Some(&format!("{:.0}%", effective_scale * 100.0)));
             if let Some(hud_dist) = &hud_dist {
                 // Restrained rounding, and only touch the DOM on change.
                 let text = format!("{:.0} m", stats.distance_m);

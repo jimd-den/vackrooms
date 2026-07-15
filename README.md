@@ -99,7 +99,15 @@ combinable:
 | `atria` | `0`–`4` | How much of the world vaults into tall atria. Default `1`. |
 | `lights` | `0`–`4` | Ceiling light panel density. Default `1`. |
 | `renderer` | `splat`, `raymarch`, `cpu` | Picks a non-default renderer backend (see above). |
-| `workers` | `0` | Disables the Web Worker generation pool and generates chunks synchronously on the main thread. |
+| `cpu_preset` | `performance`, `balanced`, `quality`, `maximum`, `custom` | Typed CPU workload profile. Presets render at 12.5%–50% backing resolution per axis and present the complete image over the full page; `balanced` is the default. |
+| `cpu_scale` | `0.25`–`2` | Custom CPU backing scale relative to the 25%-viewport baseline; CSS presentation always remains full-page. |
+| `cpu_lod_px` | `0.25`–`2` | Custom projected-radius MIP cutoff; lower preserves finer distant geometry. |
+| `cpu_splat_radius_px` | `1`–`16` | Custom maximum splat radius; lower values virtually split large leaves for finer surfaces. |
+| `cpu_virtual_depth` | `3`–`8` | Custom cap on virtual solid-leaf subdivision. |
+| `cpu_mip_occupancy` | `0`–`0.5` | Custom sparse-LOD rejection threshold; lower retains sparser distant detail. |
+| `cpu_range` | `16`–`256` | CPU draw distance in world units. |
+| `cpu_shadows` | `off`, `hero`, `full` | CPU fixture visibility: unshadowed, one cached hero-fixture approximation, or the expensive reference that traces every point/Gauss-sample endpoint. |
+| `workers` | `auto`, `0`, `1`–`4` | Chunk-generation/streaming concurrency. `auto` reserves the main thread and uses at most four workers; explicit counts clamp to reported hardware. `0` uses the synchronous main-thread fallback. This does not parallelize rendering. |
 | `level` | `0`, `34` | Debug: boots straight into a level (34 = the grassland) instead of waiting on a noclip roll. |
 | `force_anomaly` | `pillars`, `blackout`, `pits`, `archway`, `redroom` | Debug: guarantees one anomaly of that family near spawn, bypassing organic frequency and the spawn keep-out. |
 | `rt_hiz` | `0`, `1` | CPU hierarchical-Z rejection. |
@@ -107,6 +115,8 @@ combinable:
 | `rt_skip` | `0`, `1` | Raymarch empty-SVO-leaf skipping; `0` selects finest-cell diagnostic DDA. |
 | `rt_mips` | `0`, `1` | CPU projected-size MIP/LOD collapse. |
 | `rt_beam_occlusion` | `0`, `1` | CPU cone-light occlusion rays. |
+| `rt_deferred` | `0`, `1` | CPU exact fine-depth rejection before hidden-splat shading. Off shades first and depth-tests later; pixels are identical. |
+| `rt_ao` | `0`, `1` | CPU sibling-count ambient-occlusion approximation. Off selects unit ambient visibility for the reference path. |
 | `rt_shadows` | `0`, `1` | GPU direct-light visibility: per-emitter-sample SVO segments in raymarch; a highest-priority-fixture shadow map on surface/splat. |
 | `rt_cells` | `0`, `1` | GPU splat cell-range culling. |
 | `rt_budget` | `0`, `1` | GPU splat far-chunk face budget. |
@@ -120,7 +130,13 @@ The top-right HUD names the section you are in (level, zone, region), and
 epochs, resident traversal gates and pit hazards, and streaming counters.
 
 The in-page settings menu (gear icon) also exposes mouse sensitivity, invert
-Y, render scale, FOV, control scheme, and every renderer optimization switch.
+Y, render scale, FOV, control scheme, typed CPU quality presets/custom detail,
+and every renderer optimization switch. CPU quality scalars do not silently
+change optimization switches: hierarchical Z, MIP collapse, traversal order,
+chunk culling, hidden-splat rejection, ambient occlusion, and flashlight scene-visibility rays remain independently
+diagnosable. Older `cpuScale`, `cpuSplatPx`, `cpuRange`, and `cpuShadows` links
+are still accepted; the formerly ambiguous `cpuSplatPx` is interpreted as a
+radius.
 Live preferences are saved to `localStorage`; Apply & Reload writes disabled
 optimizations into the URL so a regression setup can be shared exactly.
 

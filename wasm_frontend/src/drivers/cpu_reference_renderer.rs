@@ -25,7 +25,10 @@ impl ReferenceRendererPort for CpuReferenceRenderer {
             SoftwareRasterizer::new(settings.width as usize, settings.height as usize);
         rasterizer.settings = settings.effective_cpu_settings();
         rasterizer.upload_atlas(&scene.atlas);
-        rasterizer.draw(&settings.frame_params(), &scene.chunks);
+        rasterizer.draw(
+            &settings.frame_params(&scene.scene_lights),
+            &scene.chunks,
+        );
 
         RenderedImage {
             width: settings.width,

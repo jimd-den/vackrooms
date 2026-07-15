@@ -12,7 +12,11 @@
 use vackrooms::adapters::octree_gpu_serializer::OctreeGpuSerializer;
 use vackrooms::domain::entities::anomaly::RealitySnapshot;
 use vackrooms::domain::entities::sparse_voxel_octree::{SparseVoxelOctree, SvoNode};
-use vackrooms::domain::entities::voxel_grid::VoxelGrid;
+use vackrooms::domain::entities::voxel_grid::{
+    FACE_OCCLUDED_NEGATIVE_X, FACE_OCCLUDED_NEGATIVE_Y, FACE_OCCLUDED_NEGATIVE_Z,
+    FACE_OCCLUDED_POSITIVE_X, FACE_OCCLUDED_POSITIVE_Y, FACE_OCCLUDED_POSITIVE_Z, VOXEL_AIR,
+    VoxelGrid,
+};
 use vackrooms::domain::use_cases::build_octree::BuildOctreeUseCase;
 use vackrooms::entities::models::Position;
 use vackrooms::use_cases::generate_chunk::{GenerateChunkArchitectureUseCase, GeneratorConfig};
@@ -131,7 +135,8 @@ impl<N: NoiseProvider> ChunkSourcePort for LocalChunkSource<N> {
 }
 
 /// Copies the actual chunk interior out of a generated X/Z halo while
-/// retaining voxel type, colored baked lighting, and directional AO.
+/// retaining voxel type and colored baked lighting, then deriving exact
+/// six-direction neighbor occupancy while the halo is still available.
 fn crop_lateral_halo(halo: &VoxelGrid, padding: usize) -> VoxelGrid {
     assert!(halo.width() > padding * 2 && halo.depth() > padding * 2);
     let mut inner = VoxelGrid::new(
@@ -146,11 +151,56 @@ fn crop_lateral_halo(halo: &VoxelGrid, padding: usize) -> VoxelGrid {
                 let hz = z + padding;
                 inner.set(x, y, z, halo.get(hx, y, hz));
                 inner.set_light_rgb(x, y, z, halo.get_light_rgb(hx, y, hz));
-                inner.set_face_occlusion(x, y, z, halo.get_face_occlusion(hx, y, hz));
+                inner.set_face_occlusion(x, y, z, neighbor_occlusion_mask(halo, hx, y, hz));
             }
         }
     }
     inner
+}
+
+/// Exact face closure for one generated voxel, including the lateral halo.
+///
+/// The returned bits travel unchanged through BuildOctree and the GPU atlas.
+/// Computing them before the crop is what makes a streamed chunk boundary
+/// authoritative even while its adjacent chunk is unloaded or represented by
+/// an overlapping power-of-two padded SVO root.
+fn neighbor_occlusion_mask(grid: &VoxelGrid, x: usize, y: usize, z: usize) -> u8 {
+    if grid.get(x, y, z) == VOXEL_AIR {
+        return 0;
+    }
+
+    let occupied = |x: isize, y: isize, z: isize| {
+        x >= 0
+            && y >= 0
+            && z >= 0
+            && (x as usize) < grid.width()
+            && (y as usize) < grid.height()
+            && (z as usize) < grid.depth()
+            && grid.get(x as usize, y as usize, z as usize) != VOXEL_AIR
+    };
+    let x = x as isize;
+    let y = y as isize;
+    let z = z as isize;
+    let mut mask = 0;
+    if occupied(x + 1, y, z) {
+        mask |= FACE_OCCLUDED_POSITIVE_X;
+    }
+    if occupied(x - 1, y, z) {
+        mask |= FACE_OCCLUDED_NEGATIVE_X;
+    }
+    if occupied(x, y + 1, z) {
+        mask |= FACE_OCCLUDED_POSITIVE_Y;
+    }
+    if occupied(x, y - 1, z) {
+        mask |= FACE_OCCLUDED_NEGATIVE_Y;
+    }
+    if occupied(x, y, z + 1) {
+        mask |= FACE_OCCLUDED_POSITIVE_Z;
+    }
+    if occupied(x, y, z - 1) {
+        mask |= FACE_OCCLUDED_NEGATIVE_Z;
+    }
+    mask
 }
 
 /// Walks the SVO and emits one world-space AABB per solid leaf region.
@@ -235,7 +285,10 @@ fn walk(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use vackrooms::domain::entities::voxel_grid::{VOXEL_FLOOR, VOXEL_WALL, VoxelGrid};
+    use vackrooms::domain::entities::voxel_grid::{
+        FACE_OCCLUDED_NEGATIVE_X, FACE_OCCLUDED_NEGATIVE_Y, FACE_OCCLUDED_POSITIVE_X,
+        FACE_OCCLUDED_POSITIVE_Y, VOXEL_FLOOR, VOXEL_WALL, VoxelGrid,
+    };
     use vackrooms::frameworks_drivers::simple_noise::SimpleNoiseProvider;
 
     #[test]
@@ -339,11 +392,37 @@ mod tests {
                         cropped.get_light_rgb(x, y, z)
                     );
                     assert_eq!(
-                        direct.get_face_occlusion(x, y, z),
-                        cropped.get_face_occlusion(x, y, z)
+                        cropped.get_face_occlusion(x, y, z),
+                        neighbor_occlusion_mask(&halo, x + 1, y, z + 1),
                     );
                 }
             }
         }
+    }
+
+    #[test]
+    fn halo_closes_chunk_boundary_faces_without_hiding_the_floor_top() {
+        let mut halo = VoxelGrid::new(5, 3, 5);
+        // Logical voxel (0, 1, 1), plus a real neighbor just beyond the
+        // negative-X chunk boundary and a supporting voxel below it.
+        halo.set(1, 1, 2, VOXEL_FLOOR);
+        halo.set(0, 1, 2, VOXEL_WALL);
+        halo.set(1, 0, 2, VOXEL_WALL);
+
+        // Mirror the boundary condition at the other side. These halo cells
+        // represent adjacent deterministic chunks even though their padded
+        // SVO root cubes would overlap the current root in world space.
+        halo.set(3, 1, 2, VOXEL_FLOOR);
+        halo.set(4, 1, 2, VOXEL_WALL);
+
+        let cropped = crop_lateral_halo(&halo, 1);
+        let left = cropped.get_face_occlusion(0, 1, 1);
+        assert_ne!(left & FACE_OCCLUDED_NEGATIVE_X, 0);
+        assert_ne!(left & FACE_OCCLUDED_NEGATIVE_Y, 0);
+        assert_eq!(left & FACE_OCCLUDED_POSITIVE_Y, 0);
+
+        let right = cropped.get_face_occlusion(2, 1, 1);
+        assert_ne!(right & FACE_OCCLUDED_POSITIVE_X, 0);
+        assert_eq!(right & FACE_OCCLUDED_POSITIVE_Y, 0);
     }
 }

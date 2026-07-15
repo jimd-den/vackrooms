@@ -15,6 +15,10 @@ pub struct CpuCanvasRenderer {
     rasterizer: SoftwareRasterizer,
     ctx: CanvasRenderingContext2d,
     settings: crate::adapters::cpu_splatter::CpuRenderSettings,
+    /// Most recent synchronous CPU stages, measured independently so the
+    /// HUD can distinguish renderer cost from Canvas-2D presentation cost.
+    rasterizer_ms: f64,
+    blit_ms: f64,
 }
 
 impl CpuCanvasRenderer {
@@ -28,29 +32,34 @@ impl CpuCanvasRenderer {
             rasterizer: SoftwareRasterizer::new(canvas.width() as usize, canvas.height() as usize),
             ctx,
             settings,
+            rasterizer_ms: 0.0,
+            blit_ms: 0.0,
         })
     }
 
     pub fn resize(&mut self, width: u32, height: u32) {
-        // Impose a low CPU backing resolution cap (480x270 max), keeping aspect ratio
-        let max_w = 480.0;
-        let max_h = 270.0;
-        let scale = (max_w / width as f32).min(max_h / height as f32).min(1.0)
-            * self.settings.internal_scale;
-        let w = ((width as f32 * scale).round() as usize).max(1);
-        let h = ((height as f32 * scale).round() as usize).max(1);
-
-        self.rasterizer.resize(w, h);
+        // The browser composition root already applies the validated CPU
+        // resolution factor to the canvas. Matching it exactly is essential:
+        // `put_image_data` does not scale a smaller image and would otherwise
+        // leave most of the canvas stale or black.
+        self.rasterizer
+            .resize(width.max(1) as usize, height.max(1) as usize);
     }
 
     pub fn telemetry_string(&self) -> String {
         let stats = self.rasterizer.telemetry();
         format!(
-            "V:{} (D:{})/S:{}/P:{}K{}",
+            "CPU:{:.1}+{:.1}ms V:{}/{}{} (D:{})/S:{}/P:{}K/{}K{}{}",
+            self.rasterizer_ms,
+            self.blit_ms,
             stats.visited_nodes,
+            stats.node_visit_limit,
+            if stats.node_budget_limited { "N!" } else { "" },
             stats.max_virtual_depth,
             stats.splat_count,
             stats.pixel_writes / 1000,
+            stats.pixel_write_limit / 1000,
+            if stats.pixel_budget_limited { "P!" } else { "" },
             if stats.budget_exhausted { "!" } else { "" }
         )
     }
@@ -61,24 +70,25 @@ impl RendererPort for CpuCanvasRenderer {
         self.rasterizer.upload_atlas(texels);
     }
 
+    fn upload_atlas_rows(&mut self, first_row: u32, texels: &[u32]) -> bool {
+        self.rasterizer.upload_atlas_rows(first_row, texels)
+    }
+
     fn cpu_telemetry_string(&self) -> Option<String> {
         Some(self.telemetry_string())
     }
 
     fn draw(&mut self, frame: &FrameParams, chunks: &[ChunkDraw]) {
-        let old_scale = self.settings.internal_scale;
         self.settings = crate::get_cpu_settings();
         self.settings.fov_tan = crate::drivers::webgl::fov_tan();
         // The optimization switchboard is sampled once per frame here; the
         // platform-free rasterizer itself never reads globals.
         self.settings.toggles = crate::get_render_toggles();
-        if self.settings.internal_scale != old_scale {
-            if let Some(canvas) = self.ctx.canvas() {
-                self.resize(canvas.width(), canvas.height());
-            }
-        }
         self.rasterizer.settings = self.settings;
+
+        let render_start = browser_now_ms();
         self.rasterizer.draw(frame, chunks);
+        let render_end = browser_now_ms();
         let width = self.rasterizer.width() as u32;
         let height = self.rasterizer.height() as u32;
         let fb = self.rasterizer.framebuffer();
@@ -86,5 +96,14 @@ impl RendererPort for CpuCanvasRenderer {
         if let Ok(image) = ImageData::new_with_u8_clamped_array_and_sh(Clamped(fb), width, height) {
             let _ = self.ctx.put_image_data(&image, 0.0, 0.0);
         }
+        let blit_end = browser_now_ms();
+        self.rasterizer_ms = render_end - render_start;
+        self.blit_ms = blit_end - render_end;
     }
+}
+
+fn browser_now_ms() -> f64 {
+    web_sys::window()
+        .and_then(|window| window.performance())
+        .map_or(0.0, |performance| performance.now())
 }

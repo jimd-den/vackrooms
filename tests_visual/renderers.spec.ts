@@ -24,18 +24,22 @@ const backends = [
     viewport: { width: 96, height: 54 },
   },
   {
-    query: 'renderer=cpu&rt_hiz=0&rt_f2b=0&rt_mips=0&rt_beam_occlusion=0&rt_cull=0',
+    query:
+      'renderer=cpu&rt_hiz=0&rt_f2b=0&rt_mips=0&rt_beam_occlusion=0&rt_deferred=0&rt_ao=0&rt_cull=0',
     label: 'CPU splat',
-    disabled: ['hiz', 'f2b', 'mips', 'beam_occlusion', 'cull'],
+    disabled: ['hiz', 'f2b', 'mips', 'beam_occlusion', 'deferred', 'ao', 'cull'],
     viewport: { width: 320, height: 240 },
   },
 ] as const;
 
-async function renderedImageStats(page: import('@playwright/test').Page) {
-  const png = await page.locator('#view').screenshot();
+async function renderedImageStats(
+  renderPage: import('@playwright/test').Page,
+  probePage: import('@playwright/test').Page,
+) {
+  const png = await renderPage.locator('#view').screenshot();
   const dataUrl = `data:image/png;base64,${png.toString('base64')}`;
 
-  return page.evaluate(async encodedImage => {
+  return probePage.evaluate(async encodedImage => {
     const response = await fetch(encodedImage);
     const bitmap = await createImageBitmap(await response.blob());
     const sample = document.createElement('canvas');
@@ -110,7 +114,12 @@ for (const backend of backends) {
     // A successful boot label is not proof of a successful shader/draw. The
     // compositor screenshot must contain real scene variation rather than a
     // uniform clear/error canvas.
-    const image = await renderedImageStats(page);
+    // Deliberately unoptimized raymarch shaders can monopolize their page's
+    // renderer process under software WebGL. Decode the already captured PNG
+    // in an idle page so image analysis is not starved by the next rAF draw.
+    const probePage = await page.context().newPage();
+    const image = await renderedImageStats(page, probePage);
+    await probePage.close();
     expect(image.colorBuckets).toBeGreaterThan(3);
     expect(image.luminanceRange).toBeGreaterThan(4);
     expect(consoleErrors).toEqual([]);

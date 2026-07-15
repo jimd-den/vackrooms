@@ -33,7 +33,8 @@ pub struct OctreeGpuData {
 ///   * If Internal Node (`R == 0`): `0` (Padding).
 ///   * If Leaf Node (`R == 1`): packed lighting:
 ///     - bits 0-7:   scalar light level, the max of the RGB channels (0-15)
-///     - bits 8-15:  face occlusion mask
+///     - bits 8-13:  neighbor-occupancy mask (+X,-X,+Y,-Y,+Z,-Z)
+///       A clear bit is an exposed physical face. Bits 14-15 are reserved.
 ///     - bits 16-19: red light channel (0-15)
 ///     - bits 20-23: green light channel (0-15)
 ///     - bits 24-27: blue light channel (0-15)
@@ -103,6 +104,7 @@ impl OctreeGpuSerializer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::entities::voxel_grid::{FACE_OCCLUDED_NEGATIVE_X, FACE_OCCLUDED_POSITIVE_Y};
 
     #[test]
     fn test_gpu_serialization_padding() {
@@ -135,5 +137,17 @@ mod tests {
                 assert!(max_index < (gpu_data.texture_width * gpu_data.texture_height));
             }
         }
+    }
+
+    #[test]
+    fn neighbor_occlusion_reaches_the_leaf_light_word_unchanged() {
+        let mut octree = SparseVoxelOctree::new(0, 1.0);
+        let mask = FACE_OCCLUDED_NEGATIVE_X | FACE_OCCLUDED_POSITIVE_Y;
+        octree.set(0, 0, 0, 1, 0xAA8844, [7, 5, 3], mask);
+
+        let gpu = OctreeGpuSerializer::serialize_to_gpu_data(&octree);
+        let light_word = gpu.texel_data[3];
+        assert_eq!(((light_word >> 8) & 0x3f) as u8, mask);
+        assert_eq!(light_word & 0xff, 7);
     }
 }

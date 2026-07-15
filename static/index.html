@@ -19,6 +19,7 @@
                                              also the automatic WebGL2 fallback)
                       (default)           -> low-spec profile, GPU surface meshes
                       ?seed=… ?pillars= ?walls= ?atria= ?lights=
+                      ?workers=auto|0|1|2|3|4 -> chunk-generation concurrency
                       ?rt_<optimization>=0|1 (also exposed in Settings)
                       ?force_anomaly=pillars|blackout|pits|archway|redroom (debug spawn)
     -->
@@ -195,6 +196,20 @@
             background: transparent;
             cursor: pointer;
         }
+        .settings-group {
+            margin: 14px 0 18px;
+            padding: 12px 12px 1px;
+            border: 1px solid rgba(216, 207, 159, 0.14);
+            border-radius: 8px;
+            background: rgba(0, 0, 0, 0.16);
+        }
+        .settings-group h3 {
+            margin: 0 0 12px;
+            color: #fff3c4;
+            font-size: 11px;
+            letter-spacing: 2px;
+            text-transform: uppercase;
+        }
 
         /* Switch styling for checkboxes */
         .setting-row.inline-switch {
@@ -366,6 +381,18 @@
                 </select>
             </div>
             <div class="setting-row">
+                <label for="setting-generation-workers">Chunk generation workers <span class="value">reload</span></label>
+                <select id="setting-generation-workers">
+                    <option value="auto">Auto — reserve main thread, max 4</option>
+                    <option value="0">0 — synchronous fallback</option>
+                    <option value="1">1 generation worker</option>
+                    <option value="2">2 generation workers</option>
+                    <option value="3">3 generation workers</option>
+                    <option value="4">4 generation workers</option>
+                </select>
+            </div>
+            <p class="hint">Workers generate and stream world chunks. They do not parallelize the CPU splat renderer; explicit counts are clamped to available hardware.</p>
+            <div class="setting-row">
                 <label for="setting-scale">Render scale</label>
                 <select id="setting-scale">
                     <option value="0">Auto (adaptive)</option>
@@ -384,53 +411,70 @@
         <!-- Renderer Optimizations Tab -->
         <div id="tab-optimizations" class="tab-content" style="display: none;">
             <p class="hint">Each switch has a correct fallback path. Disable one at a time to isolate image or performance regressions; changes apply immediately.</p>
-            <div class="setting-row inline-switch">
-                <label for="setting-rt-hiz">CPU hierarchical Z</label>
-                <input type="checkbox" id="setting-rt-hiz" checked>
+            <div class="settings-group">
+                <h3>CPU splatter</h3>
+                <div class="setting-row inline-switch">
+                    <label for="setting-rt-hiz">Hierarchical Z rejection</label>
+                    <input type="checkbox" id="setting-rt-hiz" checked>
+                </div>
+                <div class="setting-row inline-switch">
+                    <label for="setting-rt-mips">Projected-size MIP collapse</label>
+                    <input type="checkbox" id="setting-rt-mips" checked>
+                </div>
+                <div class="setting-row inline-switch">
+                    <label for="setting-rt-beam_occlusion">Flashlight scene visibility rays</label>
+                    <input type="checkbox" id="setting-rt-beam_occlusion" checked>
+                </div>
+                <div class="setting-row inline-switch">
+                    <label for="setting-rt-deferred">Reject hidden splats before shading</label>
+                    <input type="checkbox" id="setting-rt-deferred" checked>
+                </div>
+                <div class="setting-row inline-switch">
+                    <label for="setting-rt-ao">Sibling-count ambient occlusion</label>
+                    <input type="checkbox" id="setting-rt-ao" checked>
+                </div>
             </div>
-            <div class="setting-row inline-switch">
-                <label for="setting-rt-f2b">CPU/raymarch front-to-back</label>
-                <input type="checkbox" id="setting-rt-f2b" checked>
+            <div class="settings-group">
+                <h3>Shared traversal</h3>
+                <div class="setting-row inline-switch">
+                    <label for="setting-rt-f2b">Front-to-back ordering</label>
+                    <input type="checkbox" id="setting-rt-f2b" checked>
+                </div>
+                <div class="setting-row inline-switch">
+                    <label for="setting-rt-cull">Conservative chunk culling</label>
+                    <input type="checkbox" id="setting-rt-cull" checked>
+                </div>
             </div>
-            <div class="setting-row inline-switch">
-                <label for="setting-rt-skip">Raymarch empty-SVO skipping</label>
-                <input type="checkbox" id="setting-rt-skip" checked>
-            </div>
-            <div class="setting-row inline-switch">
-                <label for="setting-rt-mips">CPU MIP/LOD collapse</label>
-                <input type="checkbox" id="setting-rt-mips" checked>
-            </div>
-            <div class="setting-row inline-switch">
-                <label for="setting-rt-beam_occlusion">CPU cone-light occlusion</label>
-                <input type="checkbox" id="setting-rt-beam_occlusion" checked>
-            </div>
-            <div class="setting-row inline-switch">
-                <label for="setting-rt-shadows">GPU direct-light visibility</label>
-                <input type="checkbox" id="setting-rt-shadows" checked>
-            </div>
-            <div class="setting-row inline-switch">
-                <label for="setting-rt-cells">GPU splat cell culling</label>
-                <input type="checkbox" id="setting-rt-cells" checked>
-            </div>
-            <div class="setting-row inline-switch">
-                <label for="setting-rt-budget">GPU splat face budget</label>
-                <input type="checkbox" id="setting-rt-budget" checked>
-            </div>
-            <div class="setting-row inline-switch">
-                <label for="setting-rt-cull">CPU + GPU chunk culling</label>
-                <input type="checkbox" id="setting-rt-cull" checked>
-            </div>
-            <div class="setting-row inline-switch">
-                <label for="setting-rt-dither">Dither and surface grain</label>
-                <input type="checkbox" id="setting-rt-dither" checked>
-            </div>
-            <div class="setting-row inline-switch">
-                <label for="setting-rt-bake">Surface: approx. voxel diffuse fill</label>
-                <input type="checkbox" id="setting-rt-bake">
-            </div>
-            <div class="setting-row inline-switch">
-                <label for="setting-rt-timer">Asynchronous GPU timer</label>
-                <input type="checkbox" id="setting-rt-timer" checked>
+            <div class="settings-group">
+                <h3>GPU renderers</h3>
+                <div class="setting-row inline-switch">
+                    <label for="setting-rt-skip">Raymarch empty-SVO skipping</label>
+                    <input type="checkbox" id="setting-rt-skip" checked>
+                </div>
+                <div class="setting-row inline-switch">
+                    <label for="setting-rt-shadows">Direct-light visibility</label>
+                    <input type="checkbox" id="setting-rt-shadows" checked>
+                </div>
+                <div class="setting-row inline-switch">
+                    <label for="setting-rt-cells">Splat cell culling</label>
+                    <input type="checkbox" id="setting-rt-cells" checked>
+                </div>
+                <div class="setting-row inline-switch">
+                    <label for="setting-rt-budget">Splat face budget</label>
+                    <input type="checkbox" id="setting-rt-budget" checked>
+                </div>
+                <div class="setting-row inline-switch">
+                    <label for="setting-rt-dither">Dither and surface grain</label>
+                    <input type="checkbox" id="setting-rt-dither" checked>
+                </div>
+                <div class="setting-row inline-switch">
+                    <label for="setting-rt-bake">Surface: approximate voxel diffuse fill</label>
+                    <input type="checkbox" id="setting-rt-bake">
+                </div>
+                <div class="setting-row inline-switch">
+                    <label for="setting-rt-timer">Asynchronous GPU timer</label>
+                    <input type="checkbox" id="setting-rt-timer" checked>
+                </div>
             </div>
         </div>
 
@@ -464,29 +508,50 @@
 
         <!-- CPU Renderer Tab -->
         <div id="tab-cpu" class="tab-content" style="display: none;">
+            <p class="hint">The CPU canvas always fills the page. Resolution percentages control its backing pixels per axis; every traversal optimization and flashlight visibility ray remains independently switchable under Optimize.</p>
             <div class="setting-row">
-                <label for="setting-cpu-scale">CPU Resolution Scale <span class="value" id="cpu-scale-value">100%</span></label>
-                <input type="range" id="setting-cpu-scale" min="0.25" max="1.0" step="0.05" value="1.0">
+                <label for="setting-cpu-preset">CPU quality preset</label>
+                <select id="setting-cpu-preset">
+                    <option value="performance">Performance — 12.5% backing</option>
+                    <option value="balanced">Balanced — 25% backing</option>
+                    <option value="quality">Quality — 37.5% backing</option>
+                    <option value="maximum">Maximum — 50% backing</option>
+                    <option value="custom">Custom</option>
+                </select>
             </div>
             <div class="setting-row">
-                <label for="setting-cpu-lod">LOD Cutoff (px) <span class="value" id="cpu-lod-value">1.00</span></label>
+                <label for="setting-cpu-scale">CPU backing resolution <span class="value" id="cpu-scale-value">25%</span></label>
+                <input type="range" id="setting-cpu-scale" min="0.25" max="2.0" step="0.05" value="1.0">
+            </div>
+            <div class="setting-row">
+                <label for="setting-cpu-lod">Distant LOD cutoff (px) <span class="value" id="cpu-lod-value">1.00</span></label>
                 <input type="range" id="setting-cpu-lod" min="0.25" max="2.0" step="0.05" value="1.00">
             </div>
             <div class="setting-row">
-                <label for="setting-cpu-splat">Max Splat Size (px) <span class="value" id="cpu-splat-value">12.0</span></label>
-                <input type="range" id="setting-cpu-splat" min="2.0" max="16.0" step="0.5" value="12.0">
+                <label for="setting-cpu-splat">Maximum splat radius (px) <span class="value" id="cpu-splat-value">8.0</span></label>
+                <input type="range" id="setting-cpu-splat" min="1.0" max="16.0" step="0.5" value="8.0">
             </div>
             <div class="setting-row">
-                <label for="setting-cpu-dist">Draw Distance (m) <span class="value" id="cpu-dist-value">96</span></label>
+                <label for="setting-cpu-depth">Virtual split depth <span class="value" id="cpu-depth-value">5</span></label>
+                <input type="range" id="setting-cpu-depth" min="3" max="8" step="1" value="5">
+            </div>
+            <div class="setting-row">
+                <label for="setting-cpu-mip-occupancy">Sparse LOD threshold <span class="value" id="cpu-mip-occupancy-value">25%</span></label>
+                <input type="range" id="setting-cpu-mip-occupancy" min="0" max="0.5" step="0.01" value="0.25">
+            </div>
+            <div class="setting-row">
+                <label for="setting-cpu-dist">Draw distance (world units) <span class="value" id="cpu-dist-value">96</span></label>
                 <input type="range" id="setting-cpu-dist" min="16" max="256" step="8" value="96">
             </div>
             <div class="setting-row">
-                <label for="setting-cpu-shadows">Shadows</label>
+                <label for="setting-cpu-shadows">Fixture shadow policy</label>
                 <select id="setting-cpu-shadows">
-                    <option value="off">Off (Fastest)</option>
-                    <option value="hero">Hero shadow ray (Beautiful)</option>
+                    <option value="off">Off — unshadowed direct light (fast)</option>
+                    <option value="hero">Hero fixture — one visibility ray</option>
+                    <option value="full">Full reference — every fixture sample (slow)</option>
                 </select>
             </div>
+            <p class="hint">Lower LOD cutoff and splat radius preserve finer geometry but visit more nodes. “Hero fixture” is an explicit one-light approximation. “Full reference” traces every point endpoint and all four samples of every rectangular fixture.</p>
         </div>
 
         <!-- Debug Tab -->
@@ -509,7 +574,7 @@
             <p class="hint">The forced anomaly is placed deterministically on the spawn's macro cell so every worker generates the same world. The overlay lists reality epochs, traversal gates and pit hazards near you.</p>
         </div>
 
-        <p class="hint">Controls, Graphics &amp; CPU Render settings apply instantly. World changes need Apply &amp; Reload.</p>
+        <p class="hint">Controls and unmarked Graphics/CPU settings apply instantly. Rows marked “reload” require Apply &amp; Reload.</p>
 
         <div class="settings-actions">
             <button id="fullscreen-btn">Fullscreen</button>
@@ -525,9 +590,12 @@
             set_invert_y,
             set_render_scale,
             set_fov,
+            set_cpu_quality_preset,
             set_cpu_scale,
             set_cpu_lod_cutoff,
-            set_cpu_max_splat_half,
+            set_cpu_max_splat_radius,
+            set_cpu_virtual_depth,
+            set_cpu_mip_occupancy,
             set_cpu_max_draw_distance,
             set_cpu_shadows,
             set_anomaly_debug,
@@ -547,6 +615,8 @@
             skip: true,
             mips: true,
             beam_occlusion: true,
+            deferred: true,
+            ao: true,
             shadows: true,
             cells: true,
             budget: true,
@@ -555,22 +625,81 @@
             bake: false,
             timer: true,
         };
+        const CPU_PRESETS = Object.freeze({
+            performance: Object.freeze({ id: 0, scale: 0.5, lod: 1.5, splatRadius: 14.0, virtualDepth: 4, mipOccupancy: 0.35, distance: 72, shadows: 'off' }),
+            balanced: Object.freeze({ id: 1, scale: 1.0, lod: 1.0, splatRadius: 8.0, virtualDepth: 5, mipOccupancy: 0.25, distance: 96, shadows: 'off' }),
+            quality: Object.freeze({ id: 2, scale: 1.5, lod: 0.65, splatRadius: 4.0, virtualDepth: 6, mipOccupancy: 0.12, distance: 128, shadows: 'hero' }),
+            maximum: Object.freeze({ id: 3, scale: 2.0, lod: 0.35, splatRadius: 2.0, virtualDepth: 8, mipOccupancy: 0.05, distance: 160, shadows: 'full' }),
+        });
+        const normalizeGenerationWorkers = (value) => {
+            const text = String(value ?? 'auto');
+            if (text === 'auto' || text === '0') return text;
+            const requested = Number(text);
+            return Number.isInteger(requested) && requested > 0
+                ? String(Math.min(4, requested))
+                : 'auto';
+        };
+        const clampFinite = (value, min, max, fallback) => {
+            const number = Number(value);
+            return Number.isFinite(number) ? Math.min(max, Math.max(min, number)) : fallback;
+        };
+        const copyCpuPreset = (target, name) => {
+            const preset = CPU_PRESETS[name];
+            if (!preset) return false;
+            target.cpuPreset = name;
+            target.cpuScale = preset.scale;
+            target.cpuLod = preset.lod;
+            target.cpuSplat = preset.splatRadius;
+            target.cpuVirtualDepth = preset.virtualDepth;
+            target.cpuMipOccupancy = preset.mipOccupancy;
+            target.cpuDist = preset.distance;
+            target.cpuShadows = preset.shadows;
+            return true;
+        };
+        const sanitizeCpuPrefs = (target) => {
+            if (target.cpuPreset !== 'custom' && copyCpuPreset(target, target.cpuPreset)) return;
+            target.cpuPreset = 'custom';
+            target.cpuScale = clampFinite(target.cpuScale, 0.25, 2.0, 1.0);
+            target.cpuLod = clampFinite(target.cpuLod, 0.25, 2.0, 1.0);
+            target.cpuSplat = clampFinite(target.cpuSplat, 1.0, 16.0, 8.0);
+            target.cpuVirtualDepth = Math.round(clampFinite(target.cpuVirtualDepth, 3, 8, 5));
+            target.cpuMipOccupancy = clampFinite(target.cpuMipOccupancy, 0, 0.5, 0.25);
+            target.cpuDist = Math.round(clampFinite(target.cpuDist, 16, 256, 96) / 8) * 8;
+            target.cpuShadows = ['off', 'hero', 'full'].includes(target.cpuShadows)
+                ? target.cpuShadows
+                : 'off';
+        };
         const defaults = {
             scheme: 'modern',
             sensitivity: 1.0,
             invertY: false,
             scale: 0,
             fov: 75,
+            generationWorkers: 'auto',
+            cpuPreset: 'balanced',
             cpuScale: 1.0,
             cpuLod: 1.0,
-            cpuSplat: 12.0,
+            cpuSplat: 8.0,
+            cpuVirtualDepth: 5,
+            cpuMipOccupancy: 0.25,
             cpuDist: 96.0,
             cpuShadows: 'off',
             anomalyDebug: false,
             renderToggles: { ...defaultRenderToggles },
         };
-        let prefs = { ...defaults };
-        try { prefs = { ...defaults, ...JSON.parse(localStorage.getItem(PREFS_KEY) || '{}') }; } catch (_) {}
+        let savedPrefs = {};
+        try { savedPrefs = JSON.parse(localStorage.getItem(PREFS_KEY) || '{}') || {}; } catch (_) {}
+        let prefs = { ...defaults, ...savedPrefs };
+        prefs.generationWorkers = normalizeGenerationWorkers(prefs.generationWorkers);
+        const owns = (object, key) => Object.prototype.hasOwnProperty.call(object, key);
+        // Preferences written by the former UI had scalar CPU controls but
+        // no preset name. Preserve those values as a custom profile.
+        if (!owns(savedPrefs, 'cpuPreset') && [
+            'cpuScale', 'cpuLod', 'cpuSplat', 'cpuDist', 'cpuShadows',
+        ].some((key) => owns(savedPrefs, key))) {
+            prefs.cpuPreset = 'custom';
+        }
+        sanitizeCpuPrefs(prefs);
         // Preferences are shallow-merged above. Rebuild the nested catalog
         // from the known names so new switches default on and stale/corrupt
         // keys can never point at a non-existent settings control.
@@ -592,6 +721,20 @@
         // World/graphics-profile settings travel in the URL so worlds stay
         // shareable by link.
         const urlParams = new URLSearchParams(window.location.search);
+        const activeGenerationWorkers = urlParams.has('workers')
+            ? normalizeGenerationWorkers(urlParams.get('workers'))
+            : prefs.generationWorkers;
+        if (!urlParams.has('workers') && activeGenerationWorkers !== 'auto') {
+            // Saved reload-required preferences must reach the Rust
+            // composition root before `init()` reads location.search.
+            urlParams.set('workers', activeGenerationWorkers);
+            const query = urlParams.toString();
+            history.replaceState(
+                null,
+                '',
+                `${window.location.pathname}${query ? `?${query}` : ''}${window.location.hash}`,
+            );
+        }
         const parseToggle = (value, fallback) => {
             if (['0', 'false', 'off'].includes(value)) return false;
             if (['1', 'true', 'on'].includes(value)) return true;
@@ -610,6 +753,19 @@
                 );
             }
         }
+        // URL CPU settings are active-session overrides, just like renderer
+        // toggles. They must not leak into device preferences when an
+        // unrelated live setting is saved later.
+        const activeCpu = { ...prefs };
+        const CPU_PREF_FIELDS = [
+            'cpuPreset', 'cpuScale', 'cpuLod', 'cpuSplat',
+            'cpuVirtualDepth', 'cpuMipOccupancy', 'cpuDist', 'cpuShadows',
+        ];
+        const persistActiveCpu = () => {
+            for (const field of CPU_PREF_FIELDS) prefs[field] = activeCpu[field];
+            savePrefs();
+        };
+        const cpuShadowId = (mode) => ({ off: 0, hero: 1, full: 2 })[mode] ?? 0;
 
         // ---- Populate the menu from current state -------------------------
         $('control-scheme').value = prefs.scheme;
@@ -619,20 +775,28 @@
         $('setting-scale').value = String(prefs.scale);
         $('setting-fov').value = prefs.fov;
         $('fov-value').textContent = `${prefs.fov}°`;
+        $('setting-generation-workers').value = activeGenerationWorkers;
         for (const [name, enabled] of Object.entries(activeRenderToggles)) {
             $(`setting-rt-${name}`).checked = !!enabled;
         }
 
-        // CPU settings
-        $('setting-cpu-scale').value = prefs.cpuScale;
-        $('cpu-scale-value').textContent = `${Math.round(prefs.cpuScale * 100)}%`;
-        $('setting-cpu-lod').value = prefs.cpuLod;
-        $('cpu-lod-value').textContent = Number(prefs.cpuLod).toFixed(2);
-        $('setting-cpu-splat').value = prefs.cpuSplat;
-        $('cpu-splat-value').textContent = Number(prefs.cpuSplat).toFixed(1);
-        $('setting-cpu-dist').value = prefs.cpuDist;
-        $('cpu-dist-value').textContent = prefs.cpuDist;
-        $('setting-cpu-shadows').value = prefs.cpuShadows;
+        const refreshCpuControls = () => {
+            $('setting-cpu-preset').value = activeCpu.cpuPreset;
+            $('setting-cpu-scale').value = activeCpu.cpuScale;
+            $('cpu-scale-value').textContent = `${Math.round(activeCpu.cpuScale * 25)}%`;
+            $('setting-cpu-lod').value = activeCpu.cpuLod;
+            $('cpu-lod-value').textContent = Number(activeCpu.cpuLod).toFixed(2);
+            $('setting-cpu-splat').value = activeCpu.cpuSplat;
+            $('cpu-splat-value').textContent = Number(activeCpu.cpuSplat).toFixed(1);
+            $('setting-cpu-depth').value = activeCpu.cpuVirtualDepth;
+            $('cpu-depth-value').textContent = String(activeCpu.cpuVirtualDepth);
+            $('setting-cpu-mip-occupancy').value = activeCpu.cpuMipOccupancy;
+            $('cpu-mip-occupancy-value').textContent = `${Math.round(activeCpu.cpuMipOccupancy * 100)}%`;
+            $('setting-cpu-dist').value = activeCpu.cpuDist;
+            $('cpu-dist-value').textContent = activeCpu.cpuDist;
+            $('setting-cpu-shadows').value = activeCpu.cpuShadows;
+        };
+        refreshCpuControls();
 
         // URL parameters overrides (link sharing)
         $('setting-quality').value = urlParams.get('spec') === 'high' ? 'high' : 'low';
@@ -676,25 +840,34 @@
                 $(`${knob}-value`).textContent = Number(val).toFixed(1);
             }
         }
-        if (urlParams.has('cpuScale')) {
-            prefs.cpuScale = Number(urlParams.get('cpuScale'));
-            $('setting-cpu-scale').value = prefs.cpuScale;
-            $('cpu-scale-value').textContent = `${Math.round(prefs.cpuScale * 100)}%`;
+        const requestedCpuPreset = urlParams.get('cpu_preset');
+        if (CPU_PRESETS[requestedCpuPreset]) copyCpuPreset(activeCpu, requestedCpuPreset);
+        else if (requestedCpuPreset === 'custom') activeCpu.cpuPreset = 'custom';
+        const firstParam = (...names) => {
+            const name = names.find((candidate) => urlParams.has(candidate));
+            return name ? urlParams.get(name) : null;
+        };
+        const overrideCpuNumber = (field, ...names) => {
+            const value = firstParam(...names);
+            if (value === null) return;
+            activeCpu[field] = Number(value);
+            activeCpu.cpuPreset = 'custom';
+        };
+        overrideCpuNumber('cpuScale', 'cpu_scale', 'cpuScale');
+        overrideCpuNumber('cpuLod', 'cpu_lod_px', 'cpuLod');
+        // `cpuSplatPx` historically meant half extent despite its ambiguous
+        // name. Preserve it as the radius alias.
+        overrideCpuNumber('cpuSplat', 'cpu_splat_radius_px', 'cpuSplatPx');
+        overrideCpuNumber('cpuVirtualDepth', 'cpu_virtual_depth');
+        overrideCpuNumber('cpuMipOccupancy', 'cpu_mip_occupancy');
+        overrideCpuNumber('cpuDist', 'cpu_range', 'cpuRange');
+        const requestedCpuShadows = firstParam('cpu_shadows', 'cpuShadows');
+        if (requestedCpuShadows !== null) {
+            activeCpu.cpuShadows = requestedCpuShadows;
+            activeCpu.cpuPreset = 'custom';
         }
-        if (urlParams.has('cpuSplatPx')) {
-            prefs.cpuSplat = Number(urlParams.get('cpuSplatPx'));
-            $('setting-cpu-splat').value = prefs.cpuSplat;
-            $('cpu-splat-value').textContent = Number(prefs.cpuSplat).toFixed(1);
-        }
-        if (urlParams.has('cpuRange')) {
-            prefs.cpuDist = Number(urlParams.get('cpuRange'));
-            $('setting-cpu-dist').value = prefs.cpuDist;
-            $('cpu-dist-value').textContent = prefs.cpuDist;
-        }
-        if (urlParams.has('cpuShadows')) {
-            prefs.cpuShadows = urlParams.get('cpuShadows') === 'hero' ? 'hero' : 'off';
-            $('setting-cpu-shadows').value = prefs.cpuShadows;
-        }
+        sanitizeCpuPrefs(activeCpu);
+        refreshCpuControls();
 
         // ---- Apply live preferences to the engine --------------------------
         const applyLivePrefs = () => {
@@ -704,12 +877,19 @@
             set_render_scale(Number(prefs.scale));
             set_fov(Number(prefs.fov));
 
-            // CPU Renderer configurations
-            set_cpu_scale(Number(prefs.cpuScale));
-            set_cpu_lod_cutoff(Number(prefs.cpuLod));
-            set_cpu_max_splat_half(Number(prefs.cpuSplat));
-            set_cpu_max_draw_distance(Number(prefs.cpuDist));
-            set_cpu_shadows(prefs.cpuShadows === 'hero' ? 1 : 0);
+            // CPU quality presets and custom controls feed the same validated
+            // Rust settings snapshot. Optimization toggles stay independent.
+            if (CPU_PRESETS[activeCpu.cpuPreset]) {
+                set_cpu_quality_preset(CPU_PRESETS[activeCpu.cpuPreset].id);
+            } else {
+                set_cpu_scale(Number(activeCpu.cpuScale));
+                set_cpu_lod_cutoff(Number(activeCpu.cpuLod));
+                set_cpu_max_splat_radius(Number(activeCpu.cpuSplat));
+                set_cpu_virtual_depth(Number(activeCpu.cpuVirtualDepth));
+                set_cpu_mip_occupancy(Number(activeCpu.cpuMipOccupancy));
+                set_cpu_max_draw_distance(Number(activeCpu.cpuDist));
+                set_cpu_shadows(cpuShadowId(activeCpu.cpuShadows));
+            }
             set_anomaly_debug(!!prefs.anomalyDebug);
             for (const [name, enabled] of Object.entries(activeRenderToggles)) {
                 set_render_toggle(name, !!enabled);
@@ -739,31 +919,60 @@
             $('fov-value').textContent = `${prefs.fov}°`;
             set_fov(prefs.fov);
         });
+        $('setting-generation-workers').addEventListener('change', (e) => {
+            prefs.generationWorkers = normalizeGenerationWorkers(e.target.value);
+            e.target.value = prefs.generationWorkers;
+            savePrefs();
+        });
 
         // CPU settings event listeners
+        const markCpuCustom = () => {
+            activeCpu.cpuPreset = 'custom';
+            $('setting-cpu-preset').value = 'custom';
+        };
+        $('setting-cpu-preset').addEventListener('change', (e) => {
+            if (!copyCpuPreset(activeCpu, e.target.value)) {
+                markCpuCustom();
+                persistActiveCpu();
+                return;
+            }
+            persistActiveCpu();
+            refreshCpuControls();
+            set_cpu_quality_preset(CPU_PRESETS[activeCpu.cpuPreset].id);
+        });
         $('setting-cpu-scale').addEventListener('input', (e) => {
-            prefs.cpuScale = Number(e.target.value); savePrefs();
-            $('cpu-scale-value').textContent = `${Math.round(prefs.cpuScale * 100)}%`;
-            set_cpu_scale(prefs.cpuScale);
+            markCpuCustom(); activeCpu.cpuScale = Number(e.target.value); persistActiveCpu();
+            $('cpu-scale-value').textContent = `${Math.round(activeCpu.cpuScale * 25)}%`;
+            set_cpu_scale(activeCpu.cpuScale);
         });
         $('setting-cpu-lod').addEventListener('input', (e) => {
-            prefs.cpuLod = Number(e.target.value); savePrefs();
-            $('cpu-lod-value').textContent = Number(prefs.cpuLod).toFixed(2);
-            set_cpu_lod_cutoff(prefs.cpuLod);
+            markCpuCustom(); activeCpu.cpuLod = Number(e.target.value); persistActiveCpu();
+            $('cpu-lod-value').textContent = Number(activeCpu.cpuLod).toFixed(2);
+            set_cpu_lod_cutoff(activeCpu.cpuLod);
         });
         $('setting-cpu-splat').addEventListener('input', (e) => {
-            prefs.cpuSplat = Number(e.target.value); savePrefs();
-            $('cpu-splat-value').textContent = Number(prefs.cpuSplat).toFixed(1);
-            set_cpu_max_splat_half(prefs.cpuSplat);
+            markCpuCustom(); activeCpu.cpuSplat = Number(e.target.value); persistActiveCpu();
+            $('cpu-splat-value').textContent = Number(activeCpu.cpuSplat).toFixed(1);
+            set_cpu_max_splat_radius(activeCpu.cpuSplat);
+        });
+        $('setting-cpu-depth').addEventListener('input', (e) => {
+            markCpuCustom(); activeCpu.cpuVirtualDepth = Number(e.target.value); persistActiveCpu();
+            $('cpu-depth-value').textContent = String(activeCpu.cpuVirtualDepth);
+            set_cpu_virtual_depth(activeCpu.cpuVirtualDepth);
+        });
+        $('setting-cpu-mip-occupancy').addEventListener('input', (e) => {
+            markCpuCustom(); activeCpu.cpuMipOccupancy = Number(e.target.value); persistActiveCpu();
+            $('cpu-mip-occupancy-value').textContent = `${Math.round(activeCpu.cpuMipOccupancy * 100)}%`;
+            set_cpu_mip_occupancy(activeCpu.cpuMipOccupancy);
         });
         $('setting-cpu-dist').addEventListener('input', (e) => {
-            prefs.cpuDist = Number(e.target.value); savePrefs();
-            $('cpu-dist-value').textContent = prefs.cpuDist;
-            set_cpu_max_draw_distance(prefs.cpuDist);
+            markCpuCustom(); activeCpu.cpuDist = Number(e.target.value); persistActiveCpu();
+            $('cpu-dist-value').textContent = activeCpu.cpuDist;
+            set_cpu_max_draw_distance(activeCpu.cpuDist);
         });
         $('setting-cpu-shadows').addEventListener('change', (e) => {
-            prefs.cpuShadows = e.target.value; savePrefs();
-            set_cpu_shadows(prefs.cpuShadows === 'hero' ? 1 : 0);
+            markCpuCustom(); activeCpu.cpuShadows = e.target.value; persistActiveCpu();
+            set_cpu_shadows(cpuShadowId(activeCpu.cpuShadows));
         });
         $('setting-anomaly-debug').addEventListener('change', (e) => {
             prefs.anomalyDebug = e.target.checked; savePrefs();
@@ -835,14 +1044,25 @@
             if (voxelSize) params.set('voxel_size', voxelSize);
             const renderer = $('setting-renderer').value;
             if (renderer !== 'surface') params.set('renderer', renderer);
+            params.set(
+                'workers',
+                normalizeGenerationWorkers($('setting-generation-workers').value),
+            );
             const forcedAnomaly = $('setting-force-anomaly').value;
             if (forcedAnomaly) params.set('force_anomaly', forcedAnomaly);
 
-            // Persist CPU configurations on link
-            if (Number(prefs.cpuScale) !== 1.0) params.set('cpuScale', prefs.cpuScale);
-            if (Number(prefs.cpuSplat) !== 12.0) params.set('cpuSplatPx', prefs.cpuSplat);
-            if (Number(prefs.cpuDist) !== 96.0) params.set('cpuRange', prefs.cpuDist);
-            if (prefs.cpuShadows !== 'off') params.set('cpuShadows', prefs.cpuShadows);
+            // A named preset is a complete typed contract. Custom profiles
+            // serialize every scalar with unambiguous canonical names.
+            params.set('cpu_preset', activeCpu.cpuPreset);
+            if (activeCpu.cpuPreset === 'custom') {
+                params.set('cpu_scale', activeCpu.cpuScale);
+                params.set('cpu_lod_px', activeCpu.cpuLod);
+                params.set('cpu_splat_radius_px', activeCpu.cpuSplat);
+                params.set('cpu_virtual_depth', activeCpu.cpuVirtualDepth);
+                params.set('cpu_mip_occupancy', activeCpu.cpuMipOccupancy);
+                params.set('cpu_range', activeCpu.cpuDist);
+                params.set('cpu_shadows', activeCpu.cpuShadows);
+            }
             for (const [name, enabled] of Object.entries(activeRenderToggles)) {
                 // Serialize the complete effective switchboard. An explicit
                 // `1` must survive reload when this device's saved default is

@@ -1,5 +1,5 @@
 use crate::adapters::cpu_splatter::settings::CpuRenderSettings;
-use crate::application::ports::{Environment, FrameParams};
+use crate::application::ports::{Environment, FrameParams, LightSource};
 use crate::application::render_settings::RenderToggles;
 use crate::core::domain::room::CameraSpec;
 
@@ -25,11 +25,12 @@ impl ReferenceRenderSettings {
         cpu
     }
 
-    pub fn frame_params(&self) -> FrameParams {
+    pub fn frame_params(&self, scene_lights: &[LightSource]) -> FrameParams {
         FrameParams {
             camera_pos: self.camera.position,
             yaw: self.camera.yaw,
             pitch: self.camera.pitch,
+            scene_lights: scene_lights.to_vec(),
             environment: self.environment,
             ..FrameParams::default()
         }
@@ -48,6 +49,10 @@ pub struct RenderSceneSnapshot {
     /// Row-padded RGBA32UI SVO texels (four `u32` values per node).
     pub atlas: Vec<u32>,
     pub chunks: Vec<crate::application::ports::ChunkDraw>,
+    /// Analytic fixtures derived from the same emissive voxel surfaces as
+    /// the atlas. Reference renderers must not silently fall back to the
+    /// low-precision bake when production frames use physical lights.
+    pub scene_lights: Vec<LightSource>,
 }
 
 pub trait ReferenceRendererPort {

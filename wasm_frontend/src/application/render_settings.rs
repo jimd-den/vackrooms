@@ -57,6 +57,14 @@ pub struct RenderToggles {
     /// optimization: off means the beam shines through walls but shading
     /// gets cheaper.
     pub flashlight_occlusion: bool,
+    /// OPTIMIZATION (CPU): query the fine depth buffer before evaluating
+    /// fixture, hero, and flashlight radiance. Off = shade every projected
+    /// splat and let the ordinary write-time depth test reject it. The image
+    /// is identical; only hidden-splat shading work changes.
+    pub deferred_shading: bool,
+    /// APPROXIMATION (CPU): sibling-count ambient occlusion. Off is the
+    /// material/lighting reference with unit ambient visibility.
+    pub ambient_occlusion: bool,
     // ------------------------------------------------------------------
     // GPU paths (surface / splat / raymarch)
     // ------------------------------------------------------------------
@@ -99,6 +107,8 @@ impl Default for RenderToggles {
             empty_space_skip: true,
             mip_lod: true,
             flashlight_occlusion: true,
+            deferred_shading: true,
+            ambient_occlusion: true,
             shadow_pass: true,
             cell_culling: true,
             face_budget: true,
@@ -111,7 +121,7 @@ impl Default for RenderToggles {
 }
 
 /// Canonical query-name/bit ordering used by parsing and bitfield round trips.
-const TOGGLE_BITS: [(&str, u32); 12] = [
+const TOGGLE_BITS: [(&str, u32); 14] = [
     ("hiz", 1 << 0),
     ("f2b", 1 << 1),
     ("mips", 1 << 2),
@@ -124,6 +134,8 @@ const TOGGLE_BITS: [(&str, u32); 12] = [
     ("timer", 1 << 9),
     ("skip", 1 << 10),
     ("bake", 1 << 11),
+    ("deferred", 1 << 12),
+    ("ao", 1 << 13),
 ];
 
 impl RenderToggles {
@@ -134,6 +146,8 @@ impl RenderToggles {
             "skip" => &mut self.empty_space_skip,
             "mips" => &mut self.mip_lod,
             "beam_occlusion" => &mut self.flashlight_occlusion,
+            "deferred" => &mut self.deferred_shading,
+            "ao" => &mut self.ambient_occlusion,
             "shadows" => &mut self.shadow_pass,
             "cells" => &mut self.cell_culling,
             "budget" => &mut self.face_budget,
@@ -215,7 +229,8 @@ mod tests {
     fn defaults_use_analytic_static_lighting() {
         let t = RenderToggles::default();
         assert!(t.hierarchical_z && t.front_to_back && t.empty_space_skip && t.mip_lod);
-        assert!(t.flashlight_occlusion && t.shadow_pass && t.cell_culling && t.face_budget);
+        assert!(t.flashlight_occlusion && t.deferred_shading && t.ambient_occlusion);
+        assert!(t.shadow_pass && t.cell_culling && t.face_budget);
         assert!(t.distance_cull && t.dither && t.gpu_timer);
         assert!(!t.baked_lighting);
     }

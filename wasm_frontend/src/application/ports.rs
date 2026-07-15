@@ -309,7 +309,8 @@ pub struct FrameParams {
 
 impl FrameParams {
     pub fn active_dynamic_lights(&self) -> &[DynamicLight] {
-        &self.dynamic_lights[..self.dynamic_light_count as usize]
+        let count = (self.dynamic_light_count as usize).min(self.dynamic_lights.len());
+        &self.dynamic_lights[..count]
     }
 
     pub fn active_scene_lights(&self) -> &[LightSource] {
@@ -483,6 +484,14 @@ pub trait ChunkSourcePort {
     /// Takes every finished background load. Results may arrive in any
     /// order and may be stale; the caller validates against its own state.
     fn poll_completed(&mut self) -> Vec<CompletedChunk> {
+        Vec::new()
+    }
+
+    /// Takes requests which the asynchronous transport definitively could
+    /// not complete. The engine validates the full request identity before
+    /// clearing pending state, then issues a fresh request on the same tick.
+    /// Synchronous sources and infallible test doubles need not override it.
+    fn poll_failed_requests(&mut self) -> Vec<ChunkRequest> {
         Vec::new()
     }
 }

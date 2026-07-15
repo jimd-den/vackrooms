@@ -7,6 +7,7 @@
 pub mod atlas;
 pub mod collision;
 pub mod engine;
+pub mod generation_worker_policy;
 pub mod player;
 pub mod ports;
 pub mod prepare_frame_lighting;

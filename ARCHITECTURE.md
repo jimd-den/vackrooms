@@ -33,6 +33,7 @@ backend-sized class:
 | `drivers/splat_webgl/{mod,resources,draw}.rs` | splat composition, instance/shadow resources, staged frame pipeline |
 | `drivers/webgl/` | `draw_voxel_scene`, `upload_voxel_atlas`, and raymarch composition |
 | `adapters/cpu_splatter/` | atlas decode, camera, cone light, ray queries, shading, raster traversal, tests |
+| `adapters/cpu_splatter/settings/` | typed CPU quality presets, one validated scalar model, and explicit flashlight/fixture visibility policies |
 | `drivers/gl/` | context/program setup, matrices, light selection, shadow targets, timers, visibility |
 | `drivers/shaders/render_world_surfaces/` | reconstruct surfaces → sample optional diffuse field → shade visible surface |
 | `drivers/shaders/trace_voxel_scene/` | decode atlas → intersect voxel scene → shade nearest hit |
@@ -42,6 +43,22 @@ Optional shortcuts are plain data in `application::render_settings::RenderToggle
 Each driver snapshots that switchboard once per frame; inner algorithms never
 read browser globals. The same switches are available live in Settings →
 Optimize and as shareable `?rt_<name>=0|1` query parameters.
+
+The CPU composition root separately snapshots `CpuRenderSettings`. Its named
+presets change only bounded workload/quality scalars (resolution, distant LOD,
+splat radius, virtual depth, sparse-MIP threshold, range, and fixture-shadow
+policy). They do not mutate `RenderToggles`. The CPU canvas resolution factor
+is applied before both the canvas and software framebuffer are resized, so a
+reduced render always covers the full CSS viewport instead of filling only a
+corner of a larger backing store.
+
+CPU fixture visibility is an explicit three-level policy. `off` is the fast
+unoccluded diagnostic, `hero` amortizes one real fixture-center segment, and
+`full` is the radiometric reference: every point endpoint and every one of a
+rectangle's four Gauss endpoints traces a finite SVO segment. CPU MIPs average
+linear albedo and colored bake values; ordinary LOD never collapses a subtree
+containing emission, while the hard work-cap fallback retains aggregate
+emissive coverage/radiance instead of deleting the panel.
 
 The `raymarch` backend is a correctness-first SVO ray caster with two explicit
 stepping policies over the same stateless point lookup and hit record:
@@ -367,11 +384,15 @@ contracts are non-negotiable and each is asserted natively:
 ## Chunk streaming
 
 Chunk generation runs on a pool of Web Workers (`WorkerChunkSource`,
-`static/worker.js` — each a second instance of the same wasm module), sized
-to `hardware_concurrency - 1` (clamped 1–4), so crossing a streaming
-boundary never stalls the frame loop; `?workers=0` forces the older
-synchronous in-thread `LocalChunkSource`, which is also the automatic
-fallback if the worker pool fails to spin up. Either way, the resident set
+`static/worker.js` — each a second instance of the same wasm module). The
+pure `GenerationWorkerPreference` policy accepts `?workers=auto|0|1..4`:
+`auto` reserves one reported hardware thread and caps the pool at four,
+explicit counts are clamped to reported hardware and the four-worker product
+cap, while `0` selects the synchronous in-thread `LocalChunkSource`. That
+local source is also the automatic fallback if worker startup fails. These workers parallelize chunk
+generation, lighting, meshes, SVO serialization, and collision extraction;
+they do **not** parallelize any renderer, including the CPU splatter. Either
+way, the resident set
 itself is **time-sliced** and **progressive**: `StreamingPolicy` produces the
 desired resident set (nearest-first) each frame, and the `Engine` spends a
 per-tick cost budget on it in two phases:

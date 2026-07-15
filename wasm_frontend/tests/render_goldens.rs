@@ -8,6 +8,8 @@ use vackrooms::domain::entities::voxel_grid::{
     EMISSIVE_MATERIALS, VOXEL_AIR, VOXEL_CEILING, VOXEL_LIGHT,
 };
 use wasm_frontend::adapters::cpu_splatter::settings::{CpuRenderSettings, CpuShadowMode};
+use wasm_frontend::adapters::cpu_splatter::atlas::decode_node;
+use wasm_frontend::adapters::cpu_splatter::surface_geometry::SurfaceFace;
 use wasm_frontend::application::ports::Environment;
 use wasm_frontend::application::render_settings::RenderToggles;
 use wasm_frontend::core::domain::room::{CameraSpec, RoomFixture, RoomScene};
@@ -57,6 +59,8 @@ fn reference_settings(fixture: &impl RoomFixture) -> ReferenceRenderSettings {
             empty_space_skip: false,
             mip_lod: false,
             flashlight_occlusion: false,
+            deferred_shading: false,
+            ambient_occlusion: false,
             shadow_pass: false,
             cell_culling: false,
             face_budget: false,
@@ -66,12 +70,37 @@ fn reference_settings(fixture: &impl RoomFixture) -> ReferenceRenderSettings {
             gpu_timer: false,
         },
         cpu: CpuRenderSettings {
-            max_splat_half_px: 4.0,
-            fog_density: 0.0,
+            max_splat_radius_px: 4.0,
             max_draw_distance: 16.0,
             shadows: CpuShadowMode::Off,
             ..CpuRenderSettings::default()
         },
+    }
+}
+
+#[test]
+fn indoor_misses_use_the_same_fog_radiance_in_both_cpu_references() {
+    use wasm_frontend::application::rendering::encode_display_color;
+    use wasm_frontend::core::ports::reference_renderer::RenderSceneSnapshot;
+
+    let fixture = SingleCeilingFixture;
+    let mut settings = reference_settings(&fixture);
+    settings.width = 2;
+    settings.height = 2;
+    settings.environment.fog_color = [0.08, 0.03, 0.01];
+    let empty = RenderSceneSnapshot {
+        atlas: Vec::new(),
+        chunks: Vec::new(),
+        scene_lights: Vec::new(),
+    };
+    let expected = encode_display_color(settings.environment.fog_color)
+        .map(|channel| (channel * 255.0).round().clamp(0.0, 255.0) as u8);
+
+    for image in [
+        render_reference(&empty, &settings, CpuReferenceRenderer::new()),
+        render_reference(&empty, &settings, RaymarchReferenceRenderer::new()),
+    ] {
+        assert!(image.rgba.chunks_exact(4).all(|pixel| pixel[..3] == expected));
     }
 }
 
@@ -93,6 +122,14 @@ fn reference_renderers_produce_deterministic_lit_room_images() {
     assert_eq!(scene.chunks[0].world_size, 4.0);
     assert_eq!(scene.chunks[0].voxel_size, 0.5);
     assert_eq!(scene.chunks[0].svo_depth, 3);
+    let panel_leaf = (0..scene.atlas.len() / 4)
+        .filter_map(|index| decode_node(&scene.atlas, index))
+        .find(|node| node.is_leaf && node.voxel_type == VOXEL_LIGHT as u32)
+        .expect("serialized room keeps its panel leaf");
+    assert!(
+        panel_leaf.exposure.contains(SurfaceFace::NegativeY),
+        "serialized fluorescent panel must expose its authored underside"
+    );
 
     let cpu = render_reference(&scene, &settings, CpuReferenceRenderer::new());
     let cpu_repeat = render_reference(&scene, &settings, CpuReferenceRenderer::new());
@@ -154,6 +191,7 @@ fn assert_lit_room(renderer: &str, image: &RenderedImage) {
 
     let mut visible_pixels = 0usize;
     let mut fixture_pixels = 0usize;
+    let mut brightest = (0u8, 0usize, [0u8; 3]);
     for (index, pixel) in image.rgba.chunks_exact(4).enumerate() {
         assert_eq!(pixel[3], 255, "{renderer} produced non-opaque output");
         if pixel[..3] != [0, 0, 0] {
@@ -161,6 +199,11 @@ fn assert_lit_room(renderer: &str, image: &RenderedImage) {
         }
         let x = index % image.width as usize;
         let y = index / image.width as usize;
+        let luminance = ((u16::from(pixel[0]) + u16::from(pixel[1]) + u16::from(pixel[2])) / 3)
+            as u8;
+        if luminance > brightest.0 {
+            brightest = (luminance, index, [pixel[0], pixel[1], pixel[2]]);
+        }
         let in_panel_window = x >= image.width as usize / 3
             && x <= image.width as usize * 2 / 3
             && y < image.height as usize / 3;
@@ -176,6 +219,6 @@ fn assert_lit_room(renderer: &str, image: &RenderedImage) {
     );
     assert!(
         fixture_pixels > 0,
-        "{renderer} failed to show the exposed fluorescent panel"
+        "{renderer} failed to show the exposed fluorescent panel; brightest={brightest:?}"
     );
 }

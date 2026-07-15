@@ -17,8 +17,23 @@ pub struct VoxelGrid {
     pub traversal_gates: Vec<crate::domain::entities::anomaly::TraversalGate>,
     /// Real floor openings that relocate the player when entered.
     pub pit_hazards: Vec<crate::domain::entities::anomaly::PitHazard>,
+    /// Six neighbor-occupancy bits prepared by the geometry source. A set bit
+    /// means that face touches solid matter; clearing it means the face is
+    /// exposed to air. Streaming generation computes this from its halo, so
+    /// chunk-boundary answers do not depend on which neighbor is resident.
     face_occlusion: Vec<u8>,
 }
+
+/// Neighbor-occupancy encoding shared by meshing, SVO serialization, and CPU
+/// surface reconstruction. The order intentionally matches the historical
+/// `FaceDirection::occlusion_bit` contract.
+pub const FACE_OCCLUDED_POSITIVE_X: u8 = 1;
+pub const FACE_OCCLUDED_NEGATIVE_X: u8 = 2;
+pub const FACE_OCCLUDED_POSITIVE_Y: u8 = 4;
+pub const FACE_OCCLUDED_NEGATIVE_Y: u8 = 8;
+pub const FACE_OCCLUDED_POSITIVE_Z: u8 = 16;
+pub const FACE_OCCLUDED_NEGATIVE_Z: u8 = 32;
+pub const FACE_OCCLUSION_MASK: u8 = 0x3f;
 
 pub const VOXEL_AIR: u8 = 0;
 pub const VOXEL_WALL: u8 = 1;
@@ -102,6 +117,17 @@ pub const SOLID_MATERIALS: [u8; 5] = [
 /// Materials that emit light in the baked flood fill and render emissive.
 pub const EMISSIVE_MATERIALS: [u8; 3] = [VOXEL_LIGHT, VOXEL_RED_LIGHT, VOXEL_GLIMMER];
 
+/// Authored emitted-radiance scale shared by fixture extraction and every
+/// renderer's visible-emission path.
+pub const fn material_emission_strength(material: u8) -> Option<f32> {
+    match material {
+        VOXEL_LIGHT => Some(10.0),
+        VOXEL_RED_LIGHT => Some(8.0),
+        VOXEL_GLIMMER => Some(0.9),
+        _ => None,
+    }
+}
+
 impl VoxelGrid {
     pub fn new(width: usize, height: usize, depth: usize) -> Self {
         let size = width * height * depth;
@@ -181,9 +207,10 @@ impl VoxelGrid {
         }
     }
 
+    /// Stores the six-bit neighbor-occupancy mask for one voxel.
     pub fn set_face_occlusion(&mut self, x: usize, y: usize, z: usize, mask: u8) {
         if let Some(idx) = self.index(x, y, z) {
-            self.face_occlusion[idx] = mask;
+            self.face_occlusion[idx] = mask & FACE_OCCLUSION_MASK;
         }
     }
 

@@ -5,8 +5,9 @@ use super::atlas::build_mips;
 use super::camera::Camera;
 use super::raycast::trace_svo;
 use super::settings::{CpuRenderSettings, CpuShadowMode};
+use super::shading::FrameLighting;
 use super::*;
-use crate::application::ports::{ChunkDraw, FrameParams, RendererPort};
+use crate::application::ports::{ChunkDraw, FrameParams, LightKind, LightSource, RendererPort};
 use vackrooms::adapters::octree_gpu_serializer::OctreeGpuSerializer;
 use vackrooms::domain::entities::sparse_voxel_octree::SparseVoxelOctree;
 
@@ -51,12 +52,103 @@ fn voxel_in_front_of_camera_covers_center_pixel() {
     r.draw(&frame_at([1.5, 1.5, -2.0], std::f32::consts::PI), &chunks);
 
     let px = center_pixel(&r);
-    assert!(px[0] > 60, "red channel lit, got {:?}", px);
+    assert!(px[0] > 0, "ambient-visible red channel, got {:?}", px);
     assert!(px[0] > px[2], "red voxel must stay reddish, got {:?}", px);
 
-    // A corner pixel must remain background black.
+    // A corner pixel remains the indoor fog background rather than inheriting
+    // the voxel's shaded color.
     let fb = r.framebuffer();
-    assert_eq!(&fb[0..3], &[0, 0, 0]);
+    assert_ne!(&fb[0..3], &px[0..3]);
+}
+
+#[test]
+fn visible_voxel_renders_at_tiny_odd_and_non_tile_aligned_sizes() {
+    let (atlas, root) = one_voxel_atlas(0xFF8040, 15);
+    let chunks = [ChunkDraw {
+        origin: [0.0, 0.0, 0.0],
+        root_index: root as i32,
+        world_size: 4.0,
+        voxel_size: 1.0,
+        svo_depth: 2,
+    }];
+    let frame = frame_at([1.5, 1.5, -2.0], std::f32::consts::PI);
+
+    for (width, height) in [(1, 1), (3, 5), (7, 9), (15, 17), (31, 19), (127, 73)] {
+        let mut renderer = SoftwareRasterizer::new(width, height);
+        renderer.upload_atlas(&atlas);
+        renderer.draw(&frame, &chunks);
+
+        assert_eq!(renderer.width(), width, "width at {width}x{height}");
+        assert_eq!(renderer.height(), height, "height at {width}x{height}");
+        assert_eq!(renderer.framebuffer().len(), width * height * 4);
+        assert!(
+            center_pixel(&renderer)[0] > 0,
+            "visible voxel disappeared at {width}x{height}"
+        );
+        assert!(
+            renderer
+                .framebuffer()
+                .chunks_exact(4)
+                .all(|pixel| pixel[3] == 255),
+            "alpha was not initialized at {width}x{height}"
+        );
+        assert!(renderer.telemetry().pixel_write_limit >= width * height);
+    }
+}
+
+#[test]
+fn resize_rebuilds_projection_depth_hz_and_frame_budget_together() {
+    let (atlas, root) = one_voxel_atlas(0xFF8040, 15);
+    let chunks = [ChunkDraw {
+        origin: [0.0, 0.0, 0.0],
+        root_index: root as i32,
+        world_size: 4.0,
+        voxel_size: 1.0,
+        svo_depth: 2,
+    }];
+    let frame = frame_at([1.5, 1.5, -2.0], std::f32::consts::PI);
+    let mut renderer = SoftwareRasterizer::new(64, 64);
+    renderer.upload_atlas(&atlas);
+
+    let mut previous_write_limit = 0;
+    for (width, height) in [(64, 64), (1, 3), (23, 11), (191, 107)] {
+        renderer.resize(width, height);
+        renderer.draw(&frame, &chunks);
+
+        assert_eq!(renderer.framebuffer().len(), width * height * 4);
+        assert!(
+            center_pixel(&renderer)[0] > 0,
+            "after resize to {width}x{height}"
+        );
+        let telemetry = renderer.telemetry();
+        assert!(telemetry.pixel_write_limit >= width * height);
+        if width * height > 64 * 64 {
+            assert!(telemetry.pixel_write_limit > previous_write_limit);
+        }
+        previous_write_limit = telemetry.pixel_write_limit;
+    }
+}
+
+#[test]
+fn hierarchical_z_is_image_equivalent_at_non_multiple_of_eight_size() {
+    let (atlas, root) = one_voxel_atlas(0xFF8040, 15);
+    let chunks = [ChunkDraw {
+        origin: [0.0, 0.0, 0.0],
+        root_index: root as i32,
+        world_size: 4.0,
+        voxel_size: 1.0,
+        svo_depth: 2,
+    }];
+    let frame = frame_at([1.5, 1.5, -2.0], std::f32::consts::PI);
+    let render = |hierarchical_z| {
+        let mut renderer = SoftwareRasterizer::new(53, 37);
+        renderer.settings.toggles.hierarchical_z = hierarchical_z;
+        renderer.upload_atlas(&atlas);
+        renderer.draw(&frame, &chunks);
+        renderer.framebuffer().to_vec()
+    };
+
+    assert_eq!(render(false), render(true));
 }
 
 #[test]
@@ -73,11 +165,13 @@ fn camera_facing_away_sees_nothing() {
     }];
     // yaw = 0 looks toward -z; the voxel is at +z relative to the camera.
     r.draw(&frame_at([1.5, 1.5, -2.0], 0.0), &chunks);
+    let background = &r.framebuffer()[0..3];
     assert!(
         r.framebuffer()
             .chunks_exact(4)
-            .all(|p| p[0] == 0 && p[1] == 0 && p[2] == 0)
+            .all(|pixel| &pixel[0..3] == background)
     );
+    assert_eq!(r.telemetry().visited_nodes, 0);
 }
 
 #[test]
@@ -113,7 +207,7 @@ fn nearer_voxel_wins_depth_test() {
 
     let px = center_pixel(&r);
     assert!(
-        px[0] > 60 && px[2] < px[0] / 2,
+        px[0] > 0 && px[2] < px[0] / 2,
         "near red voxel must win: {:?}",
         px
     );
@@ -153,10 +247,46 @@ fn depth_test_holds_even_without_front_to_back_sorting() {
 
     let px = center_pixel(&r);
     assert!(
-        px[0] > 60 && px[2] < px[0] / 2,
+        px[0] > 0 && px[2] < px[0] / 2,
         "depth test alone must keep the near voxel in front: {:?}",
         px
     );
+}
+
+#[test]
+fn deferred_shading_rejection_is_byte_identical_to_shade_then_depth_test() {
+    let (near, near_root) = one_voxel_atlas(0xCC3300, 0);
+    let (far, far_root) = one_voxel_atlas(0xFFFFFF, 15);
+    let near_nodes = near.len() as u32 / 4;
+    let mut atlas = near;
+    atlas.extend_from_slice(&far);
+    let chunks = [
+        ChunkDraw {
+            origin: [0.0, 0.0, 0.0],
+            root_index: near_root as i32,
+            world_size: 4.0,
+            voxel_size: 1.0,
+            svo_depth: 2,
+        },
+        ChunkDraw {
+            origin: [0.0, 0.0, 6.0],
+            root_index: (near_nodes + far_root) as i32,
+            world_size: 4.0,
+            voxel_size: 1.0,
+            svo_depth: 2,
+        },
+    ];
+    let frame = frame_at([1.5, 1.5, -2.0], std::f32::consts::PI);
+
+    let render = |deferred_shading| {
+        let mut renderer = SoftwareRasterizer::new(64, 64);
+        renderer.settings.toggles.deferred_shading = deferred_shading;
+        renderer.upload_atlas(&atlas);
+        renderer.draw(&frame, &chunks);
+        renderer.framebuffer().to_vec()
+    };
+
+    assert_eq!(render(false), render(true));
 }
 
 #[test]
@@ -192,9 +322,53 @@ fn mip_aggregation_averages_child_colors() {
 
     let root = &mips[svo.root];
     assert!((root.occupancy - 2.0 / 8.0).abs() < 1e-6);
-    assert!((root.color[0] - 127.5).abs() < 1.0);
-    assert!((root.color[2] - 127.5).abs() < 1.0);
-    assert_eq!(root.light, 10.0);
+    assert!((root.linear_albedo[0] - 0.5).abs() < 1.0e-6);
+    assert!((root.linear_albedo[2] - 0.5).abs() < 1.0e-6);
+    assert_eq!(root.baked_rgb, [7.0; 3]);
+}
+
+#[test]
+fn mip_bake_preserves_color_and_averages_instead_of_smearing_a_peak() {
+    let mut svo = SparseVoxelOctree::new(1, 2.0);
+    for z in 0..2 {
+        for y in 0..2 {
+            for x in 0..2 {
+                let baked = if [x, y, z] == [0, 0, 0] {
+                    [15, 2, 1]
+                } else {
+                    [0, 0, 0]
+                };
+                svo.set(x, y, z, 1, 0x808080, baked, 0);
+            }
+        }
+    }
+    let gpu = OctreeGpuSerializer::serialize_to_gpu_data(&svo);
+    let root = build_mips(&gpu.texel_data)[svo.root];
+
+    assert_eq!(root.baked_rgb, [15.0 / 8.0, 2.0 / 8.0, 1.0 / 8.0]);
+    assert!(root.baked_rgb[0] > root.baked_rgb[1]);
+    assert!(root.baked_rgb[1] > root.baked_rgb[2]);
+    assert!(
+        root.baked_rgb[0] < 15.0,
+        "one receiver must not light the whole MIP"
+    );
+}
+
+#[test]
+fn mip_cache_preserves_emissive_coverage_and_radiance() {
+    use vackrooms::domain::entities::voxel_grid::VOXEL_LIGHT;
+
+    let mut svo = SparseVoxelOctree::new(1, 2.0);
+    svo.set(0, 1, 0, VOXEL_LIGHT, 0xFFF8D6, [15, 14, 11], 0);
+    let gpu = OctreeGpuSerializer::serialize_to_gpu_data(&svo);
+    let root = build_mips(&gpu.texel_data)[svo.root];
+
+    assert_eq!(root.emissive_coverage, 1.0 / 8.0);
+    assert!(
+        root.emitted_radiance_density
+            .into_iter()
+            .all(|value| value > 0.0)
+    );
 }
 
 #[test]
@@ -214,12 +388,12 @@ fn distant_geometry_lods_to_single_splats() {
     // proving the LOD path (not the leaf path) handled it.
     r.settings.max_draw_distance = 1000.0;
     r.draw(&frame_at([1.5, 1.5, -400.0], std::f32::consts::PI), &chunks);
-    let lit = r.framebuffer().chunks_exact(4).filter(|p| p[0] > 0).count();
-    assert_eq!(lit, 0);
+    assert_eq!(r.telemetry().splat_count, 0);
+    assert_eq!(r.telemetry().pixel_writes, 0);
 }
 
 #[test]
-fn test_face_shading_discontinuity() {
+fn exact_entry_face_changes_the_lambert_response_at_an_axis_boundary() {
     let mut r = SoftwareRasterizer::new(16, 16);
     let center = [0.0, 0.0, 0.0];
 
@@ -244,9 +418,22 @@ fn test_face_shading_discontinuity() {
     let cam_b = Camera::new(&frame_b, 16, 16, &CpuRenderSettings::default());
 
     r.clear();
-    r.shade_and_splat(
+    let fixture = [LightSource {
+        id: 1,
+        position: [0.0, 5.0, 0.0],
+        half_size: [2.0, 2.0],
+        color: [1.0, 0.9, 0.7],
+        radius: 20.0,
+        intensity: 10.0,
+        kind: LightKind::CeilingPanel,
+        flicker_mode: 0,
+        enabled: true,
+    }];
+
+    r.shade_and_splat_with_frame_lighting(
         &cam_a,
         &[],
+        FrameLighting::unshadowed(&fixture),
         center,
         8.0,                   // world_size
         8.0,                   // px — the center pixel both cases read
@@ -257,14 +444,14 @@ fn test_face_shading_discontinuity() {
         15.0,                  // light level
         false,                 // is_emissive
         1,                     // crowded siblings
-        1.0,                   // shadow factor
     );
     let color_a = center_pixel(&r);
 
     r.clear();
-    r.shade_and_splat(
+    r.shade_and_splat_with_frame_lighting(
         &cam_b,
         &[],
+        FrameLighting::unshadowed(&fixture),
         center,
         8.0,
         8.0,
@@ -275,24 +462,20 @@ fn test_face_shading_discontinuity() {
         15.0,
         false,
         1,
-        1.0,
     );
     let color_b = center_pixel(&r);
 
-    // A hard argmax face pick would jump 20% in brightness across this
-    // threshold; the blended normal must keep the transition smooth.
-    let diff = (color_a[0] as i32 - color_b[0] as i32).abs();
+    // The Y entry face sees the overhead panel. The neighboring X entry face
+    // does not: this discontinuity is the exact AABB/Lambert result, not a
+    // soft diagonal normal invented to hide a face boundary.
     assert!(
-        diff <= 2,
-        "Discontinuity found: diff was {} (color_a = {:?}, color_b = {:?})",
-        diff,
-        color_a,
-        color_b
+        color_a[0] > color_b[0] + 10,
+        "expected exact face response: y-face={color_a:?}, x-face={color_b:?}"
     );
 }
 
 #[test]
-fn test_adjacent_voxels_shading_variation() {
+fn equal_material_floor_splats_share_the_same_uniform_ambient() {
     let mut r = SoftwareRasterizer::new(16, 16);
 
     // Camera positioned above the floor plane (Y = 5.0)
@@ -319,7 +502,6 @@ fn test_adjacent_voxels_shading_variation() {
         15.0,
         false,
         1,
-        1.0,
     );
     let color_1 = center_pixel(&r);
 
@@ -337,16 +519,12 @@ fn test_adjacent_voxels_shading_variation() {
         15.0,
         false,
         1,
-        1.0,
     );
     let color_2 = center_pixel(&r);
 
-    // Diagnostic: center-based lighting makes adjacent tiles differ
-    // slightly — the known flat-surface grid pattern of splatting.
-    assert_ne!(
-        color_1[0], color_2[0],
-        "Expected adjacent voxels to have slightly different shading due to center-based lighting calculations"
-    );
+    // Ambient irradiance is spatially uniform. Distance no longer invents a
+    // per-tile brightness grid; analytic finite lights own spatial falloff.
+    assert_eq!(color_1, color_2);
 }
 
 #[test]
@@ -376,7 +554,6 @@ fn test_splat_flat_shading_limitation() {
         15.0,
         false,
         1,
-        1.0,
     );
 
     let idx_left = (8 * r.width() + 5) * 4;
@@ -394,6 +571,8 @@ fn test_splat_flat_shading_limitation() {
 
 #[test]
 fn camera_inside_large_solid_leaf_terminates_under_budget() {
+    const VIRTUAL_DEPTH_CAP: u8 = 3;
+
     let mut atlas = vec![0u32; 4];
     atlas[0] = 1; // Leaf
     atlas[1] = 1; // Solid voxel type
@@ -401,6 +580,10 @@ fn camera_inside_large_solid_leaf_terminates_under_budget() {
     atlas[3] = 15; // quantized diffuse fill
 
     let mut r = SoftwareRasterizer::new(64, 64);
+    // A camera-plane box must subdivide for exact clipped coverage. Use the
+    // minimum supported cap so even a completely visible eight-way walk has
+    // a small, deterministic upper bound independent of culling details.
+    r.settings.max_virtual_depth = VIRTUAL_DEPTH_CAP;
     r.upload_atlas(&atlas);
 
     let chunks = [ChunkDraw {
@@ -415,18 +598,30 @@ fn camera_inside_large_solid_leaf_terminates_under_budget() {
     r.draw(&frame_at([8.0, 8.0, 8.0], 0.0), &chunks);
 
     let stats = r.telemetry();
-    // Must NOT recurse into virtual subdivision while inside the node.
-    assert!(!stats.budget_exhausted);
-    assert!(
-        stats.visited_nodes < 50,
-        "Visited nodes was {}, expected very low",
-        stats.visited_nodes
+    let complete_tree_visit_bound = (8usize.pow(u32::from(VIRTUAL_DEPTH_CAP) + 1) - 1) / (8 - 1);
+
+    assert_eq!(
+        stats.max_virtual_depth,
+        usize::from(VIRTUAL_DEPTH_CAP),
+        "camera-plane coverage should refine to the explicit virtual-depth cap"
     );
+    assert!(
+        complete_tree_visit_bound < stats.node_soft_limit,
+        "test fixture's complete tree must fit below the soft work budget"
+    );
+    assert!(
+        stats.visited_nodes <= complete_tree_visit_bound,
+        "visited {} nodes, exceeding the depth-{VIRTUAL_DEPTH_CAP} complete-tree bound of {complete_tree_visit_bound}",
+        stats.visited_nodes,
+    );
+    assert!(!stats.budget_exhausted);
 }
 
 #[test]
 fn test_cpu_render_settings_default() {
     let settings = CpuRenderSettings::default();
+    assert_eq!(settings, CpuQualityPreset::Balanced.settings());
+    assert_eq!(settings.max_splat_radius_px, 8.0);
     assert_eq!(settings.max_virtual_depth, 5);
     assert_eq!(settings.shadows, CpuShadowMode::Off);
     assert!(settings.toggles.hierarchical_z, "optimizations default on");

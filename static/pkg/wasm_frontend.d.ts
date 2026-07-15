@@ -52,11 +52,27 @@ export function set_cpu_lod_cutoff(cutoff: number): void;
 
 export function set_cpu_max_draw_distance(dist: number): void;
 
+/**
+ * Legacy name retained for old pages. The setting is a projected radius,
+ * not a full diameter; new UI code calls `set_cpu_max_splat_radius`.
+ */
 export function set_cpu_max_splat_half(half: number): void;
+
+export function set_cpu_max_splat_radius(radius: number): void;
+
+export function set_cpu_mip_occupancy(occupancy: number): void;
+
+/**
+ * Applies one of the typed quality profiles. Individual optimization
+ * switches are intentionally untouched.
+ */
+export function set_cpu_quality_preset(preset_id: number): void;
 
 export function set_cpu_scale(scale: number): void;
 
 export function set_cpu_shadows(mode: number): void;
+
+export function set_cpu_virtual_depth(depth: number): void;
 
 export function set_doom_controls(enabled: boolean): void;
 
@@ -81,7 +97,8 @@ export function set_render_scale(scale: number): void;
 /**
  * Flips one renderer optimization switch by name (`"hiz"`, `"f2b"`,
  * `"skip"`, `"mips"`, `"beam_occlusion"`, `"shadows"`, `"cells"`,
- * `"cull"`, `"budget"`, `"dither"`, `"bake"`, `"timer"`). Unknown names
+ * `"deferred"`, `"ao"`, `"cull"`, `"budget"`, `"dither"`, `"bake"`,
+ * `"timer"`). Unknown names
  * are ignored.
  */
 export function set_render_toggle(name: string, enabled: boolean): void;
@@ -111,7 +128,6 @@ export interface InitOutput {
     readonly worker_generate: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number];
     readonly worker_init: (a: number, b: number, c: number) => void;
     readonly start: () => void;
-    readonly set_fov: (a: number) => void;
     readonly get_blueprint_svg: (a: number, b: number, c: number, d: number, e: number) => [number, number];
     readonly get_chunk_blueprint_svg: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number];
     readonly get_chunk_voxel_blueprint_svg: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number];
@@ -124,12 +140,17 @@ export interface InitOutput {
     readonly set_invert_y: (a: number) => void;
     readonly set_render_toggle: (a: number, b: number, c: number) => void;
     readonly set_cpu_lod_cutoff: (a: number) => void;
-    readonly set_cpu_max_draw_distance: (a: number) => void;
     readonly set_cpu_max_splat_half: (a: number) => void;
+    readonly set_cpu_max_splat_radius: (a: number) => void;
+    readonly set_cpu_quality_preset: (a: number) => void;
+    readonly set_cpu_mip_occupancy: (a: number) => void;
     readonly set_cpu_scale: (a: number) => void;
     readonly set_mouse_sensitivity: (a: number) => void;
+    readonly set_cpu_virtual_depth: (a: number) => void;
+    readonly set_cpu_max_draw_distance: (a: number) => void;
     readonly set_render_scale: (a: number) => void;
     readonly set_cpu_shadows: (a: number) => void;
+    readonly set_fov: (a: number) => void;
     readonly wasm_bindgen__convert__closures_____invoke__h4f7fded1a540d94c: (a: number, b: number, c: number) => void;
     readonly wasm_bindgen__convert__closures_____invoke__h23ea99ea78eeb43b: (a: number, b: number, c: any) => void;
     readonly wasm_bindgen__convert__closures_____invoke__h23ea99ea78eeb43b_2: (a: number, b: number, c: any) => void;

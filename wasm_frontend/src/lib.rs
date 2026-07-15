@@ -92,70 +92,85 @@ pub fn set_render_scale(scale: f32) {
     RENDER_SCALE_BITS.store(s.to_bits(), Ordering::Relaxed);
 }
 
-/// CPU render settings: scale override.
+/// CPU render settings are atomics only at the browser boundary. Every
+/// public setter rebuilds and validates a typed `CpuRenderSettings` snapshot;
+/// the splatter itself never reads these globals.
 #[cfg(target_arch = "wasm32")]
 pub static CPU_SCALE_BITS: AtomicU32 = AtomicU32::new(0x3F80_0000); // 1.0f32
-/// CPU render settings: lod cutoff.
 #[cfg(target_arch = "wasm32")]
 pub static CPU_LOD_CUTOFF_BITS: AtomicU32 = AtomicU32::new(0x3F80_0000); // 1.0f32
-/// CPU render settings: max splat half px.
 #[cfg(target_arch = "wasm32")]
-pub static CPU_MAX_SPLAT_HALF_BITS: AtomicU32 = AtomicU32::new(0x4140_0000); // 12.0f32
-/// CPU render settings: max draw distance.
+pub static CPU_MAX_SPLAT_RADIUS_BITS: AtomicU32 = AtomicU32::new(0x4100_0000); // 8.0f32
+#[cfg(target_arch = "wasm32")]
+pub static CPU_MAX_VIRTUAL_DEPTH: AtomicU32 = AtomicU32::new(5);
+#[cfg(target_arch = "wasm32")]
+pub static CPU_MIN_MIP_OCCUPANCY_BITS: AtomicU32 = AtomicU32::new(0x3E80_0000); // 0.25f32
 #[cfg(target_arch = "wasm32")]
 pub static CPU_MAX_DRAW_DISTANCE_BITS: AtomicU32 = AtomicU32::new(0x42C0_0000); // 96.0f32
-/// CPU render settings: shadow mode (0 = Off, 1 = Hero).
 #[cfg(target_arch = "wasm32")]
 pub static CPU_SHADOWS: AtomicU32 = AtomicU32::new(0);
+
+/// Applies one of the typed quality profiles. Individual optimization
+/// switches are intentionally untouched.
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen::prelude::wasm_bindgen]
+pub fn set_cpu_quality_preset(preset_id: u32) {
+    use crate::adapters::cpu_splatter::CpuQualityPreset;
+    store_cpu_settings(CpuQualityPreset::from_id(preset_id).settings());
+}
 
 #[cfg(target_arch = "wasm32")]
 #[wasm_bindgen::prelude::wasm_bindgen]
 pub fn set_cpu_scale(scale: f32) {
-    let s = if scale.is_finite() {
-        scale.clamp(0.25, 1.0)
-    } else {
-        1.0
-    };
-    CPU_SCALE_BITS.store(s.to_bits(), Ordering::Relaxed);
+    update_cpu_settings(|settings| settings.internal_scale = scale);
 }
 
 #[cfg(target_arch = "wasm32")]
 #[wasm_bindgen::prelude::wasm_bindgen]
 pub fn set_cpu_lod_cutoff(cutoff: f32) {
-    let c = if cutoff.is_finite() {
-        cutoff.clamp(0.25, 2.0)
-    } else {
-        1.0
-    };
-    CPU_LOD_CUTOFF_BITS.store(c.to_bits(), Ordering::Relaxed);
+    update_cpu_settings(|settings| settings.lod_cutoff_px = cutoff);
+}
+
+/// Legacy name retained for old pages. The setting is a projected radius,
+/// not a full diameter; new UI code calls `set_cpu_max_splat_radius`.
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen::prelude::wasm_bindgen]
+pub fn set_cpu_max_splat_half(half: f32) {
+    set_cpu_max_splat_radius(half);
 }
 
 #[cfg(target_arch = "wasm32")]
 #[wasm_bindgen::prelude::wasm_bindgen]
-pub fn set_cpu_max_splat_half(half: f32) {
-    let h = if half.is_finite() {
-        half.clamp(2.0, 16.0)
-    } else {
-        12.0
-    };
-    CPU_MAX_SPLAT_HALF_BITS.store(h.to_bits(), Ordering::Relaxed);
+pub fn set_cpu_max_splat_radius(radius: f32) {
+    update_cpu_settings(|settings| settings.max_splat_radius_px = radius);
+}
+
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen::prelude::wasm_bindgen]
+pub fn set_cpu_virtual_depth(depth: u32) {
+    update_cpu_settings(|settings| {
+        settings.max_virtual_depth = u8::try_from(depth).unwrap_or(u8::MAX);
+    });
+}
+
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen::prelude::wasm_bindgen]
+pub fn set_cpu_mip_occupancy(occupancy: f32) {
+    update_cpu_settings(|settings| settings.min_mip_occupancy = occupancy);
 }
 
 #[cfg(target_arch = "wasm32")]
 #[wasm_bindgen::prelude::wasm_bindgen]
 pub fn set_cpu_max_draw_distance(dist: f32) {
-    let d = if dist.is_finite() {
-        dist.clamp(16.0, 256.0)
-    } else {
-        96.0
-    };
-    CPU_MAX_DRAW_DISTANCE_BITS.store(d.to_bits(), Ordering::Relaxed);
+    update_cpu_settings(|settings| settings.max_draw_distance = dist);
 }
 
 #[cfg(target_arch = "wasm32")]
 #[wasm_bindgen::prelude::wasm_bindgen]
 pub fn set_cpu_shadows(mode: u32) {
-    CPU_SHADOWS.store(mode, Ordering::Relaxed);
+    update_cpu_settings(|settings| {
+        settings.shadows = crate::adapters::cpu_splatter::CpuShadowMode::from_id(mode);
+    });
 }
 
 /// Renderer optimization toggles as a bitfield — see
@@ -166,7 +181,8 @@ pub static RENDER_TOGGLE_BITS: AtomicU32 = AtomicU32::new(u32::MAX);
 
 /// Flips one renderer optimization switch by name (`"hiz"`, `"f2b"`,
 /// `"skip"`, `"mips"`, `"beam_occlusion"`, `"shadows"`, `"cells"`,
-/// `"cull"`, `"budget"`, `"dither"`, `"bake"`, `"timer"`). Unknown names
+/// `"deferred"`, `"ao"`, `"cull"`, `"budget"`, `"dither"`, `"bake"`,
+/// `"timer"`). Unknown names
 /// are ignored.
 #[cfg(target_arch = "wasm32")]
 #[wasm_bindgen::prelude::wasm_bindgen]
@@ -208,22 +224,43 @@ pub fn init_render_toggles(query: &str) {
 pub fn get_cpu_settings() -> crate::adapters::cpu_splatter::CpuRenderSettings {
     let scale = f32::from_bits(CPU_SCALE_BITS.load(Ordering::Relaxed));
     let lod_cutoff = f32::from_bits(CPU_LOD_CUTOFF_BITS.load(Ordering::Relaxed));
-    let max_splat_half = f32::from_bits(CPU_MAX_SPLAT_HALF_BITS.load(Ordering::Relaxed));
+    let max_splat_radius = f32::from_bits(CPU_MAX_SPLAT_RADIUS_BITS.load(Ordering::Relaxed));
+    let max_virtual_depth = CPU_MAX_VIRTUAL_DEPTH.load(Ordering::Relaxed) as u8;
+    let min_mip_occupancy =
+        f32::from_bits(CPU_MIN_MIP_OCCUPANCY_BITS.load(Ordering::Relaxed));
     let max_draw_dist = f32::from_bits(CPU_MAX_DRAW_DISTANCE_BITS.load(Ordering::Relaxed));
     let shadow_mode = CPU_SHADOWS.load(Ordering::Relaxed);
 
     crate::adapters::cpu_splatter::CpuRenderSettings {
         internal_scale: scale,
         lod_cutoff_px: lod_cutoff,
-        max_splat_half_px: max_splat_half,
+        max_splat_radius_px: max_splat_radius,
+        max_virtual_depth,
+        min_mip_occupancy,
         max_draw_distance: max_draw_dist,
-        shadows: if shadow_mode == 1 {
-            crate::adapters::cpu_splatter::CpuShadowMode::Hero
-        } else {
-            crate::adapters::cpu_splatter::CpuShadowMode::Off
-        },
+        shadows: crate::adapters::cpu_splatter::CpuShadowMode::from_id(shadow_mode),
         ..crate::adapters::cpu_splatter::CpuRenderSettings::default()
     }
+    .validated()
+}
+
+#[cfg(target_arch = "wasm32")]
+fn update_cpu_settings(update: impl FnOnce(&mut crate::adapters::cpu_splatter::CpuRenderSettings)) {
+    let mut settings = get_cpu_settings();
+    update(&mut settings);
+    store_cpu_settings(settings);
+}
+
+#[cfg(target_arch = "wasm32")]
+fn store_cpu_settings(settings: crate::adapters::cpu_splatter::CpuRenderSettings) {
+    let settings = settings.validated();
+    CPU_SCALE_BITS.store(settings.internal_scale.to_bits(), Ordering::Relaxed);
+    CPU_LOD_CUTOFF_BITS.store(settings.lod_cutoff_px.to_bits(), Ordering::Relaxed);
+    CPU_MAX_SPLAT_RADIUS_BITS.store(settings.max_splat_radius_px.to_bits(), Ordering::Relaxed);
+    CPU_MAX_VIRTUAL_DEPTH.store(settings.max_virtual_depth as u32, Ordering::Relaxed);
+    CPU_MIN_MIP_OCCUPANCY_BITS.store(settings.min_mip_occupancy.to_bits(), Ordering::Relaxed);
+    CPU_MAX_DRAW_DISTANCE_BITS.store(settings.max_draw_distance.to_bits(), Ordering::Relaxed);
+    CPU_SHADOWS.store(settings.shadows.id(), Ordering::Relaxed);
 }
 
 #[cfg(target_arch = "wasm32")]

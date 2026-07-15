@@ -1,8 +1,11 @@
 use crate::adapters::cpu_splatter::atlas::{decode_node, is_emissive};
 use crate::adapters::cpu_splatter::camera::Camera;
 use crate::adapters::cpu_splatter::settings::CpuRenderSettings;
-use crate::adapters::cpu_splatter::shading::{SplatSurface, shade};
-use crate::application::ports::{ChunkDraw, Environment};
+use crate::adapters::cpu_splatter::shading::{
+    FrameLighting, SplatSurface, shade_with_frame_lighting,
+};
+use crate::application::ports::{ChunkDraw, Environment, LightSource};
+use crate::application::rendering::encode_display_color;
 use crate::core::ports::reference_renderer::{
     ReferenceRenderSettings, ReferenceRendererPort, RenderSceneSnapshot, RenderedImage,
 };
@@ -21,6 +24,7 @@ fn raymarch_pixel(
     settings: &CpuRenderSettings,
     atlas: &[u32],
     chunks: &[ChunkDraw],
+    scene_lights: &[LightSource],
     ro: [f32; 3],
     rd: [f32; 3],
 ) -> Option<[u8; 3]> {
@@ -79,13 +83,27 @@ fn raymarch_pixel(
                 world_size,
                 dist: t,
                 base_color: decoded.color,
-                light_level: decoded.light,
+                baked_irradiance: decoded.baked_rgb.map(f32::from),
+                voxel_type: decoded.voxel_type,
                 is_emissive: is_emissive(decoded.voxel_type),
+                // The reference raymarcher already reached a real leaf but
+                // does not yet carry its exact hit face through this legacy
+                // tuple. Restricting the normal to the leaf's authored
+                // material plus its possible AABB faces preserves behavior;
+                // production splats pass topology-derived exposure instead.
+                exposure: decoded.exposure,
                 crowded_siblings: 1, // Default/fallback sibling density for raymarcher
-                shadow_factor: 1.0,  // Unshadowed baseline
             };
 
-            let rgb = shade(cam, env, settings, atlas, chunks, &surface);
+            let rgb = shade_with_frame_lighting(
+                cam,
+                env,
+                settings,
+                atlas,
+                chunks,
+                FrameLighting::unshadowed(scene_lights),
+                &surface,
+            );
             return Some(rgb);
         }
     }
@@ -234,8 +252,15 @@ impl ReferenceRendererPort for RaymarchReferenceRenderer {
         settings: &ReferenceRenderSettings,
     ) -> RenderedImage {
         let mut rgba = vec![0u8; (settings.width * settings.height * 4) as usize];
-        let frame_params = settings.frame_params();
+        let frame_params = settings.frame_params(&scene.scene_lights);
         let cpu_settings = settings.effective_cpu_settings();
+        let background_radiance = if settings.environment.outdoor {
+            settings.environment.sky_color
+        } else {
+            settings.environment.fog_color
+        };
+        let clear_color = encode_display_color(background_radiance)
+            .map(|channel| (channel * 255.0).round().clamp(0.0, 255.0) as u8);
 
         let camera = Camera::new(
             &frame_params,
@@ -282,10 +307,11 @@ impl ReferenceRendererPort for RaymarchReferenceRenderer {
                     &cpu_settings,
                     &scene.atlas,
                     &scene.chunks,
+                    &scene.scene_lights,
                     settings.camera.position,
                     rd,
                 )
-                .unwrap_or([0, 0, 0]);
+                .unwrap_or(clear_color);
 
                 let idx = ((y * settings.width + x) * 4) as usize;
                 rgba[idx] = color[0];

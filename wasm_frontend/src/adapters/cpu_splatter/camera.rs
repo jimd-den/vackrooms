@@ -45,7 +45,24 @@ impl Camera {
             half_h: height as f32 / 2.0,
             flashlight: frame.flashlight,
             dynamic_lights: frame.dynamic_lights,
-            dynamic_light_count: frame.dynamic_light_count as usize,
+            dynamic_light_count: (frame.dynamic_light_count as usize).min(MAX_DYNAMIC_LIGHTS),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn malformed_dynamic_light_count_is_clamped_to_storage() {
+        let frame = FrameParams {
+            dynamic_light_count: u8::MAX,
+            ..FrameParams::default()
+        };
+        let camera = Camera::new(&frame, 16, 16, &CpuRenderSettings::default());
+
+        assert_eq!(frame.active_dynamic_lights().len(), MAX_DYNAMIC_LIGHTS);
+        assert_eq!(camera.dynamic_light_count, MAX_DYNAMIC_LIGHTS);
     }
 }

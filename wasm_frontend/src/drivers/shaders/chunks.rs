@@ -7,20 +7,22 @@
 //! declarations, so any stage can include it.
 
 /// The flashlight spotlight cone — **GLSL mirror of the single spec in
-/// `adapters::cpu_splatter::flashlight`** (inner/outer angle, range, facing
-/// floor, lamp offset, tint). A tuning change there must be mirrored here.
+/// `adapters::cpu_splatter::flashlight`** (inner/outer angle, finite-range
+/// inverse-square transport, lamp offset, and tint). A tuning change there
+/// must be mirrored here.
 ///
 /// Shape: smoothstep between an inner cone (full strength, 11°) and an
-/// outer cone (zero, 24°) around the camera forward axis, times a range
-/// fade (full to 3 u, gone at 14 u), times a floored Lambert facing term.
+/// outer cone (zero, 24°) around the camera forward axis. Transport uses a
+/// compact-support inverse-square law and a strict Lambert receiver cosine.
 pub const SPOT_CONE_GLSL: &str = r#"
 // --- flashlight cone (spec: adapters/cpu_splatter/flashlight.rs) ---
 const float SPOT_INNER_COS = 0.9816272; // cos(11 deg)
 const float SPOT_OUTER_COS = 0.9135455; // cos(24 deg)
-const float SPOT_RANGE_FULL = 3.0;
 const float SPOT_RANGE_END = 14.0;
-const float SPOT_FACING_FLOOR = 0.08;
-const vec3  SPOT_TINT = vec3(1.0, 0.96, 0.85);
+const float SPOT_INTENSITY = 32.0;
+const float SPOT_MIN_DISTANCE = 0.25;
+const float SPOT_INV_PI = 0.3183098861837907;
+const vec3  SPOT_TINT = vec3(1.0, 0.91, 0.72);
 
 // The hand-held lamp sits slightly forward of and below the eye.
 vec3 spotLampPos(vec3 camPos, vec3 camForward) {
@@ -32,22 +34,28 @@ float spotCone(vec3 beam, vec3 camForward) {
     return smoothstep(SPOT_OUTER_COS, SPOT_INNER_COS, dot(beam, camForward));
 }
 
-// Distance falloff: full out to RANGE_FULL, zero at RANGE_END.
-float spotRange(float dist) {
-    return 1.0 - smoothstep(SPOT_RANGE_FULL, SPOT_RANGE_END, dist);
+// Finite-range inverse-square transport. The compact window and its first
+// derivative both reach zero at RANGE_END, so the beam has no hard rim.
+float spotAttenuation(float dist) {
+    if (!(dist >= 0.0) || dist >= SPOT_RANGE_END) return 0.0;
+    float normalizedSquared = (dist * dist) / (SPOT_RANGE_END * SPOT_RANGE_END);
+    float window = max(1.0 - normalizedSquared * normalizedSquared, 0.0);
+    float minimumSquared = SPOT_MIN_DISTANCE * SPOT_MIN_DISTANCE;
+    return (window * window) / max(dist * dist, minimumSquared);
 }
 
-// Full beam response at a surface point with normal N. This returns the light
-// term; each renderer owns its final material/radiance composition.
+// Lambertian reflected-radiance factor at a surface point with normal N.
+// The CPU contract evaluates irradiance first and multiplies albedo / PI;
+// folding 1/PI here preserves that exact composition at GPU call sites.
 vec3 spotBeam(vec3 camPos, vec3 camForward, vec3 surfacePos, vec3 N) {
     vec3 lamp = spotLampPos(camPos, camForward);
     vec3 toSurf = surfacePos - lamp;
     float dist = length(toSurf);
     vec3 beam = toSurf / max(dist, 1e-4);
     float cone = spotCone(beam, camForward);
-    float range = spotRange(dist);
-    float facing = max(-dot(beam, N), SPOT_FACING_FLOOR);
-    return SPOT_TINT * (cone * range * facing);
+    float attenuation = spotAttenuation(dist);
+    float facing = max(-dot(beam, N), 0.0);
+    return SPOT_TINT * (SPOT_INTENSITY * SPOT_INV_PI * cone * attenuation * facing);
 }
 "#;
 

@@ -2,6 +2,7 @@
 //! contract consumed by production renderers.
 
 use crate::application::ports::ChunkDraw;
+use crate::adapters::collect_emissive_lights::collect_emissive_lights;
 use crate::core::domain::room::RoomScene;
 use crate::core::ports::reference_renderer::RenderSceneSnapshot;
 use vackrooms::adapters::octree_gpu_serializer::OctreeGpuSerializer;
@@ -13,6 +14,7 @@ pub fn build_render_scene(scene: RoomScene) -> RenderSceneSnapshot {
     let (mut voxels, voxel_size, origin) = scene.into_parts();
     let svo_depth = cube_depth(&voxels);
     let world_size = voxels.width() as f32 * voxel_size;
+    let scene_lights = collect_emissive_lights(&voxels, voxel_size, origin, 0);
 
     let lighting = VoxelLightingSettings::with_default_range(voxel_size)
         .expect("RoomScene guarantees a positive finite voxel size");
@@ -29,6 +31,7 @@ pub fn build_render_scene(scene: RoomScene) -> RenderSceneSnapshot {
             voxel_size,
             svo_depth: svo_depth as u8,
         }],
+        scene_lights,
     }
 }
 
@@ -41,4 +44,22 @@ fn cube_depth(voxels: &VoxelGrid) -> u32 {
     assert_eq!(voxels.height(), edge, "reference room must be cubic");
     assert_eq!(voxels.depth(), edge, "reference room must be cubic");
     edge.ilog2()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::application::ports::LightKind;
+
+    #[test]
+    fn reference_snapshot_keeps_the_analytic_ceiling_fixture() {
+        let snapshot = build_render_scene(RoomScene::single_ceiling_fixture());
+
+        assert_eq!(snapshot.scene_lights.len(), 1);
+        let fixture = snapshot.scene_lights[0];
+        assert!(fixture.enabled);
+        assert_eq!(fixture.kind, LightKind::CeilingPanel);
+        assert!(fixture.intensity > 0.0);
+        assert!(fixture.radius > 0.0);
+    }
 }

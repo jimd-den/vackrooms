@@ -926,6 +926,21 @@ impl Engine {
         loaded: &mut Vec<ChunkKey>,
         changed: &mut bool,
     ) {
+        // A transport failure is not a completion, but it must retire the
+        // exact pending order or that chunk can never be scheduled again.
+        // Old worker callbacks cannot cancel a newer retry because request
+        // identity includes the engine-assigned monotonic id and reality.
+        for failed in self.source.poll_failed_requests() {
+            let key = chunk_key(failed.origin_x, failed.origin_z);
+            let is_current = self
+                .pending
+                .get(&key)
+                .is_some_and(|pending| pending.is_same_request(&failed));
+            if is_current {
+                self.pending.remove(&key);
+            }
+        }
+
         let fresh = self.source.poll_completed();
         self.completed_backlog.extend(fresh);
         let mut budget = (self.config.max_loads_per_tick as u32 * FINE_LOAD_COST).max(1);
@@ -1583,6 +1598,7 @@ mod tests {
     struct AsyncFakeSource {
         requests: Rc<RefCell<Vec<ChunkRequest>>>,
         ready: Rc<RefCell<Vec<crate::application::ports::CompletedChunk>>>,
+        failed: Rc<RefCell<Vec<ChunkRequest>>>,
     }
 
     impl ChunkSourcePort for AsyncFakeSource {
@@ -1597,6 +1613,9 @@ mod tests {
         }
         fn poll_completed(&mut self) -> Vec<crate::application::ports::CompletedChunk> {
             self.ready.borrow_mut().drain(..).collect()
+        }
+        fn poll_failed_requests(&mut self) -> Vec<ChunkRequest> {
+            self.failed.borrow_mut().drain(..).collect()
         }
     }
 
@@ -1802,6 +1821,51 @@ mod tests {
         engine.tick(1.0 / 60.0, &input);
         let installed = engine.store.get(key).expect("current completion installs");
         assert!(installed.is_in_reality(&current.reality));
+    }
+
+    #[test]
+    fn failed_async_request_is_retried_but_stale_failure_cannot_cancel_retry() {
+        let source = AsyncFakeSource::default();
+        let requests = source.requests.clone();
+        let failed = source.failed.clone();
+        let mut engine = Engine::new(
+            EngineConfig::default(),
+            Box::new(RecordingRenderer::default()),
+            Box::new(source),
+        );
+        let input = InputFrame::default();
+        engine.tick(1.0 / 60.0, &input);
+
+        let first = requests.borrow()[0].clone();
+        let key = chunk_key(first.origin_x, first.origin_z);
+        requests.borrow_mut().clear();
+        failed.borrow_mut().push(first.clone());
+        engine.tick(1.0 / 60.0, &input);
+
+        let retry = engine
+            .pending
+            .get(&key)
+            .expect("a transport failure is retried on the same tick")
+            .clone();
+        assert_ne!(retry.request_id, first.request_id);
+        assert!(
+            requests
+                .borrow()
+                .iter()
+                .any(|request| request.is_same_request(&retry))
+        );
+
+        requests.borrow_mut().clear();
+        failed.borrow_mut().push(first);
+        engine.tick(1.0 / 60.0, &input);
+        assert!(
+            engine
+                .pending
+                .get(&key)
+                .is_some_and(|pending| pending.is_same_request(&retry)),
+            "a late failure for the old order must preserve its current retry"
+        );
+        assert!(requests.borrow().is_empty(), "no duplicate may be queued");
     }
 
     #[test]

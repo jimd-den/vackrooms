@@ -19,6 +19,7 @@ const referenceBackends = [
     toggles: 'rt_bake=0&rt_cull=0&rt_shadows=0&rt_dither=0&rt_timer=0',
     equivalentOptimizations: ['cull'],
     viewport: { width: 160, height: 90 },
+    timeoutMs: 90_000,
   },
   {
     name: 'raymarch-direct-dda-reference',
@@ -26,6 +27,10 @@ const referenceBackends = [
     toggles: 'rt_bake=0&rt_skip=0&rt_f2b=0&rt_shadows=0&rt_dither=0&rt_timer=0',
     equivalentOptimizations: ['skip', 'f2b'],
     viewport: { width: 160, height: 90 },
+    // The correctness baseline deliberately disables empty-space skipping.
+    // Software WebGL in CI can need more than the interactive-path timeout
+    // to capture the two live optimization comparisons.
+    timeoutMs: 180_000,
   },
   {
     name: 'raymarch-occluded-direct-reference',
@@ -33,6 +38,18 @@ const referenceBackends = [
     toggles: 'rt_bake=0&rt_skip=1&rt_f2b=1&rt_shadows=1&rt_dither=0&rt_timer=0',
     equivalentOptimizations: [],
     viewport: { width: 128, height: 72 },
+    timeoutMs: 90_000,
+  },
+  {
+    name: 'cpu-splat-direct-reference',
+    renderer: 'cpu',
+    toggles:
+      'rt_bake=0&rt_hiz=0&rt_mips=0&rt_beam_occlusion=0&rt_f2b=0&rt_cull=0',
+    equivalentOptimizations: ['hiz', 'f2b', 'cull'],
+    // Balanced CPU quality renders at one quarter of this backing size and
+    // CSS presents the complete result over the viewport.
+    viewport: { width: 320, height: 180 },
+    timeoutMs: 90_000,
   },
 ] as const;
 
@@ -122,7 +139,7 @@ async function compareScreenshots(
 
 for (const backend of referenceBackends) {
   test(`${backend.name} renders emissive fixtures and their room`, async ({ page }, testInfo) => {
-    test.setTimeout(90_000);
+    test.setTimeout(backend.timeoutMs);
     const browserErrors: string[] = [];
     page.on('pageerror', error => browserErrors.push(error.message));
     page.on('console', message => {
@@ -155,7 +172,10 @@ for (const backend of referenceBackends) {
     });
     const screenshotPath = testInfo.outputPath(`${backend.name}.png`);
     const screenshot = await page.locator('#view').screenshot({ path: screenshotPath });
-    const probe = await probeScreenshot(page, screenshot);
+    // Keep PNG analysis off the page continuously executing the deliberately
+    // slow reference shader; software WebGL can otherwise starve evaluation.
+    const probePage = await page.context().newPage();
+    const probe = await probeScreenshot(probePage, screenshot);
 
     // A dead panel path produces a nearly black canvas with only a few
     // emissive texels. Require both visible fixtures and illuminated room
@@ -185,9 +205,10 @@ for (const backend of referenceBackends) {
         path: testInfo.outputPath(`${backend.name}-${name}.png`),
       });
       expect(
-        await compareScreenshots(page, screenshot, optimized),
+        await compareScreenshots(probePage, screenshot, optimized),
         `${name} must preserve every rendered pixel`,
       ).toEqual({ changedPixels: 0, maximumChannelDelta: 0 });
     }
+    await probePage.close();
   });
 }
