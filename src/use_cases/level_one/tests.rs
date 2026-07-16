@@ -157,6 +157,11 @@ fn supplies_export_and_respect_consumed_reality() {
     ));
 
     // Consuming the item removes both the export and its voxel marker.
+    // Count the marker's body material (bottles and tins differ).
+    let body_material = match item.kind {
+        SupplyKind::AlmondWater => VOXEL_ALMOND_WATER,
+        SupplyKind::Ration => VOXEL_METAL_DOOR,
+    };
     let consumed_reality = RealitySnapshot::empty().with_supply_consumed(item.id);
     let after = HabitableLevel.generate_with_reality(
         Position::new(ox, oz),
@@ -166,33 +171,30 @@ fn supplies_export_and_respect_consumed_reality() {
         &consumed_reality,
     );
     assert!(after.supply_items.iter().all(|s| s.id != item.id));
-    let mut markers = 0;
-    for z in 0..after.depth() {
-        for x in 0..after.width() {
-            for y in 0..after.height() {
-                if after.get(x, y, z) == VOXEL_ALMOND_WATER {
-                    markers += 1;
+    let count_markers = |grid: &VoxelGrid| {
+        let mut markers = 0;
+        for z in 0..grid.depth() {
+            for x in 0..grid.width() {
+                for y in 0..grid.height() {
+                    if grid.get(x, y, z) == body_material {
+                        markers += 1;
+                    }
                 }
             }
         }
-    }
-    let before = generate(ox, oz);
-    let mut markers_before = 0;
-    for z in 0..before.depth() {
-        for x in 0..before.width() {
-            for y in 0..before.height() {
-                if before.get(x, y, z) == VOXEL_ALMOND_WATER {
-                    markers_before += 1;
-                }
-            }
-        }
-    }
+        markers
+    };
+    let markers_before = count_markers(&generate(ox, oz));
+    let markers_after = count_markers(&after);
     assert!(markers_before > 0, "unconsumed marker must be visible");
-    assert!(markers < markers_before, "consumed marker must vanish");
+    assert!(
+        markers_after < markers_before,
+        "consumed marker must vanish"
+    );
 }
 
 #[test]
-fn marker_stamp_is_small_and_sits_on_its_rest_height() {
+fn marker_stamp_is_small_shaped_and_sits_on_its_rest_height() {
     let mut grid = VoxelGrid::new(50, 29, 50);
     let item = SupplyItem {
         id: 9,
@@ -202,8 +204,28 @@ fn marker_stamp_is_small_and_sits_on_its_rest_height() {
     };
     stamp_supply_marker(&mut grid, Position::new(0.0, 0.0), 0.2, &item);
     let base = (0.8 / 0.2) as usize + 1;
-    assert_eq!(grid.get(25, base, 25), VOXEL_ALMOND_WATER);
+    assert_eq!(grid.get(25, base, 25), VOXEL_ALMOND_WATER, "milky body");
+    assert_eq!(
+        grid.get(25, base + 1, 25),
+        crate::domain::entities::voxel_grid::VOXEL_PIPE,
+        "dark screw cap tops the bottle"
+    );
     assert_eq!(grid.get(25, base + 3, 25), VOXEL_AIR, "bottle stays small");
+
+    // Rations read as a squat tin, not a bottle.
+    let tin = SupplyItem {
+        id: 10,
+        kind: SupplyKind::Ration,
+        position: Position::new(3.0, 3.0),
+        rest_y: 0.0,
+    };
+    stamp_supply_marker(&mut grid, Position::new(0.0, 0.0), 0.2, &tin);
+    assert_eq!(
+        grid.get(15, 1, 15),
+        VOXEL_METAL_DOOR,
+        "tin body uses the blue-grey metal"
+    );
+    assert_eq!(grid.get(15, 3, 15), VOXEL_AIR, "tin stays squat");
 }
 
 #[test]

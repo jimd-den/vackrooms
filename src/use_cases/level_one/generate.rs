@@ -30,6 +30,10 @@ const WALL_T: f32 = 0.25;
 const DOOR_W: f32 = 1.4;
 /// Gild doorway lintel height.
 const DOOR_H: f32 = 2.2;
+/// Doorway centers keep this margin from each wall end. The nearest gap
+/// edge (margin - DOOR_W/2 = 1.9) must clear the deepest corner-crate
+/// reach (1.1 inset + 0.75 max extent = 1.85).
+const GAP_BAND_MARGIN: f32 = 2.6;
 /// Construction obstacle lattice.
 const SCAFFOLD: f32 = 4.8;
 /// Gothic circular pillar radius.
@@ -129,13 +133,16 @@ impl HabitableLevel {
             // A doorway pierces every shared wall segment, so the storage
             // maze is dense but never sealed. The gap position is hashed per
             // wall edge; both cells sharing the edge derive the same gap.
+            // Gap centers stay in the wall's central band so a doorway (and
+            // the walk lane through it) can never reach a corner crate zone.
             let (edge_x, edge_z, along, salt) = if in_x_wall {
                 ((wx / ROOM).round() as i64, cell_z, wz, 0x11)
             } else {
                 (cell_x, (wz / ROOM).round() as i64, wx, 0x22)
             };
             let t = unit(hash(seed, 0x91D0_D008_0000_0000 | salt, edge_x, edge_z));
-            let gap_center = (along / ROOM).floor() * ROOM + 1.2 + t * (ROOM - 2.4);
+            let gap_center =
+                (along / ROOM).floor() * ROOM + GAP_BAND_MARGIN + t * (ROOM - 2.0 * GAP_BAND_MARGIN);
             let in_gap = (along - gap_center).abs() < DOOR_W * 0.5;
             if in_gap {
                 column.lintel_from_units = Some(DOOR_H);
@@ -143,16 +150,19 @@ impl HabitableLevel {
                 column.solid = true;
             }
         } else {
-            // Crate stacks hug the room corners, never the doorway lanes.
+            // Crate stacks hug the room corners. Their maximum reach along
+            // either wall (corner inset + extent) stays short of the nearest
+            // possible doorway edge (GAP_BAND_MARGIN - DOOR_W/2), so a stack
+            // can never stand in a doorway or its walk lane.
             let fx = wx - cell_x as f32 * ROOM;
             let fz = wz - cell_z as f32 * ROOM;
             let corner_x = if fx < ROOM * 0.5 { 1.1 } else { ROOM - 1.1 };
             let corner_z = if fz < ROOM * 0.5 { 1.1 } else { ROOM - 1.1 };
             let quadrant = (u64::from(fx >= ROOM * 0.5) << 1) | u64::from(fz >= ROOM * 0.5);
             let stack = hash(seed, 0xC0A7_E500_0000_0000 | quadrant, cell_x, cell_z);
-            // ~55% of room corners hold crates: 1x1 to 2x2 world units.
+            // ~55% of room corners hold crates: 1x1 to 1.5x1.5 world units.
             if unit(stack) < 0.55 {
-                let extent = 0.5 + unit(stack.rotate_left(17)) * 0.5;
+                let extent = 0.5 + unit(stack.rotate_left(17)) * 0.25;
                 if (fx - corner_x).abs() < extent && (fz - corner_z).abs() < extent {
                     column.floor_units = if unit(stack.rotate_left(33)) < 0.3 {
                         1.6
@@ -379,27 +389,45 @@ impl HabitableLevel {
     }
 }
 
-/// Stamps a small bottle/ration marker into the grid at a supply position.
+/// Stamps a supply marker into the grid at a supply position. Shapes are
+/// authored in world space so every voxel resolution and every overlapping
+/// chunk quantizes them identically:
+///
+/// * almond water — a milky bottle (~0.16u wide, ~0.3u tall) with a dark
+///   screw cap; the body is the faintly emissive bottle material, so it
+///   glints in dim fabric.
+/// * ration — a squat blue-grey tin (~0.24u wide, ~0.16u tall).
 pub(crate) fn stamp_supply_marker(
     grid: &mut VoxelGrid,
     chunk_pos: Position,
     voxel_size: f32,
     item: &SupplyItem,
 ) {
-    let lx = ((item.position.x - chunk_pos.x) / voxel_size).floor() as i64;
-    let lz = ((item.position.z - chunk_pos.z) / voxel_size).floor() as i64;
     let base_y = (item.rest_y / voxel_size).round() as i64 + 1;
-    // A bottle is ~0.2u wide and ~0.3u tall regardless of voxel resolution.
-    let half = ((0.1 / voxel_size).round() as i64).max(0);
-    let tall = ((0.3 / voxel_size).ceil() as i64).max(1);
-    for dy in 0..tall {
-        for dz in -half..=half {
-            for dx in -half..=half {
-                let (x, y, z) = (lx + dx, base_y + dy, lz + dz);
-                if x >= 0 && y >= 1 && z >= 0 {
-                    grid.set(x as usize, y as usize, z as usize, VOXEL_ALMOND_WATER);
+    // Fill the voxel columns covering a world-space square around the item
+    // center, `rows` layers tall starting at `row`.
+    let mut stamp_box = |half_w: f32, row: i64, rows: i64, material: u8| {
+        let lo = |c: f32, origin: f32| ((c - half_w - origin) / voxel_size).floor() as i64;
+        let hi = |c: f32, origin: f32| ((c + half_w - origin) / voxel_size).ceil() as i64 - 1;
+        for z in lo(item.position.z, chunk_pos.z)..=hi(item.position.z, chunk_pos.z) {
+            for x in lo(item.position.x, chunk_pos.x)..=hi(item.position.x, chunk_pos.x) {
+                for y in row..row + rows {
+                    if x >= 0 && y >= 1 && z >= 0 {
+                        grid.set(x as usize, y as usize, z as usize, material);
+                    }
                 }
             }
+        }
+    };
+    match item.kind {
+        SupplyKind::AlmondWater => {
+            let body_rows = ((0.22 / voxel_size).round() as i64).max(1);
+            stamp_box(0.08, base_y, body_rows, VOXEL_ALMOND_WATER);
+            stamp_box(0.04, base_y + body_rows, 1, VOXEL_PIPE);
+        }
+        SupplyKind::Ration => {
+            let rows = ((0.16 / voxel_size).round() as i64).max(1);
+            stamp_box(0.12, base_y, rows, VOXEL_METAL_DOOR);
         }
     }
 }
