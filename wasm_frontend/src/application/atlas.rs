@@ -163,6 +163,8 @@ mod tests {
             collision: vec![],
             traversal_gates: vec![],
             pit_hazards: vec![],
+            supply_items: vec![],
+            level_exits: vec![],
         }
     }
 

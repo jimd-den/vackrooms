@@ -17,6 +17,12 @@ pub struct VoxelGrid {
     pub traversal_gates: Vec<crate::domain::entities::anomaly::TraversalGate>,
     /// Real floor openings that relocate the player when entered.
     pub pit_hazards: Vec<crate::domain::entities::anomaly::PitHazard>,
+    /// Consumable pickups placed by the same generation pass as their
+    /// marker voxels. Consumption is reality state, not grid state.
+    pub supply_items: Vec<crate::domain::entities::supplies::SupplyItem>,
+    /// Physical doorways between Backrooms levels. The application flushes
+    /// and re-streams the world when the player steps through one.
+    pub level_exits: Vec<crate::domain::entities::anomaly::LevelExit>,
     /// Six neighbor-occupancy bits prepared by the geometry source. A set bit
     /// means that face touches solid matter; clearing it means the face is
     /// exposed to air. Streaming generation computes this from its halo, so
@@ -63,9 +69,26 @@ pub const VOXEL_FLUID: u8 = 15;
 /// Tiny cool emergency glimmer fixture (blackout recovery skeleton).
 /// Emissive like LIGHT, far dimmer and colder.
 pub const VOXEL_GLIMMER: u8 = 16;
+/// Bare structural concrete (Level 1 walls and pillars). Solid like WALL.
+pub const VOXEL_CONCRETE_WALL: u8 = 17;
+/// Institutional tile floor (Level 1). Walkable, like FLOOR.
+pub const VOXEL_TILE_FLOOR: u8 = 18;
+/// Poured concrete slab floor (Level 1 parking sectors). Walkable.
+pub const VOXEL_CONCRETE_FLOOR: u8 = 19;
+/// Wooden supply crate (Level 1 Gild sector). Solid: blocks like WALL.
+pub const VOXEL_CRATE: u8 = 20;
+/// Exposed ceiling pipe / rebar (Level 1). Solid, but authored overhead
+/// or as thin obstructions the player walks around.
+pub const VOXEL_PIPE: u8 = 21;
+/// Metal fire-exit door panel. Non-solid: crossing it is a level transit,
+/// so the panel must admit the player who pushes into it.
+pub const VOXEL_METAL_DOOR: u8 = 22;
+/// Almond water bottle marker. Non-solid, faintly emissive so bottles
+/// glint in dim fabric; the pickup itself is the exported `SupplyItem`.
+pub const VOXEL_ALMOND_WATER: u8 = 23;
 
 /// Number of voxel material ids (the palette table length).
-pub const VOXEL_MATERIAL_COUNT: usize = 17;
+pub const VOXEL_MATERIAL_COUNT: usize = 24;
 
 /// The one authoritative material palette, `0xRRGGBB` per voxel id. Every
 /// consumer — octree bake, greedy-mesh debug colors, CPU splatter, and the
@@ -89,6 +112,13 @@ pub const MATERIAL_COLORS: [u32; VOXEL_MATERIAL_COUNT] = [
     0x7A4A26, // 14 sticky red-room carpet
     0x2E2A22, // 15 dark pooled fluid
     0x9FC4E8, // 16 cool emergency glimmer
+    0x8F8D88, // 17 bare structural concrete
+    0xBDBBB0, // 18 institutional tile floor
+    0x6E6C66, // 19 poured concrete slab
+    0x9C7B4A, // 20 wooden supply crate
+    0x3E4348, // 21 exposed pipe / rebar
+    0x4A5A6A, // 22 metal fire-exit door
+    0xEDE6D0, // 23 almond water bottle
 ];
 
 /// Palette lookup as normalized linear-ish RGB for shader tables.
@@ -106,16 +136,24 @@ pub fn material_color_f32(voxel: u8) -> [f32; 3] {
 
 /// Materials that block the player and produce collision boxes. Everything
 /// else is walkable or decorative.
-pub const SOLID_MATERIALS: [u8; 5] = [
+pub const SOLID_MATERIALS: [u8; 8] = [
     VOXEL_WALL,
     VOXEL_TREE,
     VOXEL_RED_WALL,
     VOXEL_PALE_WALL,
     VOXEL_DAMAGED_WALL,
+    VOXEL_CONCRETE_WALL,
+    VOXEL_CRATE,
+    VOXEL_PIPE,
 ];
 
 /// Materials that emit light in the baked flood fill and render emissive.
-pub const EMISSIVE_MATERIALS: [u8; 3] = [VOXEL_LIGHT, VOXEL_RED_LIGHT, VOXEL_GLIMMER];
+pub const EMISSIVE_MATERIALS: [u8; 4] = [
+    VOXEL_LIGHT,
+    VOXEL_RED_LIGHT,
+    VOXEL_GLIMMER,
+    VOXEL_ALMOND_WATER,
+];
 
 /// Authored emitted-radiance scale shared by fixture extraction and every
 /// renderer's visible-emission path.
@@ -124,6 +162,8 @@ pub const fn material_emission_strength(material: u8) -> Option<f32> {
         VOXEL_LIGHT => Some(10.0),
         VOXEL_RED_LIGHT => Some(8.0),
         VOXEL_GLIMMER => Some(0.9),
+        // A bottle is a glint, not a lamp: just enough to catch the eye.
+        VOXEL_ALMOND_WATER => Some(0.35),
         _ => None,
     }
 }
@@ -141,6 +181,8 @@ impl VoxelGrid {
             runtime_lights: Vec::new(),
             traversal_gates: Vec::new(),
             pit_hazards: Vec::new(),
+            supply_items: Vec::new(),
+            level_exits: Vec::new(),
             face_occlusion: vec![0; size],
         }
     }

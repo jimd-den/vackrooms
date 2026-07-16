@@ -249,7 +249,10 @@ fn sample_blackout_expanse(context: &SampleContext<'_>) -> ColumnPlan {
         return plan;
     }
 
-    let decoys = context.config.anomalies.blackout_decoys.clamp(0.0, 0.5);
+    // Deception is nearly unbounded on purpose: blackouts are meant to be
+    // almost impossible to walk out of, so decoy glimmers may heavily
+    // outnumber the honest skeleton.
+    let decoys = context.config.anomalies.blackout_decoys.clamp(0.0, 0.9);
     let off_lane = (local_z.abs() - (instance.skeleton_half_width + 7.2)).abs() < 0.45;
     if off_lane
         && depth > 0.3

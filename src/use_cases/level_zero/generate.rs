@@ -342,6 +342,22 @@ impl LevelGenerator for BackroomsLevel {
         let columns = ColumnField::sample(width, depth, plan_at);
         voxelize_columns(&mut grid, &columns, s);
 
+        // Provisions live only in ordinary Level 0 space: a committed Red
+        // Room's recursive address stays barren by design.
+        if recursive_level.is_none() {
+            super::provisions::stamp_level_zero_provisions(
+                &mut grid,
+                chunk_pos,
+                &super::provisions::ProvisionContext {
+                    seed,
+                    config: &config,
+                    reality,
+                    noise,
+                    plans: &plans,
+                },
+            );
+        }
+
         grid
     }
 }

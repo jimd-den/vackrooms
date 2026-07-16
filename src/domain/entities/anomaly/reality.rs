@@ -105,6 +105,9 @@ pub struct RealitySnapshot {
     stamps: Vec<AnomalyStateStamp>,
     /// Peripheral Shift state, canonical-sorted by (cell_x, cell_z).
     drifts: Vec<FabricDriftStamp>,
+    /// Supply items the wanderer has consumed, canonical-sorted by id.
+    /// Generation omits a consumed item and its marker deterministically.
+    consumed_supplies: Vec<u64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -162,15 +165,29 @@ fn advance_red_threshold(
     state
 }
 
-/// A loop crossing matters only after commitment. Three accepted crossings
-/// expose the escape while each accepted crossing advances the geometry epoch.
+/// A loop crossing matters only after commitment. The escape is almost
+/// never offered: seven accepted crossings expose it, and the very next
+/// crossing seals the room again and resets the count — a wanderer who
+/// doesn't find the breach before touching the checkpoint loses it. Each
+/// accepted crossing also advances the geometry epoch, so the breach never
+/// reopens on the same wall twice in a row.
+const LOOPS_TO_OPEN_ESCAPE: u8 = 7;
+
 fn advance_red_loop(mut state: TransitionState, next_epoch: u32) -> TransitionState {
-    if state.phase == RedRoomPhase::Sealed {
-        state.loop_count = state.loop_count.saturating_add(1);
-        if state.loop_count >= 3 {
-            state.phase = RedRoomPhase::EscapeOpen;
+    match state.phase {
+        RedRoomPhase::Sealed => {
+            state.loop_count = state.loop_count.saturating_add(1);
+            if state.loop_count >= LOOPS_TO_OPEN_ESCAPE {
+                state.phase = RedRoomPhase::EscapeOpen;
+            }
+            state.epoch = next_epoch;
         }
-        state.epoch = next_epoch;
+        RedRoomPhase::EscapeOpen => {
+            state.phase = RedRoomPhase::Sealed;
+            state.loop_count = 0;
+            state.epoch = next_epoch;
+        }
+        RedRoomPhase::Outside => {}
     }
     state
 }
@@ -200,7 +217,7 @@ fn transition_for(
 }
 
 impl RealitySnapshot {
-    const MAGIC: u32 = 0x5254_5903; // "RTY" v3: v2 plus fabric drift
+    const MAGIC: u32 = 0x5254_5904; // "RTY" v4: v3 plus consumed supplies
     const STAMP_WORDS: usize = 7;
     const DRIFT_WORDS: usize = 5;
 
@@ -213,6 +230,14 @@ impl RealitySnapshot {
     }
 
     pub fn with_drifts(stamps: Vec<AnomalyStateStamp>, drifts: Vec<FabricDriftStamp>) -> Self {
+        Self::with_drifts_and_supplies(stamps, drifts, Vec::new())
+    }
+
+    pub fn with_drifts_and_supplies(
+        stamps: Vec<AnomalyStateStamp>,
+        drifts: Vec<FabricDriftStamp>,
+        consumed_supplies: Vec<u64>,
+    ) -> Self {
         let mut by_id: BTreeMap<AnomalyId, AnomalyStateStamp> = BTreeMap::new();
         for stamp in stamps {
             by_id
@@ -229,6 +254,9 @@ impl RealitySnapshot {
             let epoch = by_cell.entry((drift.cell_x, drift.cell_z)).or_insert(0);
             *epoch = (*epoch).max(drift.epoch);
         }
+        let mut consumed = consumed_supplies;
+        consumed.sort_unstable();
+        consumed.dedup();
         Self {
             stamps: by_id.into_values().collect(),
             drifts: by_cell
@@ -240,6 +268,25 @@ impl RealitySnapshot {
                     epoch,
                 })
                 .collect(),
+            consumed_supplies: consumed,
+        }
+    }
+
+    /// True when the wanderer has already consumed this supply item.
+    pub fn supply_consumed(&self, id: u64) -> bool {
+        self.consumed_supplies.binary_search(&id).is_ok()
+    }
+
+    /// Records one consumed supply. Everything else is untouched.
+    pub fn with_supply_consumed(&self, id: u64) -> Self {
+        let mut consumed = self.consumed_supplies.clone();
+        if let Err(index) = consumed.binary_search(&id) {
+            consumed.insert(index, id);
+        }
+        Self {
+            stamps: self.stamps.clone(),
+            drifts: self.drifts.clone(),
+            consumed_supplies: consumed,
         }
     }
 
@@ -281,6 +328,7 @@ impl RealitySnapshot {
         Self {
             stamps: self.stamps.clone(),
             drifts,
+            consumed_supplies: self.consumed_supplies.clone(),
         }
     }
 
@@ -326,7 +374,11 @@ impl RealitySnapshot {
             next.loop_count,
             gate.id,
         ));
-        Self::with_drifts(stamps, self.drifts.clone())
+        Self::with_drifts_and_supplies(
+            stamps,
+            self.drifts.clone(),
+            self.consumed_supplies.clone(),
+        )
     }
 
     fn hash_words(words: &[u32]) -> u64 {
@@ -345,7 +397,9 @@ impl RealitySnapshot {
 
     fn words_without_fingerprint(&self) -> Vec<u32> {
         let mut out = Vec::with_capacity(
-            3 + self.stamps.len() * Self::STAMP_WORDS + self.drifts.len() * Self::DRIFT_WORDS,
+            4 + self.stamps.len() * Self::STAMP_WORDS
+                + self.drifts.len() * Self::DRIFT_WORDS
+                + self.consumed_supplies.len() * 2,
         );
         out.push(Self::MAGIC);
         out.push(self.stamps.len() as u32);
@@ -373,6 +427,11 @@ impl RealitySnapshot {
                 drift.epoch,
             ]);
         }
+        out.push(self.consumed_supplies.len() as u32);
+        for &id in &self.consumed_supplies {
+            out.push(id as u32);
+            out.push((id >> 32) as u32);
+        }
         out
     }
 
@@ -390,11 +449,16 @@ impl RealitySnapshot {
         }
         let count = words[1] as usize;
         let drift_header = 2 + count.saturating_mul(Self::STAMP_WORDS);
-        if words.len() < drift_header + 3 {
+        if words.len() < drift_header + 4 {
             return Err(RealitySnapshotDecodeError::Length);
         }
         let drift_count = words[drift_header] as usize;
-        let body_len = drift_header + 1 + drift_count.saturating_mul(Self::DRIFT_WORDS);
+        let supply_header = drift_header + 1 + drift_count.saturating_mul(Self::DRIFT_WORDS);
+        if words.len() < supply_header + 3 {
+            return Err(RealitySnapshotDecodeError::Length);
+        }
+        let supply_count = words[supply_header] as usize;
+        let body_len = supply_header + 1 + supply_count.saturating_mul(2);
         if words.len() != body_len + 2 {
             return Err(RealitySnapshotDecodeError::Length);
         }
@@ -419,14 +483,18 @@ impl RealitySnapshot {
             });
         }
         let mut drifts = Vec::with_capacity(drift_count);
-        for chunk in words[drift_header + 1..body_len].chunks_exact(Self::DRIFT_WORDS) {
+        for chunk in words[drift_header + 1..supply_header].chunks_exact(Self::DRIFT_WORDS) {
             drifts.push(FabricDriftStamp {
                 cell_x: chunk[0] as u64 as i64 | (((chunk[1] as u64) << 32) as i64),
                 cell_z: chunk[2] as u64 as i64 | (((chunk[3] as u64) << 32) as i64),
                 epoch: chunk[4],
             });
         }
-        let decoded = Self::with_drifts(stamps, drifts);
+        let mut consumed = Vec::with_capacity(supply_count);
+        for chunk in words[supply_header + 1..body_len].chunks_exact(2) {
+            consumed.push(chunk[0] as u64 | ((chunk[1] as u64) << 32));
+        }
+        let decoded = Self::with_drifts_and_supplies(stamps, drifts, consumed);
         if decoded.to_words() != words {
             return Err(RealitySnapshotDecodeError::Value);
         }
@@ -488,23 +556,30 @@ mod tests {
     }
 
     #[test]
-    fn three_accepted_loop_events_open_the_escape() {
+    fn seven_accepted_loop_events_open_the_escape_and_one_more_seals_it() {
         let mut reality = RealitySnapshot::empty().with_advanced_gate(
             &gate(1, TraversalGateKind::RedThreshold),
             AxisDirection::Positive,
         );
         let loop_gate = gate(2, TraversalGateKind::RedLoop);
-        for direction in [
-            AxisDirection::Positive,
-            AxisDirection::Negative,
-            AxisDirection::Positive,
-        ] {
+        let mut direction = AxisDirection::Negative;
+        for _ in 0..7 {
             reality = reality.with_advanced_gate(&loop_gate, direction);
+            direction = match direction {
+                AxisDirection::Positive => AxisDirection::Negative,
+                AxisDirection::Negative => AxisDirection::Positive,
+            };
         }
         let stamp = reality.lookup(77).unwrap();
-        assert_eq!(stamp.epoch, 4);
-        assert_eq!(stamp.loop_count, 3);
+        assert_eq!(stamp.epoch, 8);
+        assert_eq!(stamp.loop_count, 7);
         assert_eq!(stamp.phase, RedRoomPhase::EscapeOpen);
+
+        // Touching the checkpoint again withdraws the offer entirely.
+        let resealed = reality.with_advanced_gate(&loop_gate, direction);
+        let stamp = resealed.lookup(77).unwrap();
+        assert_eq!(stamp.phase, RedRoomPhase::Sealed);
+        assert_eq!(stamp.loop_count, 0);
     }
 
     #[test]
@@ -588,6 +663,40 @@ mod tests {
             Ok(sealed.clone())
         );
         assert_ne!(reality.fingerprint(), RealitySnapshot::empty().fingerprint());
+    }
+
+    #[test]
+    fn consumed_supplies_are_canonical_reality_and_survive_transport() {
+        let reality = RealitySnapshot::empty()
+            .with_supply_consumed(42)
+            .with_supply_consumed(7)
+            .with_supply_consumed(42);
+        assert!(reality.supply_consumed(7));
+        assert!(reality.supply_consumed(42));
+        assert!(!reality.supply_consumed(9));
+
+        // Order of consumption does not change identity.
+        let other = RealitySnapshot::empty()
+            .with_supply_consumed(7)
+            .with_supply_consumed(42);
+        assert_eq!(reality, other);
+        assert_eq!(reality.fingerprint(), other.fingerprint());
+
+        // Consumption is part of transport identity and survives both
+        // drift advances and gate transitions.
+        let round = RealitySnapshot::from_words(&reality.to_words()).unwrap();
+        assert_eq!(round, reality);
+        let drifted = reality.with_fabric_drift_advanced(1, 2);
+        assert!(drifted.supply_consumed(42));
+        let sealed = drifted.with_advanced_gate(
+            &gate(1, TraversalGateKind::RedThreshold),
+            AxisDirection::Positive,
+        );
+        assert!(sealed.supply_consumed(42));
+        assert_ne!(
+            reality.fingerprint(),
+            RealitySnapshot::empty().fingerprint()
+        );
     }
 
     #[test]

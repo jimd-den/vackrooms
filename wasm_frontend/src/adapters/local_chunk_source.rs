@@ -30,7 +30,7 @@ use crate::application::ports::{ChunkPayload, ChunkSourcePort};
 /// the carpet/fluid classes are visual-only: including them would make the
 /// player collide with the floor they stand on. Shared with the core so a
 /// new wall class can never render solid but collide hollow.
-const SOLID_TYPES: [u8; 5] = vackrooms::domain::entities::voxel_grid::SOLID_MATERIALS;
+const SOLID_TYPES: [u8; 8] = vackrooms::domain::entities::voxel_grid::SOLID_MATERIALS;
 
 pub struct LocalChunkSource<N: NoiseProvider> {
     noise: N,
@@ -113,6 +113,8 @@ impl<N: NoiseProvider> LocalChunkSource<N> {
             collision,
             traversal_gates: halo_grid.traversal_gates.clone(),
             pit_hazards: halo_grid.pit_hazards.clone(),
+            supply_items: halo_grid.supply_items.clone(),
+            level_exits: halo_grid.level_exits.clone(),
         }
     }
 }

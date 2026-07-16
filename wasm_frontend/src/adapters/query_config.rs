@@ -69,6 +69,8 @@ pub fn parse_generation_params(query: &str, default_seed: u32) -> GenerationPara
             "walls" => knob(&mut params.tuning.walls),
             "atria" => knob(&mut params.tuning.atria),
             "lights" => knob(&mut params.tuning.lights),
+            // Supply pickups and Level 1 doors; 0 strips the world bare.
+            "provisions" => knob(&mut params.tuning.provisions),
             "anomalies" => knob(&mut params.anomalies.frequency),
             "anomaly_size" => ranged(&mut params.anomalies.size, 0.5, 2.0),
             "pillar_expanses" => knob(&mut params.anomalies.pillar_expanses),
@@ -83,9 +85,10 @@ pub fn parse_generation_params(query: &str, default_seed: u32) -> GenerationPara
             // loop, 1 guarantees a breach; it is never the entrance.
             "red_escape_bias" => ranged(&mut params.anomalies.red_escape_bias, 0.0, 1.0),
             "archways" => knob(&mut params.anomalies.archways),
-            // Bounded deception: the fraction of blackout glimmers placed one
-            // segment off the recovery skeleton (never more than half).
-            "blackout_decoys" => ranged(&mut params.anomalies.blackout_decoys, 0.0, 0.5),
+            // Deception: the fraction of blackout glimmers placed one
+            // segment off the recovery skeleton. The default is high on
+            // purpose — most glimmers lie.
+            "blackout_decoys" => ranged(&mut params.anomalies.blackout_decoys, 0.0, 0.9),
             // Debug: guarantee one anomaly of this family on the spawn's
             // macro cell (settings menu "Spawn anomaly"). Unknown values
             // leave the world untouched.

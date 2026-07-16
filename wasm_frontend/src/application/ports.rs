@@ -5,7 +5,10 @@
 //! streaming logic testable without a GPU or a browser.
 
 use crate::application::collision::Aabb;
-use vackrooms::domain::entities::anomaly::{PitHazard, RealitySnapshot, TraversalGate};
+use vackrooms::domain::entities::anomaly::{
+    LevelExit, PitHazard, RealitySnapshot, TraversalGate,
+};
+use vackrooms::domain::entities::supplies::SupplyItem;
 
 /// Chunk-local fixed-point scale used by [`PackedVertex::position`]. A 20 u
 /// high-spec chunk occupies only 20,480 units, comfortably inside `u16`.
@@ -268,6 +271,20 @@ impl Environment {
         }
     }
 
+    /// Level 1, the Habitable Zone: dim concrete under a low-hanging fog
+    /// with no discernible source, colder and murkier than Level 0.
+    pub fn habitable() -> Self {
+        Self {
+            outdoor: false,
+            sky_color: [0.0, 0.0, 0.0],
+            // Linear RGB; a cold grey haze rather than Level 0's amber.
+            fog_color: [0.016, 0.018, 0.021],
+            ambient_scale: 0.85,
+            fog_density: 0.045,
+            fog_start: 5.0,
+        }
+    }
+
     /// Level 34 grassland: a bright daylight sky.
     pub fn daylight() -> Self {
         Self {
@@ -401,6 +418,10 @@ pub struct ChunkPayload {
     pub traversal_gates: Vec<TraversalGate>,
     /// Authored floor openings with deterministic recovery destinations.
     pub pit_hazards: Vec<PitHazard>,
+    /// Consumable pickups exported beside the geometry.
+    pub supply_items: Vec<SupplyItem>,
+    /// Physical doorways to other Backrooms levels.
+    pub level_exits: Vec<LevelExit>,
 }
 
 /// One background chunk-load order, echoed back verbatim with its result so

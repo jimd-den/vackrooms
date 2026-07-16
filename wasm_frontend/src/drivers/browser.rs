@@ -719,6 +719,18 @@ fn run_frame_loop(
         element(window.document().as_ref().unwrap(), "debug-overlay").ok();
     let debug_overlay_visible = Rc::new(Cell::new(false));
 
+    // Survival vitals panel; optional so embedded shells keep working.
+    let document = window.document().unwrap();
+    let vitals_thirst: Option<HtmlElement> = element(&document, "vitals-thirst-fill").ok();
+    let vitals_hunger: Option<HtmlElement> = element(&document, "vitals-hunger-fill").ok();
+    let vitals_cond: Option<HtmlElement> = element(&document, "vitals-cond-fill").ok();
+    let vitals_thirst_bar: Option<HtmlElement> = element(&document, "vitals-thirst").ok();
+    let vitals_hunger_bar: Option<HtmlElement> = element(&document, "vitals-hunger").ok();
+    let vitals_inv: Option<HtmlElement> = element(&document, "vitals-inv").ok();
+    let death_overlay: Option<HtmlElement> = element(&document, "death-overlay").ok();
+    let last_deaths = Rc::new(Cell::new(0u32));
+    let death_shown_at = Rc::new(Cell::new(0.0f64));
+
     let query = window.location().search().unwrap_or_default();
     let is_capture = query.contains("capture=1");
     // Visual baselines get fifteen settled frames; renderer smoke tests only
@@ -839,6 +851,47 @@ fn run_frame_loop(
                 if *last != text {
                     hud_section.set_text_content(Some(&text));
                     *last = text;
+                }
+            }
+
+            // Survival vitals: bar widths + inventory/temperature line.
+            if let Some(fill) = &vitals_thirst {
+                let _ = fill
+                    .style()
+                    .set_property("width", &format!("{:.0}%", stats.hydration * 100.0));
+            }
+            if let Some(fill) = &vitals_hunger {
+                let _ = fill
+                    .style()
+                    .set_property("width", &format!("{:.0}%", stats.satiety * 100.0));
+            }
+            if let Some(fill) = &vitals_cond {
+                let _ = fill
+                    .style()
+                    .set_property("width", &format!("{:.0}%", stats.condition * 100.0));
+            }
+            if let Some(bar) = &vitals_thirst_bar {
+                let _ = bar.set_class_name(if stats.hydration < 0.25 { "bar low" } else { "bar" });
+            }
+            if let Some(bar) = &vitals_hunger_bar {
+                let _ = bar.set_class_name(if stats.satiety < 0.25 { "bar low" } else { "bar" });
+            }
+            if let Some(inv) = &vitals_inv {
+                inv.set_text_content(Some(&format!(
+                    "🥛 {} · 🥫 {} · {:.0}°C",
+                    stats.almond_bottles, stats.rations, stats.ambient_c
+                )));
+            }
+            // Death flash: appears on each new death, fades after ~2.5 s.
+            if let Some(overlay) = &death_overlay {
+                if stats.deaths > last_deaths.get() {
+                    last_deaths.set(stats.deaths);
+                    death_shown_at.set(time_ms);
+                    let _ = overlay.set_class_name("shown");
+                } else if time_ms - death_shown_at.get() > 2500.0
+                    && !overlay.class_name().is_empty()
+                {
+                    let _ = overlay.set_class_name("");
                 }
             }
 

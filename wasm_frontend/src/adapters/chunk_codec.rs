@@ -13,10 +13,11 @@ use crate::application::ports::{
     ChunkPayload, FaceCellRange, FaceInstanceSet, LightKind, LightSource, PackedFaceInstance,
     PackedVertex, SurfaceMeshPayload,
 };
-use vackrooms::domain::entities::anomaly::{PitHazard, TraversalGate};
+use vackrooms::domain::entities::anomaly::{LevelExit, PitHazard, TraversalGate};
+use vackrooms::domain::entities::supplies::SupplyItem;
 
-/// "VKC" + version 5. Version 5 retains the baked light-volume halo.
-const MAGIC: u32 = 0x564B_4305;
+/// "VKC" + version 6. Version 6 adds supply items and level exits.
+const MAGIC: u32 = 0x564B_4306;
 
 pub fn encode_chunk_payload(payload: &ChunkPayload) -> Vec<u8> {
     let mut out = Vec::with_capacity(
@@ -120,6 +121,18 @@ pub fn encode_chunk_payload(payload: &ChunkPayload) -> Vec<u8> {
         let mut words = Vec::with_capacity(PitHazard::TRANSPORT_WORDS);
         hazard.write_words(&mut words);
         for word in words {
+            put_u32(&mut out, word);
+        }
+    }
+    put_u32(&mut out, payload.supply_items.len() as u32);
+    for item in &payload.supply_items {
+        for word in item.to_words() {
+            put_u32(&mut out, word);
+        }
+    }
+    put_u32(&mut out, payload.level_exits.len() as u32);
+    for exit in &payload.level_exits {
+        for word in exit.to_words() {
             put_u32(&mut out, word);
         }
     }
@@ -232,6 +245,24 @@ pub fn decode_chunk_payload(bytes: &[u8]) -> Option<ChunkPayload> {
         }
         pit_hazards.push(PitHazard::from_transport_words(&words)?);
     }
+    let supply_count = r.len(SupplyItem::WORDS * 4)?;
+    let mut supply_items = Vec::with_capacity(supply_count);
+    for _ in 0..supply_count {
+        let mut words = [0u32; SupplyItem::WORDS];
+        for word in &mut words {
+            *word = r.u32()?;
+        }
+        supply_items.push(SupplyItem::from_words(&words)?);
+    }
+    let exit_count = r.len(LevelExit::WORDS * 4)?;
+    let mut level_exits = Vec::with_capacity(exit_count);
+    for _ in 0..exit_count {
+        let mut words = [0u32; LevelExit::WORDS];
+        for word in &mut words {
+            *word = r.u32()?;
+        }
+        level_exits.push(LevelExit::from_words(&words)?);
+    }
 
     Some(ChunkPayload {
         root,
@@ -258,6 +289,8 @@ pub fn decode_chunk_payload(bytes: &[u8]) -> Option<ChunkPayload> {
         collision,
         traversal_gates,
         pit_hazards,
+        supply_items,
+        level_exits,
     })
 }
 
@@ -392,9 +425,24 @@ mod tests {
             depth: 2.4,
             recovery: Position::new(0.8, 10.8),
         }];
+        payload.supply_items = vec![vackrooms::domain::entities::supplies::SupplyItem {
+            id: 0xAA55_1234_5678_9ABC,
+            kind: vackrooms::domain::entities::supplies::SupplyKind::AlmondWater,
+            position: Position::new(33.4, -808.25),
+            rest_y: 0.8,
+        }];
+        payload.level_exits = vec![vackrooms::domain::entities::anomaly::LevelExit {
+            id: 0x0D00_E000_0000_0001,
+            target_level: 1,
+            center: Position::new(12.0, -8.0),
+            half_extent: 0.7,
+            arrival: Position::new(3.0, 3.0),
+        }];
         let decoded = decode_chunk_payload(&encode_chunk_payload(&payload)).unwrap();
         assert_eq!(decoded.traversal_gates, payload.traversal_gates);
         assert_eq!(decoded.pit_hazards, payload.pit_hazards);
+        assert_eq!(decoded.supply_items, payload.supply_items);
+        assert_eq!(decoded.level_exits, payload.level_exits);
         assert_eq!(decoded, payload);
     }
 }

@@ -14,3 +14,4 @@ pub mod prepare_frame_lighting;
 pub mod render_settings;
 pub mod rendering;
 pub mod streaming;
+pub mod thermal;

@@ -46,7 +46,9 @@ impl Default for AnomalyTuning {
             safe_radius: 8.0,
             red_escape_bias: 0.12,
             archways: 1.0,
-            blackout_decoys: 0.25,
+            // Most glimmers lie: with the recovery skeleton buried under
+            // this many decoys, walking out of a blackout is a feat.
+            blackout_decoys: 0.85,
             forced_kind: None,
         }
     }

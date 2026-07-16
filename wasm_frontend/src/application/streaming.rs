@@ -11,7 +11,8 @@ use std::collections::HashMap;
 use crate::application::collision::Aabb;
 use crate::application::ports::ChunkPayload;
 use vackrooms::domain::entities::anomaly::RealitySnapshot;
-use vackrooms::domain::entities::anomaly::{PitHazard, TraversalGate};
+use vackrooms::domain::entities::anomaly::{LevelExit, PitHazard, TraversalGate};
+use vackrooms::domain::entities::supplies::SupplyItem;
 
 /// Integer key for a chunk, quantized from its world origin.
 /// Origins are always integer multiples of `chunk_size`, so rounding to
@@ -162,6 +163,16 @@ impl ChunkStore {
             .flat_map(|c| c.payload.traversal_gates.iter())
     }
 
+    pub fn all_supply_items(&self) -> impl Iterator<Item = &SupplyItem> {
+        self.iter_ordered()
+            .flat_map(|c| c.payload.supply_items.iter())
+    }
+
+    pub fn all_level_exits(&self) -> impl Iterator<Item = &LevelExit> {
+        self.iter_ordered()
+            .flat_map(|c| c.payload.level_exits.iter())
+    }
+
     pub fn all_pit_hazards(&self) -> impl Iterator<Item = &PitHazard> {
         self.iter_ordered()
             .flat_map(|c| c.payload.pit_hazards.iter())
@@ -209,6 +220,8 @@ mod tests {
             collision: vec![],
             traversal_gates: vec![],
             pit_hazards: vec![],
+            supply_items: vec![],
+            level_exits: vec![],
         };
         store.insert(
             chunk_key(0.0, 0.0),

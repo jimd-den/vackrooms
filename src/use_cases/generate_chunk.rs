@@ -124,6 +124,9 @@ pub struct LevelTuning {
     pub junction_density: f32,
     /// Frequency of stairs / vertical traversal generation.
     pub stairs_density: f32,
+    /// Supply pickups and level doors (almond water, rations, Level 1
+    /// doors). 0 strips the world of provisions entirely.
+    pub provisions: f32,
 }
 
 impl Default for LevelTuning {
@@ -135,6 +138,7 @@ impl Default for LevelTuning {
             lights: 1.0,
             junction_density: 1.0,
             stairs_density: 1.0,
+            provisions: 1.0,
         }
     }
 }
@@ -326,19 +330,20 @@ impl<'a> GenerateChunkArchitectureUseCase<'a> {
         reality: &RealitySnapshot,
     ) -> VoxelGrid {
         // Pluggable levels: everything except the legacy office blueprint
-        // (level 1, kept inline below) goes through the LevelGenerator port.
+        // (level 90, kept inline below) goes through the LevelGenerator port.
         // Level 0 is the architecturally *planned* Backrooms: region plans
         // (circulation -> assemblies -> corruption) drive the voxelization.
-        if config.level == 0 || config.level == 34 {
-            use crate::use_cases::level_zero::BackroomsLevel;
+        if config.level == 0 || config.level == 1 || config.level == 34 {
             use crate::use_cases::grassland_level::GrasslandLevel;
             use crate::use_cases::level_generator::LevelGenerator;
+            use crate::use_cases::level_one::HabitableLevel;
+            use crate::use_cases::level_zero::BackroomsLevel;
 
             let start_micros = self.telemetry.now_micros();
-            let generator: &dyn LevelGenerator = if config.level == 0 {
-                &BackroomsLevel
-            } else {
-                &GrasslandLevel
+            let generator: &dyn LevelGenerator = match config.level {
+                0 => &BackroomsLevel,
+                1 => &HabitableLevel,
+                _ => &GrasslandLevel,
             };
             let mut grid = generator.generate_with_reality(
                 chunk_pos,
@@ -509,12 +514,12 @@ mod tests {
         let fine = generator.execute(
             Position::new(10.0, 10.0),
             42,
-            GeneratorConfig::low_spec().with_level(1),
+            GeneratorConfig::low_spec().with_level(crate::use_cases::level_generator::LEVEL_LEGACY_OFFICES),
         );
         let coarse = generator.execute(
             Position::new(10.0, 10.0),
             42,
-            GeneratorConfig::low_spec().with_level(1).at_lod(1),
+            GeneratorConfig::low_spec().with_level(crate::use_cases::level_generator::LEVEL_LEGACY_OFFICES).at_lod(1),
         );
         assert_eq!(coarse.width() * 2, fine.width());
         assert_eq!(coarse.depth() * 2, fine.depth());
@@ -562,7 +567,7 @@ mod tests {
     fn starting_hub_keeps_light_fixtures_off_the_floor() {
         let noise = MockNoiseProvider { value: 0.0 };
         let generator = GenerateChunkArchitectureUseCase::new(&noise);
-        let config = GeneratorConfig::high_spec().with_level(1);
+        let config = GeneratorConfig::high_spec().with_level(crate::use_cases::level_generator::LEVEL_LEGACY_OFFICES);
         let grid = generator.execute(Position::new(0.0, 0.0), 42, config);
 
         assert_eq!(grid.width(), 200);
@@ -584,7 +589,7 @@ mod tests {
     fn test_chunk_seeding_varies_output() {
         let noise = MockNoiseProvider { value: 0.0 };
         let generator = GenerateChunkArchitectureUseCase::new(&noise);
-        let config = GeneratorConfig::high_spec().with_level(1);
+        let config = GeneratorConfig::high_spec().with_level(crate::use_cases::level_generator::LEVEL_LEGACY_OFFICES);
 
         let grid1 = generator.execute(Position::new(10.0, 10.0), 42, config);
         let grid2 = generator.execute(Position::new(10.0, 10.0), 43, config);
@@ -652,10 +657,10 @@ mod tests {
         let noise = MockNoiseProvider { value: 0.0 };
         let generator = GenerateChunkArchitectureUseCase::new(&noise);
 
-        let mut config_zero = GeneratorConfig::high_spec().with_level(1);
+        let mut config_zero = GeneratorConfig::high_spec().with_level(crate::use_cases::level_generator::LEVEL_LEGACY_OFFICES);
         config_zero.tuning.stairs_density = 0.0;
 
-        let mut config_high = GeneratorConfig::high_spec().with_level(1);
+        let mut config_high = GeneratorConfig::high_spec().with_level(crate::use_cases::level_generator::LEVEL_LEGACY_OFFICES);
         config_high.tuning.stairs_density = 3.0;
 
         let mut stairs_zero_count = 0;
@@ -701,7 +706,7 @@ mod tests {
         use crate::frameworks_drivers::simple_noise::SimpleNoiseProvider;
 
         let noise = SimpleNoiseProvider::new();
-        let config = GeneratorConfig::high_spec().with_level(1);
+        let config = GeneratorConfig::high_spec().with_level(crate::use_cases::level_generator::LEVEL_LEGACY_OFFICES);
         let chunk_size = config.chunk_size;
         let mut zones = std::collections::HashSet::new();
 
@@ -775,7 +780,7 @@ mod tests {
         let grid = generator.execute(
             Position::new(1.0, 1.0),
             42,
-            GeneratorConfig::high_spec().with_level(1),
+            GeneratorConfig::high_spec().with_level(crate::use_cases::level_generator::LEVEL_LEGACY_OFFICES),
         );
 
         assert!(
@@ -789,7 +794,7 @@ mod tests {
         let grid_std = generator_std.execute(
             Position::new(1.0, 1.0),
             42,
-            GeneratorConfig::high_spec().with_level(1),
+            GeneratorConfig::high_spec().with_level(crate::use_cases::level_generator::LEVEL_LEGACY_OFFICES),
         );
 
         assert_eq!(
@@ -803,12 +808,12 @@ mod tests {
     fn test_atria_tuning_knob() {
         let n = 0.8; // Edge case
 
-        let mut config_zero = GeneratorConfig::high_spec().with_level(1);
+        let mut config_zero = GeneratorConfig::high_spec().with_level(crate::use_cases::level_generator::LEVEL_LEGACY_OFFICES);
         config_zero.tuning.atria = 0.0;
         let threshold_zero = 0.85 - (config_zero.tuning.atria as f32 * 0.1);
         let is_atrium_zero = n > threshold_zero;
 
-        let mut config_high = GeneratorConfig::high_spec().with_level(1);
+        let mut config_high = GeneratorConfig::high_spec().with_level(crate::use_cases::level_generator::LEVEL_LEGACY_OFFICES);
         config_high.tuning.atria = 3.0;
         let threshold_high = 0.85 - (config_high.tuning.atria as f32 * 0.1);
         let is_atrium_high = n > threshold_high;
@@ -877,7 +882,7 @@ mod tests {
         use crate::frameworks_drivers::simple_noise::SimpleNoiseProvider;
         let noise = SimpleNoiseProvider::new();
         let generator = GenerateChunkArchitectureUseCase::new(&noise);
-        let config = GeneratorConfig::high_spec().with_level(1);
+        let config = GeneratorConfig::high_spec().with_level(crate::use_cases::level_generator::LEVEL_LEGACY_OFFICES);
 
         let mut found_hallway = false;
         let mut found_doorway = false;

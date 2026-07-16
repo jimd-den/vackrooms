@@ -32,6 +32,7 @@ mod column_plan;
 mod compose_column;
 mod fabric;
 mod generate;
+mod provisions;
 #[cfg(test)]
 mod tests;
 mod voxelize;

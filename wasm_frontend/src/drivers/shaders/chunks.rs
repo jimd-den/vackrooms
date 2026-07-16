@@ -80,7 +80,14 @@ vec3 materialColor(float material) {
     if (material < 13.5) return vec3(107.0,  94.0,  34.0) / 255.0;
     if (material < 14.5) return vec3(122.0,  74.0,  38.0) / 255.0;
     if (material < 15.5) return vec3( 46.0,  42.0,  34.0) / 255.0;
-    return vec3(159.0, 196.0, 232.0) / 255.0;
+    if (material < 16.5) return vec3(159.0, 196.0, 232.0) / 255.0;
+    if (material < 17.5) return vec3(143.0, 141.0, 136.0) / 255.0;
+    if (material < 18.5) return vec3(189.0, 187.0, 176.0) / 255.0;
+    if (material < 19.5) return vec3(110.0, 108.0, 102.0) / 255.0;
+    if (material < 20.5) return vec3(156.0, 123.0,  74.0) / 255.0;
+    if (material < 21.5) return vec3( 62.0,  67.0,  72.0) / 255.0;
+    if (material < 22.5) return vec3( 74.0,  90.0, 106.0) / 255.0;
+    return vec3(237.0, 230.0, 208.0) / 255.0;
 }
 "#;
 

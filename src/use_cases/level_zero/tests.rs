@@ -601,21 +601,27 @@ fn tuning_knobs_control_density() {
         n
     };
 
+    // Provisions (bottles, doors) are content, not architecture: zero them
+    // so the knob comparison sees only pillar/wall mass.
+    let no_provisions = LevelTuning {
+        provisions: 0.0,
+        ..Default::default()
+    };
     let none = count_solids(LevelTuning {
         pillars: 0.0,
         walls: 0.0,
-        ..Default::default()
+        ..no_provisions
     });
     let sparse = count_solids(LevelTuning {
         pillars: 0.3,
         walls: 0.3,
-        ..Default::default()
+        ..no_provisions
     });
-    let default = count_solids(LevelTuning::default());
+    let default = count_solids(no_provisions);
     let dense = count_solids(LevelTuning {
         pillars: 2.0,
         walls: 2.0,
-        ..Default::default()
+        ..no_provisions
     });
 
     assert_eq!(none, 0, "pillars=0 walls=0 must produce an empty plane");

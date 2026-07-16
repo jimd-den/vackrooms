@@ -15,6 +15,7 @@ use vackrooms::use_cases::generate_chunk::GeneratorConfig;
 use vackrooms::use_cases::region_plan::{REGION_SIZE, generate_region_plan};
 
 /// Backrooms level ids, mirroring the engine's.
+const LEVEL_HABITABLE: u32 = 1;
 const LEVEL_GRASSLAND: u32 = 34;
 
 pub struct SectionLocator {
@@ -41,6 +42,13 @@ impl SectionLocator {
     pub fn describe(&mut self, level: u32, x: f32, z: f32) -> String {
         if level == LEVEL_GRASSLAND {
             return "LEVEL 34 · THE GRASSLAND".to_string();
+        }
+        if level == LEVEL_HABITABLE {
+            // Level 1's sectors are a pure world-lattice function; no
+            // region plan exists (or is needed) on the Habitable Zone.
+            let sector =
+                vackrooms::use_cases::level_one::Sector::at(self.seed, x, z).name();
+            return format!("LEVEL 1 · HABITABLE ZONE · {sector}");
         }
         let rx = (x / REGION_SIZE).floor() as i64;
         let rz = (z / REGION_SIZE).floor() as i64;

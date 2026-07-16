@@ -113,6 +113,58 @@ impl TraversalGate {
     }
 }
 
+/// A physical doorway between Backrooms levels. Unlike a [`TraversalGate`],
+/// crossing one does not advance encounter state — it swaps which level
+/// generator the application streams from, arriving at `arrival`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LevelExit {
+    pub id: u64,
+    /// The `GeneratorConfig::level` id on the far side of the door.
+    pub target_level: u32,
+    /// Trigger-volume center on the walking plane.
+    pub center: Position,
+    /// Trigger half-extent (square) around `center`.
+    pub half_extent: f32,
+    /// Arrival point in the *target* level's coordinate space.
+    pub arrival: Position,
+}
+
+impl LevelExit {
+    pub const WORDS: usize = 9;
+
+    pub fn contains(&self, x: f32, z: f32) -> bool {
+        (x - self.center.x).abs() <= self.half_extent
+            && (z - self.center.z).abs() <= self.half_extent
+    }
+
+    pub fn to_words(self) -> [u32; Self::WORDS] {
+        [
+            self.id as u32,
+            (self.id >> 32) as u32,
+            self.target_level,
+            self.center.x.to_bits(),
+            self.center.z.to_bits(),
+            self.half_extent.to_bits(),
+            self.arrival.x.to_bits(),
+            self.arrival.z.to_bits(),
+            0, // reserved (orientation, future arrival yaw)
+        ]
+    }
+
+    pub fn from_words(words: &[u32]) -> Option<Self> {
+        if words.len() != Self::WORDS {
+            return None;
+        }
+        Some(Self {
+            id: words[0] as u64 | ((words[1] as u64) << 32),
+            target_level: words[2],
+            center: Position::new(f32::from_bits(words[3]), f32::from_bits(words[4])),
+            half_extent: f32::from_bits(words[5]),
+            arrival: Position::new(f32::from_bits(words[6]), f32::from_bits(words[7])),
+        })
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PitHazard {
     pub id: u64,

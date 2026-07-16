@@ -21,8 +21,12 @@ use crate::use_cases::ports::NoiseProvider;
 
 /// Well-known level ids (the `GeneratorConfig::level` / noclip targets).
 pub const LEVEL_BACKROOMS: u32 = 0;
-pub const LEVEL_LEGACY_OFFICES: u32 = 1;
+/// Level 1, the Habitable Zone: concrete warehouse/parking structure.
+pub const LEVEL_HABITABLE: u32 = 1;
 pub const LEVEL_GRASSLAND: u32 = 34;
+/// The pre-canon office blueprint, kept reachable for tests and archaeology.
+/// It vacated id 1 when the canonical Level 1 landed.
+pub const LEVEL_LEGACY_OFFICES: u32 = 90;
 
 pub trait LevelGenerator {
     /// Fills one chunk. `chunk_pos` is the chunk origin in world units.

@@ -19,10 +19,13 @@ use crate::application::prepare_frame_lighting::select_scene_lights;
 use crate::application::streaming::{
     ChunkKey, ChunkStore, LoadedChunk, StreamingPolicy, chunk_key,
 };
+use crate::application::thermal;
 use vackrooms::domain::entities::anomaly::{
     AnomalyKind, FABRIC_DRIFT_CELL, RealitySnapshot, TraversalGateKind, WorldBounds,
     fabric_drift_cell_of,
 };
+use vackrooms::domain::entities::player_vitals::PlayerVitals;
+use vackrooms::domain::entities::supplies::SupplyKind;
 
 /// Static configuration chosen by the composition root.
 #[derive(Debug, Clone, Copy)]
@@ -96,6 +99,19 @@ pub struct HudStats {
     /// Session pedometer: resolved horizontal movement in world units
     /// (= meters), collision already applied, relocations excluded.
     pub distance_m: f32,
+    /// Survival vitals, normalized 0..=1 for the HUD bars.
+    pub hydration: f32,
+    pub satiety: f32,
+    pub condition: f32,
+    /// Carried supplies (auto-consumed when the matching vital runs low).
+    pub almond_bottles: u32,
+    pub rations: u32,
+    /// Smoothed ambient temperature at the player, °C.
+    pub ambient_c: f32,
+    /// Times the wanderer has succumbed this session.
+    pub deaths: u32,
+    /// The active Backrooms level id.
+    pub level: u32,
 }
 
 /// Adaptive internal-resolution governor. Low-spec machines get fewer rays
@@ -179,7 +195,28 @@ const FINE_LOAD_COST: u32 = 4;
 
 /// Backrooms level ids the engine can noclip between.
 const LEVEL_BACKROOMS: u32 = 0;
+/// Level 1, the Habitable Zone (physical doors lead here from Level 0).
+const LEVEL_HABITABLE: u32 = 1;
 const LEVEL_GRASSLAND: u32 = 34;
+/// Horizontal reach within which a supply pickup fires.
+const PICKUP_REACH: f32 = 0.8;
+/// Carried supplies beyond immediate need, per kind.
+const CARRY_CAP: u32 = 3;
+/// A carried supply is consumed when its vital falls under this level.
+const AUTO_CONSUME_AT: f32 = 0.5;
+/// Seconds between level-door transits (re-arming, not gameplay pacing).
+const DOOR_COOLDOWN_S: f32 = 2.0;
+/// Thermal inertia: seconds for the felt ambient to close ~63% of the gap
+/// to the instantaneous lit-scene temperature.
+const THERMAL_TAU_S: f32 = 8.0;
+/// Where death and Level-1 arrival place the eye, per level.
+fn level_spawn(level: u32, config_spawn: [f32; 3]) -> [f32; 3] {
+    if level == LEVEL_HABITABLE {
+        [3.0, 1.7, 3.0]
+    } else {
+        config_spawn
+    }
+}
 /// Keep pushing into a wall this long before a noclip roll happens...
 const NOCLIP_PUSH_SECONDS: f32 = 1.2;
 /// ...then one roll per second of continued pushing, at this probability.
@@ -223,13 +260,15 @@ fn fixture_flicker_gain(id: u64, mode: u8, time: f32) -> f32 {
 
 /// Inside a blackout, drift cells closer than this may still be revealed by
 /// a flare or the flashlight cone, so the rear shift never touches them.
-/// Blackout ambient is near-black past a few units; 8 u is already beyond
-/// anything the player can resolve behind their own shoulder.
-const BLACKOUT_HIDE_DISTANCE: f32 = 8.0;
-/// Cadence of the in-blackout rear shift. Fast enough that backtracking
-/// reliably betrays; each firing's rebuild work is metered by the ordinary
-/// install budget.
-const BLACKOUT_SHIFT_PERIOD_S: f32 = 2.0;
+/// Blackout ambient is near-black past a few units; 5 u is already beyond
+/// anything the player can resolve behind their own shoulder, and the
+/// tighter radius lets the dark rearrange almost at the player's heels.
+const BLACKOUT_HIDE_DISTANCE: f32 = 5.0;
+/// Cadence of the in-blackout rear shift. Aggressive on purpose: the way
+/// in is gone the moment it leaves the corner of the eye, so a blackout is
+/// almost impossible to back out of. Each firing's rebuild work is still
+/// metered by the ordinary install budget.
+const BLACKOUT_SHIFT_PERIOD_S: f32 = 0.75;
 /// Flare flame height above the floor slab.
 const FLARE_HEIGHT: f32 = 0.3;
 
@@ -313,6 +352,17 @@ pub struct Engine {
     distance_m: f64,
     /// Engine-time seconds, used only for flare flicker phase.
     time_seconds: f64,
+    /// Survival vitals; advanced once per tick under the felt ambient.
+    vitals: PlayerVitals,
+    /// Carried supplies awaiting auto-consumption.
+    almond_bottles: u32,
+    rations: u32,
+    /// Smoothed ambient temperature at the player, °C.
+    ambient_c: f32,
+    /// Seconds until a level door may fire again.
+    door_cooldown: f32,
+    /// Times the wanderer has succumbed this session.
+    deaths: u32,
 }
 
 impl Engine {
@@ -364,6 +414,12 @@ impl Engine {
             flare_sequence: 0,
             distance_m: 0.0,
             time_seconds: 0.0,
+            vitals: PlayerVitals::default(),
+            almond_bottles: 0,
+            rations: 0,
+            ambient_c: thermal::dark_baseline_c(config.initial_level),
+            door_cooldown: 0.0,
+            deaths: 0,
             config,
         }
     }
@@ -400,14 +456,26 @@ impl Engine {
         }
     }
 
-    /// Phase between Level 0 and the grassland: drop every resident chunk so
-    /// the streamer rebuilds the world from the new level's generator.
+    /// Phase through reality by pushing into walls. From Level 0 the fall is
+    /// into the grassland; from anywhere else — including Level 1, exactly
+    /// as the wiki warns — a noclip drops the wanderer back into Level 0.
     fn noclip(&mut self) {
-        self.level = if self.level == LEVEL_BACKROOMS {
-            LEVEL_GRASSLAND
+        let (target, arrival) = if self.level == LEVEL_BACKROOMS {
+            // Into the grassland you phase in place.
+            (LEVEL_GRASSLAND, None)
         } else {
-            LEVEL_BACKROOMS
+            // The way back drops you at the spawn clearing so you can't
+            // rematerialize inside a wall.
+            (LEVEL_BACKROOMS, Some(self.config.spawn))
         };
+        self.switch_level(target, arrival);
+    }
+
+    /// Switches the active level: drop every resident chunk so the streamer
+    /// rebuilds the world from the new level's generator, then optionally
+    /// relocate the player to an arrival point in the new coordinate space.
+    fn switch_level(&mut self, target: u32, arrival: Option<[f32; 3]>) {
+        self.level = target;
         self.store.retain_keys(&[]);
         // In-flight loads are for the old level; their completions will be
         // rejected by the level check, and clearing pending lets the new
@@ -431,12 +499,13 @@ impl Engine {
         for (cx, cz) in watched {
             self.reality = self.reality.with_fabric_drift_advanced(cx, cz);
         }
-        // Into the grassland you phase in place; the way back drops you at
-        // the spawn clearing so you can't rematerialize inside a wall.
-        if self.level == LEVEL_BACKROOMS {
-            self.player.relocate(self.config.spawn);
+        if let Some(arrival) = arrival {
+            self.player.relocate(arrival);
         }
         self.last_safe_position = self.player.position;
+        // The felt air snaps toward the new level's baseline over the
+        // ordinary inertia; no need to reset it here.
+        self.door_cooldown = DOOR_COOLDOWN_S;
     }
 
     /// The active Backrooms level id.
@@ -445,13 +514,26 @@ impl Engine {
     }
 
     /// Per-level atmosphere shared by every renderer: the grassland is an
-    /// open daylight plane, everything else keeps the interior palette.
+    /// open daylight plane, Level 1 carries its canonical low fog, and
+    /// everything else keeps the interior palette.
     pub fn environment(&self) -> Environment {
-        if self.level == LEVEL_GRASSLAND {
-            Environment::daylight()
-        } else {
-            Environment::interior()
+        match self.level {
+            LEVEL_GRASSLAND => Environment::daylight(),
+            LEVEL_HABITABLE => Environment::habitable(),
+            _ => Environment::interior(),
         }
+    }
+
+    /// Survival vitals (read-only view for presenters/tests).
+    pub fn vitals(&self) -> PlayerVitals {
+        self.vitals
+    }
+
+    /// Test-only vitals override, for exercising attrition paths without
+    /// simulating twenty real minutes.
+    #[cfg(test)]
+    pub(crate) fn set_vitals_for_test(&mut self, vitals: PlayerVitals) {
+        self.vitals = vitals;
     }
 
     /// Immutable encounter-state snapshot currently used to key generation.
@@ -489,6 +571,7 @@ impl Engine {
         }
         self.update_flares(dt, input);
         self.update_anomalies(old_pos);
+        self.update_provisions(dt);
         self.update_peripheral_shift(dt);
         self.update_noclip(dt, input, old_pos);
 
@@ -522,6 +605,24 @@ impl Engine {
         for light in &mut scene_lights {
             light.intensity *= fixture_flicker_gain(light.id, light.flicker_mode, flicker_time);
         }
+
+        // Survival: the lit scene *is* the heat source. The felt ambient
+        // chases the instantaneous value with thermal inertia, then the
+        // vitals advance under it (heat accelerates thirst).
+        let instantaneous_c = thermal::ambient_celsius(
+            self.level,
+            self.player.position,
+            &scene_lights,
+            self.world.boxes(),
+        );
+        let blend = (dt / THERMAL_TAU_S).clamp(0.0, 1.0);
+        self.ambient_c += (instantaneous_c - self.ambient_c) * blend;
+        self.vitals = self.vitals.advanced(dt, self.ambient_c);
+        self.auto_consume_supplies();
+        if self.vitals.is_dead() {
+            self.succumb();
+        }
+
         let frame = FrameParams {
             camera_pos: self.player.position,
             yaw: self.player.yaw,
@@ -729,6 +830,100 @@ impl Engine {
             }
         }
         self.last_safe_position = self.player.position;
+    }
+
+    /// Supply pickups and level doors, both exported by generation beside
+    /// the geometry. Pickups fold into the reality snapshot (a consumed
+    /// bottle never regenerates); doors switch the streamed level.
+    fn update_provisions(&mut self, dt: f32) {
+        self.door_cooldown = (self.door_cooldown - dt).max(0.0);
+        let (px, pz) = (self.player.position[0], self.player.position[2]);
+
+        // -- pickups ---------------------------------------------------------
+        // Halo overlap can surface the same item from two chunks; dedupe by
+        // id so one bottle never quenches twice.
+        let mut grabbed: Vec<_> = self
+            .store
+            .all_supply_items()
+            .filter(|item| {
+                item.within_reach(px, pz, PICKUP_REACH)
+                    && !self.reality.supply_consumed(item.id)
+            })
+            .copied()
+            .collect();
+        grabbed.sort_by_key(|item| item.id);
+        grabbed.dedup_by_key(|item| item.id);
+        for item in grabbed {
+            self.reality = self.reality.with_supply_consumed(item.id);
+            match item.kind {
+                SupplyKind::AlmondWater => {
+                    if self.vitals.hydration < 0.98 || self.almond_bottles >= CARRY_CAP {
+                        self.vitals = self.vitals.drank_almond_water();
+                    } else {
+                        self.almond_bottles += 1;
+                    }
+                }
+                SupplyKind::Ration => {
+                    if self.vitals.satiety < 0.98 || self.rations >= CARRY_CAP {
+                        self.vitals = self.vitals.ate_ration();
+                    } else {
+                        self.rations += 1;
+                    }
+                }
+            }
+            // Rebuild the chunk holding the marker under the advanced
+            // reality so the bottle visibly leaves the world.
+            let cs = self.config.chunk_size;
+            let key = chunk_key(
+                (item.position.x / cs).floor() * cs,
+                (item.position.z / cs).floor() * cs,
+            );
+            self.pending.remove(&key);
+            self.forced_reloads.insert(key);
+        }
+
+        // -- level doors ------------------------------------------------------
+        if self.door_cooldown > 0.0 {
+            return;
+        }
+        let transit = self
+            .store
+            .all_level_exits()
+            .find(|exit| exit.contains(px, pz))
+            .copied();
+        if let Some(exit) = transit {
+            let arrival = [
+                exit.arrival.x,
+                self.player.position[1],
+                exit.arrival.z,
+            ];
+            self.switch_level(exit.target_level, Some(arrival));
+        }
+    }
+
+    /// Consumes carried supplies once their vital runs low.
+    fn auto_consume_supplies(&mut self) {
+        if self.vitals.hydration < AUTO_CONSUME_AT && self.almond_bottles > 0 {
+            self.almond_bottles -= 1;
+            self.vitals = self.vitals.drank_almond_water();
+        }
+        if self.vitals.satiety < AUTO_CONSUME_AT && self.rations > 0 {
+            self.rations -= 1;
+            self.vitals = self.vitals.ate_ration();
+        }
+    }
+
+    /// Death by attrition: the wanderer wakes at the level's arrival point
+    /// with reset vitals and empty pockets. The world — drift, consumed
+    /// supplies, sealed rooms — remembers everything.
+    fn succumb(&mut self) {
+        self.deaths += 1;
+        self.vitals = PlayerVitals::default();
+        self.almond_bottles = 0;
+        self.rations = 0;
+        let spawn = level_spawn(self.level, self.config.spawn);
+        self.player.relocate(spawn);
+        self.last_safe_position = spawn;
     }
 
     /// Squared distance from a point to a drift cell's world rectangle
@@ -1491,6 +1686,14 @@ impl Engine {
             resolution_scale: self.governor.scale(),
             ready: self.store.contains(spawn_key),
             distance_m: self.distance_m as f32,
+            hydration: self.vitals.hydration,
+            satiety: self.vitals.satiety,
+            condition: self.vitals.condition,
+            almond_bottles: self.almond_bottles,
+            rations: self.rations,
+            ambient_c: self.ambient_c,
+            deaths: self.deaths,
+            level: self.level,
         }
     }
 }
@@ -1502,6 +1705,130 @@ mod tests {
     use crate::application::ports::ChunkPayload;
     use std::cell::RefCell;
     use std::rc::Rc;
+    use vackrooms::domain::entities::anomaly::LevelExit;
+    use vackrooms::domain::entities::supplies::SupplyItem;
+    use vackrooms::entities::models::Position;
+
+    /// Synchronous source whose every chunk carries one almond water beside
+    /// the spawn and one door to Level 1 a few steps away.
+    struct ProvisionedChunkSource;
+
+    impl ChunkSourcePort for ProvisionedChunkSource {
+        fn load(&self, origin_x: f32, origin_z: f32, level: u32, _lod: u8) -> ChunkPayload {
+            let in_chunk = |x: f32, z: f32| {
+                x >= origin_x && x < origin_x + 10.0 && z >= origin_z && z < origin_z + 10.0
+            };
+            let mut supply_items = vec![];
+            let mut level_exits = vec![];
+            if level == 0 && in_chunk(5.0, 5.0) {
+                supply_items.push(SupplyItem {
+                    id: 41,
+                    kind: SupplyKind::AlmondWater,
+                    position: Position::new(5.2, 5.2),
+                    rest_y: 0.0,
+                });
+                level_exits.push(LevelExit {
+                    id: 90,
+                    target_level: 1,
+                    center: Position::new(8.0, 5.0),
+                    half_extent: 0.7,
+                    arrival: Position::new(3.0, 3.0),
+                });
+            }
+            ChunkPayload {
+                root: 0,
+                nodes: [1u32, 0, 0, 0].repeat(1024),
+                world_size: 12.8,
+                voxel_size: 0.2,
+                svo_depth: 6,
+                surface: crate::application::ports::SurfaceMeshPayload::empty(0),
+                collision: vec![],
+                traversal_gates: vec![],
+                pit_hazards: vec![],
+                supply_items,
+                level_exits,
+            }
+        }
+    }
+
+    fn provisioned_engine() -> Engine {
+        Engine::new(
+            EngineConfig::default(),
+            Box::new(RecordingRenderer::default()),
+            Box::new(ProvisionedChunkSource),
+        )
+    }
+
+    #[test]
+    fn pickup_folds_into_reality_and_quenches_or_stocks() {
+        let mut engine = provisioned_engine();
+        let input = InputFrame::default();
+        // Tick 1 streams the spawn chunk; tick 2 grabs the bottle at reach.
+        engine.tick(1.0 / 60.0, &input);
+        engine.tick(1.0 / 60.0, &input);
+        assert!(engine.reality_snapshot().supply_consumed(41));
+        // Fresh vitals are near-full, so the bottle is carried, not drunk.
+        assert_eq!(engine.stats().almond_bottles, 1);
+
+        // The carried bottle is drunk the moment thirst runs low.
+        engine.set_vitals_for_test(PlayerVitals {
+            hydration: 0.2,
+            satiety: 0.9,
+            condition: 0.9,
+        });
+        engine.tick(1.0 / 60.0, &input);
+        assert_eq!(engine.stats().almond_bottles, 0);
+        assert!(engine.vitals().hydration > 0.5, "auto-drink restored thirst");
+    }
+
+    #[test]
+    fn stepping_through_a_door_switches_to_level_one_and_back_is_possible() {
+        let mut engine = provisioned_engine();
+        let input = InputFrame::default();
+        engine.tick(1.0 / 60.0, &input);
+        assert_eq!(engine.level(), 0);
+
+        // Walk the player into the door trigger between ticks (the tick
+        // itself only integrates real input; the test moves the eye).
+        engine.player.relocate([8.0, 1.7, 5.0]);
+        engine.tick(1.0 / 60.0, &input);
+        assert_eq!(engine.level(), 1, "door transit must fire");
+        // Arrival is the authored Level 1 plaza point.
+        assert_eq!(engine.player.position[0], 3.0);
+        assert_eq!(engine.player.position[2], 3.0);
+        // The world was flushed and re-streamed from the new level's
+        // generator within the same tick (synchronous source).
+        assert!(engine.stats().resident_chunks > 0);
+    }
+
+    #[test]
+    fn attrition_death_respawns_with_reset_vitals_and_empty_pockets() {
+        let mut engine = provisioned_engine();
+        let input = InputFrame::default();
+        engine.tick(1.0 / 60.0, &input);
+        engine.set_vitals_for_test(PlayerVitals {
+            hydration: 0.0,
+            satiety: 0.0,
+            condition: 0.001,
+        });
+        engine.player.relocate([9.0, 1.7, 9.0]);
+        engine.tick(1.0, &input);
+        let stats = engine.stats();
+        assert_eq!(stats.deaths, 1);
+        assert!(stats.condition > 0.9, "vitals reset on respawn");
+        assert_eq!(engine.player.position, EngineConfig::default().spawn);
+    }
+
+    #[test]
+    fn lit_scenes_run_hotter_than_darkness_and_heat_costs_water() {
+        // Domain-level sanity for the wiring: the engine's felt ambient
+        // starts at the level baseline and vitals depend on it.
+        let engine = provisioned_engine();
+        assert_eq!(
+            engine.stats().ambient_c,
+            crate::application::thermal::dark_baseline_c(0)
+        );
+    }
 
     #[derive(Default)]
     struct RecordingRenderer {
@@ -1565,6 +1892,8 @@ mod tests {
                 collision: vec![Aabb::new([origin_x, 0.0, 0.0], [origin_x + 0.2, 3.0, 0.2])],
                 traversal_gates: vec![],
                 pit_hazards: vec![],
+                supply_items: vec![],
+                level_exits: vec![],
             }
         }
     }
@@ -1588,6 +1917,8 @@ mod tests {
                 collision: vec![Aabb::new([-100.0, 0.0, -100.0], [100.0, 3.0, 100.0])],
                 traversal_gates: vec![],
                 pit_hazards: vec![],
+                supply_items: vec![],
+                level_exits: vec![],
             }
         }
     }

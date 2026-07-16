@@ -1,9 +1,11 @@
 use crate::domain::entities::voxel_grid::{
     FACE_OCCLUDED_NEGATIVE_X, FACE_OCCLUDED_NEGATIVE_Y, FACE_OCCLUDED_NEGATIVE_Z,
     FACE_OCCLUDED_POSITIVE_X, FACE_OCCLUDED_POSITIVE_Y, FACE_OCCLUDED_POSITIVE_Z, MATERIAL_COLORS,
-    VOXEL_AIR, VOXEL_CEILING, VOXEL_DAMAGED_WALL, VOXEL_DEEP_CARPET, VOXEL_DRY_CARPET, VOXEL_FLOOR,
-    VOXEL_FLUID, VOXEL_GLIMMER, VOXEL_GRASS, VOXEL_LIGHT, VOXEL_PALE_WALL, VOXEL_RED_LIGHT,
-    VOXEL_RED_WALL, VOXEL_STICKY_CARPET, VOXEL_TREE, VOXEL_WALL, VOXEL_WATER, VoxelGrid,
+    VOXEL_AIR, VOXEL_ALMOND_WATER, VOXEL_CEILING, VOXEL_CONCRETE_FLOOR, VOXEL_CONCRETE_WALL,
+    VOXEL_CRATE, VOXEL_DAMAGED_WALL, VOXEL_DEEP_CARPET, VOXEL_DRY_CARPET, VOXEL_FLOOR, VOXEL_FLUID,
+    VOXEL_GLIMMER, VOXEL_GRASS, VOXEL_LIGHT, VOXEL_METAL_DOOR, VOXEL_PALE_WALL, VOXEL_PIPE,
+    VOXEL_RED_LIGHT, VOXEL_RED_WALL, VOXEL_STICKY_CARPET, VOXEL_TILE_FLOOR, VOXEL_TREE, VOXEL_WALL,
+    VOXEL_WATER, VoxelGrid,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -24,6 +26,13 @@ pub enum VoxelType {
     StickyCarpet,
     Fluid,
     Glimmer,
+    ConcreteWall,
+    TileFloor,
+    ConcreteFloor,
+    Crate,
+    Pipe,
+    MetalDoor,
+    AlmondWater,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -309,6 +318,13 @@ impl VoxelMapper {
             VOXEL_STICKY_CARPET => VoxelType::StickyCarpet,
             VOXEL_FLUID => VoxelType::Fluid,
             VOXEL_GLIMMER => VoxelType::Glimmer,
+            VOXEL_CONCRETE_WALL => VoxelType::ConcreteWall,
+            VOXEL_TILE_FLOOR => VoxelType::TileFloor,
+            VOXEL_CONCRETE_FLOOR => VoxelType::ConcreteFloor,
+            VOXEL_CRATE => VoxelType::Crate,
+            VOXEL_PIPE => VoxelType::Pipe,
+            VOXEL_METAL_DOOR => VoxelType::MetalDoor,
+            VOXEL_ALMOND_WATER => VoxelType::AlmondWater,
             _ => VoxelType::Wall,
         }
     }

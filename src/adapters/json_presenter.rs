@@ -35,6 +35,13 @@ impl JsonPresenter {
                 VoxelType::StickyCarpet => "\"stickycarpet\"",
                 VoxelType::Fluid => "\"fluid\"",
                 VoxelType::Glimmer => "\"glimmer\"",
+                VoxelType::ConcreteWall => "\"concretewall\"",
+                VoxelType::TileFloor => "\"tilefloor\"",
+                VoxelType::ConcreteFloor => "\"concretefloor\"",
+                VoxelType::Crate => "\"crate\"",
+                VoxelType::Pipe => "\"pipe\"",
+                VoxelType::MetalDoor => "\"metaldoor\"",
+                VoxelType::AlmondWater => "\"almondwater\"",
             };
 
             let obj = format!(

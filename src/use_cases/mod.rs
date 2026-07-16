@@ -6,6 +6,7 @@ pub mod generate_chunk;
 pub mod grassland_level;
 pub(crate) mod infinite_level;
 pub mod level_generator;
+pub mod level_one;
 pub mod level_zero;
 pub(crate) mod legacy_blueprint;
 pub mod ports;

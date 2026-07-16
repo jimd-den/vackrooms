@@ -4,9 +4,11 @@
 
 use vackrooms::adapters::voxel_mapper::{FaceDirection, MergedQuad, VoxelMapper, VoxelType};
 use vackrooms::domain::entities::voxel_grid::{
-    VOXEL_CEILING, VOXEL_DAMAGED_WALL, VOXEL_DEEP_CARPET, VOXEL_DRY_CARPET, VOXEL_FLOOR,
-    VOXEL_FLUID, VOXEL_GLIMMER, VOXEL_GRASS, VOXEL_LIGHT, VOXEL_PALE_WALL, VOXEL_RED_LIGHT,
-    VOXEL_RED_WALL, VOXEL_STICKY_CARPET, VOXEL_TREE, VOXEL_WALL, VOXEL_WATER, VoxelGrid,
+    VOXEL_ALMOND_WATER, VOXEL_CEILING, VOXEL_CONCRETE_FLOOR, VOXEL_CONCRETE_WALL, VOXEL_CRATE,
+    VOXEL_DAMAGED_WALL, VOXEL_DEEP_CARPET, VOXEL_DRY_CARPET, VOXEL_FLOOR, VOXEL_FLUID,
+    VOXEL_GLIMMER, VOXEL_GRASS, VOXEL_LIGHT, VOXEL_METAL_DOOR, VOXEL_PALE_WALL, VOXEL_PIPE,
+    VOXEL_RED_LIGHT, VOXEL_RED_WALL, VOXEL_STICKY_CARPET, VOXEL_TILE_FLOOR, VOXEL_TREE, VOXEL_WALL,
+    VOXEL_WATER, VoxelGrid,
 };
 
 use crate::adapters::collect_emissive_lights::collect_emissive_lights;
@@ -177,6 +179,13 @@ pub(crate) fn material_id(v_type: VoxelType) -> u8 {
         VoxelType::StickyCarpet => VOXEL_STICKY_CARPET,
         VoxelType::Fluid => VOXEL_FLUID,
         VoxelType::Glimmer => VOXEL_GLIMMER,
+        VoxelType::ConcreteWall => VOXEL_CONCRETE_WALL,
+        VoxelType::TileFloor => VOXEL_TILE_FLOOR,
+        VoxelType::ConcreteFloor => VOXEL_CONCRETE_FLOOR,
+        VoxelType::Crate => VOXEL_CRATE,
+        VoxelType::Pipe => VOXEL_PIPE,
+        VoxelType::MetalDoor => VOXEL_METAL_DOOR,
+        VoxelType::AlmondWater => VOXEL_ALMOND_WATER,
     }
 }
 
