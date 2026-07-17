@@ -100,8 +100,11 @@ pub struct FabricDriftStamp {
     pub epoch: u32,
 }
 
-/// Highest delirium tier. Tiers derive from hydration bands: a parched
-/// wanderer perceives (and therefore *gets*) a more anomalous Backrooms.
+/// Highest delirium tier. Tiers derive from resource mismanagement in
+/// either direction — hydration bands (want) and the engine's excess meter
+/// of wasted supplies (waste): a parched or glutted wanderer perceives (and
+/// therefore *gets*) a more anomalous Backrooms — sealed doorways, shut
+/// corridor mouths, thinner provisions, secret slips.
 pub const MAX_DELIRIUM: u8 = 3;
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -112,9 +115,10 @@ pub struct RealitySnapshot {
     /// Supply items the wanderer has consumed, canonical-sorted by id.
     /// Generation omits a consumed item and its marker deterministically.
     consumed_supplies: Vec<u64>,
-    /// Dehydration-driven perception tier (0 provisioned .. 3 parched).
-    /// Part of request identity: chunks generated while delirious carry
-    /// more anomalous infill and more deceptive glimmers.
+    /// Mismanagement-driven perception tier (0 provisioned .. 3 ruined,
+    /// from deep thirst or from squandered supplies). Part of request
+    /// identity: chunks generated while delirious carry more anomalous
+    /// infill, more deceptive glimmers, sealed doorways, and less mercy.
     delirium: u8,
 }
 

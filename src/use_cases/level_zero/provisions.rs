@@ -127,7 +127,12 @@ pub(crate) fn stamp_level_zero_provisions(
             // e.g. rations=0 yields a pure-water world at water's density.
             let water_weight = (1.0 - RATION_SHARE) * water;
             let food_weight = RATION_SHARE * food;
-            let cell_chance = ALMOND_CHANCE * (water_weight + food_weight);
+            // A mismanaged wanderer finds a stingier level: each strain tier
+            // withholds a share of the supply cells (same hash, lower
+            // threshold, so rising strain removes bottles rather than
+            // shuffling them). Tier 0 is the unstrained field.
+            let strain_keep = 1.0 - 0.15 * ctx.reality.delirium() as f32;
+            let cell_chance = ALMOND_CHANCE * (water_weight + food_weight) * strain_keep;
             if unit(roll) > cell_chance {
                 continue;
             }

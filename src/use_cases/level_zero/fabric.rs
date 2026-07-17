@@ -132,15 +132,20 @@ impl BackroomsLevel {
     ///
     /// This is where the wiki's Peripheral Shift lives: `reality` carries a
     /// drift epoch per 40 u cell, advanced by the engine whenever territory
-    /// goes unobserved. The epoch re-salts only the *cosmetic and porosity*
+    /// goes unobserved. The epoch re-salts the *cosmetic and porosity*
     /// decisions — wall dropout, doorway direction/position/width framing,
     /// dead lights — while the ceiling territories, porosity climate,
     /// junction posts, and expanse structure stay fixed, so a returning
     /// wanderer recognizes the neighborhood but never the hallways. Every
     /// decision reads its epoch at the deciding lattice cell's own anchor,
     /// so a wall is rebuilt whole even when a drift-cell boundary crosses it,
-    /// and the binary-tree doorway rule holds per cell at any epoch mix —
-    /// the labyrinth stays globally connected through every rearrangement.
+    /// and at strain tier 0 the binary-tree doorway rule holds per cell at
+    /// any epoch mix — a provisioned wanderer's labyrinth stays globally
+    /// connected through every rearrangement. Under strain (`delirium` > 0,
+    /// the price of mismanaged provisions) the guarantee erodes on purpose:
+    /// guaranteed doorways brick over into dead-end pockets, second
+    /// doorways thin, and at deep strain rare 0.8 u slips hide in walls
+    /// that offer no doorway at all.
     pub(crate) fn column_plan_in_reality(
         noise: &dyn NoiseProvider,
         seed: u32,
@@ -206,6 +211,12 @@ impl BackroomsLevel {
                     (cz as f32 + 0.5) * FABRIC_CELL,
                 );
                 let drift = |salt: u32| salt ^ epoch.wrapping_mul(0x9E37_79B9);
+                // Strain is the price of poor provisioning: the delirium
+                // tier folds into a decision's salt only when it is nonzero,
+                // so a well-managed wanderer's world is byte-identical to
+                // the tierless one.
+                let tier = reality.delirium() as u32;
+                let strain = |salt: u32| drift(salt) ^ tier.wrapping_mul(0x85EB_CA6B);
                 // 0 = tight labyrinth, 1 = broken-open suites; drifts over
                 // ~180 u so density changes read as neighborhoods, not zones.
                 // The porosity climate is character, not layout: it survives
@@ -219,6 +230,15 @@ impl BackroomsLevel {
                 } else {
                     (drift(0x9400u32), drift(0x9600u32), !opens_west)
                 };
+                // Under strain the binary-tree guarantee itself erodes: a
+                // cell's guaranteed doorway can be found bricked over, and
+                // the warren grows dead-end pockets in proportion to how
+                // badly the wanderer has managed their provisions. Tier 0
+                // never seals, so a provisioned world stays fully connected.
+                let sealed = tier > 0
+                    && Self::cell_hash(noise, seed, strain(0x9800), cx, cz)
+                        < 0.10 * tier as f32;
+                let opens_here = opens_here && !sealed;
                 // Whole-wall dropout merges rooms into larger wrong shapes.
                 // Porosity varies along a run, so drops end ragged rather
                 // than on clean cell boundaries. The walls knob scales
@@ -239,10 +259,13 @@ impl BackroomsLevel {
                     (0.92 - 0.42 * porosity + shift_bias) * tuning.walls.clamp(0.0, 1.5);
                 if Self::cell_hash(noise, seed, wall_salt, cx, cz) < survive {
                     let along = if in_w { fz } else { fx };
-                    // The binary-tree wall always gets its doorway; porous
-                    // neighborhoods often cut a second one.
+                    // The binary-tree wall usually gets its doorway; porous
+                    // neighborhoods often cut a second one. Strain thins the
+                    // second doorways by lowering the same threshold, so
+                    // rising tiers close alternative routes rather than
+                    // re-dealing them.
                     let extra = Self::cell_hash(noise, seed, door_salt ^ 0x1F, cx, cz)
-                        < 0.18 + 0.42 * porosity;
+                        < (0.18 + 0.42 * porosity) * (1.0 - 0.22 * tier as f32);
                     if opens_here || extra {
                         let dh = Self::cell_hash(noise, seed, door_salt, cx, cz);
                         let width = DOOR_WIDTH + 0.2 + 2.2 * porosity;
@@ -255,6 +278,24 @@ impl BackroomsLevel {
                             {
                                 lintel_from_units = Some(DOOR_HEIGHT);
                             }
+                        } else {
+                            solid = true;
+                        }
+                    } else if tier >= 2
+                        && Self::cell_hash(noise, seed, strain(0x9900), cx, cz)
+                            < 0.06 * (tier - 1) as f32
+                    {
+                        // A deep-strain wall occasionally hides a slip: a
+                        // 0.8 u lintel-framed slot barely wider than a
+                        // wanderer, in a wall that offers no doorway at all.
+                        // The punished labyrinth grows secrets alongside its
+                        // dead ends — but only for those desperate enough to
+                        // brush every wall.
+                        let sh = Self::cell_hash(noise, seed, strain(0x9A00), cx, cz);
+                        let width = 0.8;
+                        let pos = t + (FABRIC_CELL - 2.0 * t - width) * sh;
+                        if along >= pos && along < pos + width {
+                            lintel_from_units = Some(DOOR_HEIGHT);
                         } else {
                             solid = true;
                         }

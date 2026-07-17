@@ -22,11 +22,12 @@ const CONDITION_SECONDS: f32 = 90.0;
 const CONDITION_RECOVERY_SECONDS: f32 = 120.0;
 
 /// One almond water restores this much hydration (canon: the safest liquid
-/// in the Backrooms) and calms a fraction of lost condition.
-const ALMOND_WATER_HYDRATION: f32 = 0.65;
+/// in the Backrooms) and calms a fraction of lost condition. Public so the
+/// application can price the *waste* of drinking past a full reserve.
+pub const ALMOND_WATER_HYDRATION: f32 = 0.65;
 const ALMOND_WATER_CONDITION: f32 = 0.15;
-/// One ration restores this much satiety.
-const RATION_SATIETY: f32 = 0.55;
+/// One ration restores this much satiety. Public for the same waste math.
+pub const RATION_SATIETY: f32 = 0.55;
 
 /// Normalized survival state. `1.0` is fully provisioned; `0.0` is empty.
 #[derive(Debug, Clone, Copy, PartialEq)]

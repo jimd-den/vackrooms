@@ -2,6 +2,7 @@
 //! quantized runs, and corridor edge walls persist or dissolve into rooms
 //! and fabric on a rhythm that never reads as a doorway grid.
 
+use crate::domain::entities::anomaly::RealitySnapshot;
 use crate::domain::entities::architecture::{CirculationSpine, SpaceProgram};
 use crate::use_cases::ports::NoiseProvider;
 use crate::use_cases::region_plan::spawn_point;
@@ -49,10 +50,19 @@ impl BackroomsLevel {
     /// Main-route openings take 8--10 u from a 32 u macro span: around a
     /// quarter to a third of an eligible edge is directly open, while the
     /// remaining wall runs stay long enough to avoid a doorway cadence.
+    ///
+    /// The openings are the fabric's mouths onto circulation, so the
+    /// Peripheral Shift re-deals them: the drift epoch (read at the wall
+    /// column's own 40 u cell) re-salts each section's width and phase, and
+    /// the strain tier narrows them — at deep strain whole sections seal.
+    /// The corridor interior itself never closes: a shut mouth costs the
+    /// route you knew, never the spine.
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn corridor_edge_opens(
         spine: &CirculationSpine,
         noise: &dyn NoiseProvider,
         seed: u32,
+        reality: &RealitySnapshot,
         along: f32,
         is_horizontal: bool,
         wx: f32,
@@ -75,13 +85,26 @@ impl BackroomsLevel {
         let section = (along / span).floor() as i64;
         let perpendicular = if is_horizontal { wz } else { wx };
         let side = (perpendicular / spine.width.max(1.0)).floor() as i64;
-        let salt = 0xCB00_u32.wrapping_add(spine.id);
+        let epoch = reality.fabric_drift_epoch(wx, wz);
+        let tier = reality.delirium() as u32;
+        let salt = (0xCB00_u32.wrapping_add(spine.id)) ^ epoch.wrapping_mul(0x9E37_79B9);
+        // Deep strain seals whole sections: the opening the wanderer relied
+        // on is simply wall now. The threshold shrinks the same hash's
+        // acceptance, so rising tiers close mouths instead of moving them.
+        if tier >= 2
+            && Self::cell_hash(noise, seed, salt ^ 0x2B, section, side)
+                < 0.22 * (tier - 1) as f32
+        {
+            return false;
+        }
         let width_hash = Self::cell_hash(noise, seed, salt, section, side);
         let phase_hash = Self::cell_hash(noise, seed, salt ^ 0x19, section, side);
-        let (width, start) = match spine.spine_kind {
+        let (mut width, start) = match spine.spine_kind {
             SpaceProgram::MainCorridor => (8.0 + 2.0 * width_hash, 6.0 + 10.0 * phase_hash),
             _ => (4.0 + 1.6 * width_hash, 10.0 + 8.0 * phase_hash),
         };
+        // Strain narrows every mouth that survives.
+        width *= 1.0 - 0.15 * tier as f32;
         let offset = along.rem_euclid(span);
         offset >= start && offset < start + width
     }

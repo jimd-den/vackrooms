@@ -4,7 +4,7 @@
 
 use crate::domain::entities::anomaly::{AnomalyKind, RealitySnapshot};
 use crate::domain::entities::architecture::{
-    RegionPlan, SpaceProgram, StructuralSystemInstance,
+    CirculationSpine, RegionPlan, SpaceProgram, StructuralSystemInstance,
 };
 use crate::use_cases::anomalies::geometry::sample_anomaly;
 use crate::use_cases::generate_chunk::GeneratorConfig;
@@ -56,7 +56,10 @@ impl BackroomsLevel {
         let mut corridor_ceiling = 0.0f32;
         let mut corridor_light = false;
         let mut corridor_wall = false;
-        let mut corridor_gap = false;
+        // Edge-gap decisions are deferred: they read the Peripheral Shift,
+        // and whether this column's fabric is frozen (spawn radius, arch
+        // anchors) is only known further down.
+        let mut gap_probes: Vec<(&CirculationSpine, f32, bool)> = Vec::new();
         for s in &plan.corridors {
             let (d, along, is_horizontal) = s.nearest(wx, wz);
             let half = s.width * 0.5;
@@ -72,9 +75,7 @@ impl BackroomsLevel {
                 corridor_wall = true;
                 corridor_ceiling =
                     corridor_ceiling.max(Self::corridor_ceiling(s, noise, seed, wx, wz));
-                if Self::corridor_edge_opens(s, noise, seed, along, is_horizontal, wx, wz) {
-                    corridor_gap = true;
-                }
+                gap_probes.push((s, along, is_horizontal));
             }
         }
         if in_corridor {
@@ -195,14 +196,6 @@ impl BackroomsLevel {
             }
         }
 
-        // -- corridor edge walls through fabric -------------------------------
-        if corridor_wall && tuning.walls > 0.0 && !corridor_gap {
-            return ColumnPlan {
-                solid: true,
-                ..ColumnPlan::open(corridor_ceiling.max(3.2))
-            };
-        }
-
         // -- the endless unplanned office fabric -------------------------------
         // Ordinary fabric is the Peripheral Shift's territory — with two
         // sanctuaries. Arch-anchor surroundings are immune by construction
@@ -218,6 +211,30 @@ impl BackroomsLevel {
         } else {
             reality
         };
+
+        // -- corridor edge walls through fabric -------------------------------
+        // The mouths onto circulation drift and seal with the same reality
+        // as the fabric they open into (frozen in the sanctuaries above).
+        if corridor_wall && tuning.walls > 0.0 {
+            let corridor_gap = gap_probes.iter().any(|&(s, along, is_horizontal)| {
+                Self::corridor_edge_opens(
+                    s,
+                    noise,
+                    seed,
+                    fabric_reality,
+                    along,
+                    is_horizontal,
+                    wx,
+                    wz,
+                )
+            });
+            if !corridor_gap {
+                return ColumnPlan {
+                    solid: true,
+                    ..ColumnPlan::open(corridor_ceiling.max(3.2))
+                };
+            }
+        }
         Self::column_plan_in_reality(noise, seed, tuning, fabric_reality, wx, wz)
     }
 }

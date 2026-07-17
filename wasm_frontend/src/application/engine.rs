@@ -24,7 +24,9 @@ use vackrooms::domain::entities::anomaly::{
     AnomalyKind, FABRIC_DRIFT_CELL, RealitySnapshot, TraversalGateKind, WorldBounds,
     fabric_drift_cell_of,
 };
-use vackrooms::domain::entities::player_vitals::PlayerVitals;
+use vackrooms::domain::entities::player_vitals::{
+    ALMOND_WATER_HYDRATION, PlayerVitals, RATION_SATIETY,
+};
 use vackrooms::domain::entities::supplies::SupplyKind;
 
 /// Static configuration chosen by the composition root.
@@ -204,6 +206,12 @@ const PICKUP_REACH: f32 = 0.8;
 const CARRY_CAP: u32 = 3;
 /// A carried supply is consumed when its vital falls under this level.
 const AUTO_CONSUME_AT: f32 = 0.5;
+/// How much of one wasted supply point (restoration past a full reserve)
+/// lands on the excess meter. Draining a bottle at full hydration books
+/// ~0.5 excess: two greedy pickups put the wanderer deep into strain.
+const EXCESS_PER_WASTE: f32 = 0.8;
+/// The excess meter drains to zero over five frugal minutes.
+const EXCESS_DECAY_PER_S: f32 = 1.0 / 300.0;
 /// Seconds between level-door transits (re-arming, not gameplay pacing).
 const DOOR_COOLDOWN_S: f32 = 2.0;
 /// Thermal inertia: seconds for the felt ambient to close ~63% of the gap
@@ -354,6 +362,12 @@ pub struct Engine {
     time_seconds: f64,
     /// Survival vitals; advanced once per tick under the felt ambient.
     vitals: PlayerVitals,
+    /// Overconsumption pressure, 0 frugal .. 1 glutted. Accumulates from
+    /// wasted supply value (drinking or eating past a full vital) and decays
+    /// slowly. Together with dehydration it forms the mismanagement strain
+    /// that drives the reality's delirium tier and the shift's aggression:
+    /// the level punishes waste exactly as it punishes want.
+    excess: f32,
     /// Carried supplies awaiting auto-consumption.
     almond_bottles: u32,
     rations: u32,
@@ -415,6 +429,7 @@ impl Engine {
             distance_m: 0.0,
             time_seconds: 0.0,
             vitals: PlayerVitals::default(),
+            excess: 0.0,
             almond_bottles: 0,
             rations: 0,
             ambient_c: thermal::dark_baseline_c(config.initial_level),
@@ -622,16 +637,27 @@ impl Engine {
         if self.vitals.is_dead() {
             self.succumb();
         }
-        // Delirium: dehydration bands raise the reality tier, and chunks
-        // generated from here on carry more anomalous infill and more
-        // deceptive glimmers. Resident chunks are untouched — the world
-        // worsens as it streams, never as a visible pop.
-        let tier = match self.vitals.hydration {
+        // Strain: mismanagement in either direction raises the reality's
+        // delirium tier, and chunks generated from here on carry more
+        // anomalous infill, sealed doorways, shut corridor mouths, and
+        // thinner provisions. Resident chunks are untouched — the world
+        // worsens as it streams, never as a visible pop. Dehydration bands
+        // punish the underconsumer; the excess meter (wasted supplies)
+        // punishes the overconsumer with the very same tiers.
+        self.excess = (self.excess - dt * EXCESS_DECAY_PER_S).max(0.0);
+        let thirst_tier = match self.vitals.hydration {
             h if h > 0.6 => 0,
             h if h > 0.35 => 1,
             h if h > 0.15 => 2,
             _ => 3,
         };
+        let excess_tier = match self.excess {
+            e if e < 0.25 => 0,
+            e if e < 0.5 => 1,
+            e if e < 0.75 => 2,
+            _ => 3,
+        };
+        let tier = thirst_tier.max(excess_tier);
         if tier != self.reality.delirium() {
             self.reality = self.reality.with_delirium(tier);
         }
@@ -872,6 +898,7 @@ impl Engine {
             match item.kind {
                 SupplyKind::AlmondWater => {
                     if self.vitals.hydration < 0.98 || self.almond_bottles >= CARRY_CAP {
+                        self.register_waste(self.vitals.hydration, ALMOND_WATER_HYDRATION);
                         self.vitals = self.vitals.drank_almond_water();
                     } else {
                         self.almond_bottles += 1;
@@ -879,6 +906,7 @@ impl Engine {
                 }
                 SupplyKind::Ration => {
                     if self.vitals.satiety < 0.98 || self.rations >= CARRY_CAP {
+                        self.register_waste(self.vitals.satiety, RATION_SATIETY);
                         self.vitals = self.vitals.ate_ration();
                     } else {
                         self.rations += 1;
@@ -949,16 +977,27 @@ impl Engine {
         near.into_iter().map(|(_, sprite)| sprite).collect()
     }
 
-    /// Consumes carried supplies once their vital runs low.
+    /// Consumes carried supplies once their vital runs low. Even here a
+    /// little restoration overshoots the full mark, and the overshoot is
+    /// booked as waste — a small, honest cost next to the gluttony of
+    /// drinking at a full reserve.
     fn auto_consume_supplies(&mut self) {
         if self.vitals.hydration < AUTO_CONSUME_AT && self.almond_bottles > 0 {
             self.almond_bottles -= 1;
+            self.register_waste(self.vitals.hydration, ALMOND_WATER_HYDRATION);
             self.vitals = self.vitals.drank_almond_water();
         }
         if self.vitals.satiety < AUTO_CONSUME_AT && self.rations > 0 {
             self.rations -= 1;
+            self.register_waste(self.vitals.satiety, RATION_SATIETY);
             self.vitals = self.vitals.ate_ration();
         }
+    }
+
+    /// Books the unused share of a consumed supply onto the excess meter.
+    fn register_waste(&mut self, reserve_before: f32, restores: f32) {
+        let waste = (reserve_before + restores - 1.0).max(0.0);
+        self.excess = (self.excess + waste * EXCESS_PER_WASTE).clamp(0.0, 1.0);
     }
 
     /// Death by attrition: the wanderer wakes at the level's arrival point
@@ -991,16 +1030,21 @@ impl Engine {
         (self.visual_policy.radius as f32 + 1.0) * self.config.chunk_size
     }
 
-    /// Dehydration, 0 provisioned .. 1 parched. Thirst is the world's
-    /// aggression dial: more thirst, more shift, more anomaly.
+    /// Dehydration, 0 provisioned .. 1 parched.
     fn dehydration(&self) -> f32 {
         (1.0 - self.vitals.hydration).clamp(0.0, 1.0)
     }
 
+    /// Mismanagement, 0 careful .. 1 ruinous — the world's aggression dial:
+    /// more thirst *or* more waste, more shift, more anomaly.
+    fn mismanagement(&self) -> f32 {
+        self.dehydration().max(self.excess)
+    }
+
     fn drift_far_radius(&self) -> f32 {
-        // A parched wanderer loses the hysteresis: the fabric rearranges
+        // A mismanaging wanderer loses the hysteresis: the fabric rearranges
         // almost the moment it leaves the streaming footprint.
-        self.drift_near_radius() + 2.0 * FABRIC_DRIFT_CELL * (1.0 - 0.85 * self.dehydration())
+        self.drift_near_radius() + 2.0 * FABRIC_DRIFT_CELL * (1.0 - 0.85 * self.mismanagement())
     }
 
     /// The Peripheral Shift: "whenever not directly observed, the layout can
@@ -1096,9 +1140,10 @@ impl Engine {
             return;
         }
         self.blackout_shift_debug.2 += shifted.len();
-        // Thirst accelerates the stalking dark: at full dehydration the
+        // Mismanagement accelerates the stalking dark: at full strain the
         // rear shift fires three times as often.
-        self.blackout_shift_cooldown = BLACKOUT_SHIFT_PERIOD_S / (1.0 + 2.0 * self.dehydration());
+        self.blackout_shift_cooldown =
+            BLACKOUT_SHIFT_PERIOD_S / (1.0 + 2.0 * self.mismanagement());
         for &(cx, cz) in &shifted {
             self.reality = self.reality.with_fabric_drift_advanced(cx, cz);
         }
@@ -2430,6 +2475,40 @@ mod tests {
             engine.tick(1.0 / 60.0, &input);
         }
         assert_eq!(engine.collision_world().len(), 9);
+    }
+
+    /// Overconsumption is mismanagement too: wasted supply value (drinking
+    /// past a full reserve) raises the same delirium tier that thirst does,
+    /// and frugal minutes let the level calm back down.
+    #[test]
+    fn wasted_supplies_raise_strain_and_frugality_calms_it() {
+        let mut engine = Engine::new(
+            EngineConfig::default(),
+            Box::new(RecordingRenderer::default()),
+            Box::new(FlatChunkSource),
+        );
+        let input = InputFrame::default();
+        engine.tick(1.0 / 60.0, &input);
+        assert_eq!(engine.reality.delirium(), 0, "a fresh wanderer is calm");
+
+        // Two bottles drained at a full reserve are pure waste.
+        engine.register_waste(1.0, 0.65);
+        engine.register_waste(1.0, 0.65);
+        engine.tick(1.0 / 60.0, &input);
+        assert_eq!(
+            engine.reality.delirium(),
+            3,
+            "gluttony must strain reality like deep thirst does"
+        );
+
+        // Frugal minutes drain the excess (tick clamps dt to 0.1 s, so this
+        // is four simulated minutes). Vitals are pinned full so the decay is
+        // measured without thirst re-raising the tier.
+        for _ in 0..2400 {
+            engine.set_vitals_for_test(PlayerVitals::default());
+            engine.tick(0.1, &input);
+        }
+        assert_eq!(engine.reality.delirium(), 0, "excess strain must decay");
     }
 
     /// Tier 1 of the Peripheral Shift: walking far from a neighborhood

@@ -1590,6 +1590,229 @@ fn fabric_stays_connected_through_mixed_drift_epochs() {
     assert!(cells_checked > 1000, "sample too small: {cells_checked}");
 }
 
+/// Strain is the price of mismanaged provisions: at delirium tier 3 the
+/// binary-tree doorway guarantee itself erodes, and a meaningful share of
+/// warren cells seal both their west and north walls into dead-end
+/// pockets. A provisioned wanderer (tier 0) keeps the full guarantee.
+#[test]
+fn deep_strain_seals_doorways_into_dead_end_pockets() {
+    let noise = SimpleNoiseProvider::new();
+    let tuning = LevelTuning::default();
+    let sealed_cells = |reality: &RealitySnapshot| {
+        let mut sealed = 0usize;
+        for cell_x in -20i64..20 {
+            for cell_z in -20i64..20 {
+                let x0 = cell_x as f32 * FABRIC_CELL;
+                let z0 = cell_z as f32 * FABRIC_CELL;
+                let mut open = false;
+                let mut a = PLAN_WALL_T + 0.1;
+                while a < FABRIC_CELL - PLAN_WALL_T {
+                    for (wx, wz) in [(x0 + 0.2, z0 + a), (x0 + a, z0 + 0.2)] {
+                        if !BackroomsLevel::column_plan_in_reality(
+                            &noise, 42, &tuning, reality, wx, wz,
+                        )
+                        .solid
+                        {
+                            open = true;
+                        }
+                    }
+                    a += 0.2;
+                }
+                sealed += usize::from(!open);
+            }
+        }
+        sealed
+    };
+    assert_eq!(
+        sealed_cells(&RealitySnapshot::empty()),
+        0,
+        "an unstrained fabric must keep the binary-tree guarantee"
+    );
+    let strained = sealed_cells(&RealitySnapshot::empty().with_delirium(3));
+    assert!(
+        strained >= 40,
+        "deep strain grew too few dead-end pockets: {strained}"
+    );
+    let mild = sealed_cells(&RealitySnapshot::empty().with_delirium(1));
+    assert!(
+        mild < strained,
+        "strain must escalate: tier 1 sealed {mild}, tier 3 sealed {strained}"
+    );
+}
+
+/// Deep strain hides slips: sub-door-width slots in walls that offer no
+/// doorway at all. Doors are never narrower than 1.4 u, so any open span
+/// under ~1.1 u in a surviving wall is a slip — and none may exist while
+/// the wanderer is provisioned.
+#[test]
+fn deep_strain_hides_narrow_slips_in_solid_walls() {
+    let noise = SimpleNoiseProvider::new();
+    let tuning = LevelTuning::default();
+    let slip_spans = |reality: &RealitySnapshot| {
+        let mut slips = 0usize;
+        for cell_x in -20i64..20 {
+            for cell_z in -20i64..20 {
+                // Walk this cell's west wall band and measure contiguous
+                // open runs between the junction posts.
+                let wx = cell_x as f32 * FABRIC_CELL + 0.2;
+                let z0 = cell_z as f32 * FABRIC_CELL;
+                let mut run = 0usize;
+                let mut step = 0usize;
+                while step <= (FABRIC_CELL * 10.0) as usize {
+                    let wz = z0 + step as f32 * 0.1;
+                    let solid = BackroomsLevel::column_plan_in_reality(
+                        &noise, 42, &tuning, reality, wx, wz,
+                    )
+                    .solid;
+                    if !solid {
+                        run += 1;
+                    } else {
+                        if (3..=11).contains(&run) {
+                            slips += 1;
+                        }
+                        run = 0;
+                    }
+                    step += 1;
+                }
+            }
+        }
+        slips
+    };
+    // A handful of sub-door spans occur naturally where the expanse
+    // boundary clips the tail of a wall run; the strained fabric must grow
+    // far more of them — the deliberate slips.
+    let calm = slip_spans(&RealitySnapshot::empty());
+    let strained = slip_spans(&RealitySnapshot::empty().with_delirium(3));
+    assert!(
+        strained >= calm + 20,
+        "deep strain hid too few secret slips: {strained} vs a calm {calm}"
+    );
+}
+
+/// The corridor's mouths onto the fabric are Peripheral Shift territory:
+/// the drift epoch re-deals their width and phase, and deep strain narrows
+/// the survivors and seals whole sections — while the spawn opening
+/// sequence keeps its walls in every reality.
+#[test]
+fn corridor_mouths_drift_with_epochs_and_seal_under_strain() {
+    use crate::domain::entities::architecture::CirculationSpine;
+    use crate::use_cases::region_plan::spawn_point;
+
+    let noise = SimpleNoiseProvider::new();
+    let spine = CirculationSpine {
+        id: 7,
+        spine_kind: SpaceProgram::MainCorridor,
+        path: vec![Position::new(-640.0, 2000.0), Position::new(640.0, 2000.0)],
+        width: 5.6,
+    };
+    let wz = 2002.0;
+    let calm = RealitySnapshot::empty();
+    let parched = calm.with_delirium(3);
+    let mut shifted = RealitySnapshot::empty();
+    for cx in -17..=17 {
+        shifted = shifted.with_fabric_drift_advanced(cx, (wz / 40.0) as i64);
+    }
+
+    let mouth_open = |reality: &RealitySnapshot, wx: f32| {
+        BackroomsLevel::corridor_edge_opens(&spine, &noise, 42, reality, wx, true, wx, wz)
+    };
+    let (mut calm_open, mut parched_open, mut moved) = (0usize, 0usize, 0usize);
+    let mut samples = 0usize;
+    let mut wx = -640.0f32;
+    while wx < 640.0 {
+        let open_now = mouth_open(&calm, wx);
+        calm_open += usize::from(open_now);
+        parched_open += usize::from(mouth_open(&parched, wx));
+        moved += usize::from(open_now != mouth_open(&shifted, wx));
+        samples += 1;
+        wx += 0.4;
+    }
+    assert!(samples > 3000 && calm_open > 300, "sample too small");
+    assert!(
+        moved > 0,
+        "a drift epoch must re-deal at least one corridor mouth"
+    );
+    assert!(
+        parched_open * 10 < calm_open * 9,
+        "deep strain barely closed the mouths: {parched_open}/{calm_open}"
+    );
+
+    // The spawn opening sequence stays sacred through drift and strain.
+    let sp = spawn_point(42);
+    let home = CirculationSpine {
+        id: 7,
+        spine_kind: SpaceProgram::MainCorridor,
+        path: vec![
+            Position::new(sp.x - 100.0, sp.z),
+            Position::new(sp.x + 100.0, sp.z),
+        ],
+        width: 5.6,
+    };
+    for reality in [&calm, &parched, &shifted] {
+        assert!(
+            !BackroomsLevel::corridor_edge_opens(
+                &home, &noise, 42, reality, sp.x, true, sp.x, sp.z
+            ),
+            "spawn-readable corridor walls must hold in every reality"
+        );
+    }
+}
+
+/// A strained reality is stingier: each tier lowers the supply-cell
+/// acceptance threshold under the *same* hash, so deep strain withholds
+/// bottles the calm world offered instead of shuffling them elsewhere.
+#[test]
+fn deep_strain_withholds_supply_cells_the_calm_world_offered() {
+    use crate::use_cases::anomalies::determinism::{hash, unit};
+
+    let noise = SimpleNoiseProvider::new();
+    let config = GeneratorConfig::low_spec();
+    let calm = RealitySnapshot::empty();
+    let parched = calm.with_delirium(3);
+    // Default tuning: cell chance is 0.72 calm and 0.72 * 0.55 strained, so
+    // a cell whose roll lands between them is offered only to the calm
+    // world. Hunt one whose candidate spot actually stamps (open floor).
+    let mut verified = false;
+    'cells: for cz in 5i64..60 {
+        for cx in 5i64..60 {
+            let roll = hash(42, 0x0A1A_09D0_57A7_0000, cx, cz);
+            if !(0.45..0.65).contains(&unit(roll)) {
+                continue;
+            }
+            let probe = hash(42, 0x0A1A_09D0_0000_0000, cx, cz);
+            let px = (cx as f32 + 0.06 + 0.88 * unit(probe)) * 40.0;
+            let pz = (cz as f32 + 0.06 + 0.88 * unit(probe.rotate_left(23))) * 40.0;
+            let chunk = Position::new(
+                (px / config.chunk_size).floor() * config.chunk_size,
+                (pz / config.chunk_size).floor() * config.chunk_size,
+            );
+            let id = roll | 1;
+            let offered = BackroomsLevel
+                .generate_with_reality(chunk, 42, config, &noise, &calm)
+                .supply_items
+                .iter()
+                .any(|item| item.id == id);
+            if !offered {
+                // The spot rolled onto solid or anomalous ground; keep
+                // hunting — the assertion needs a supply that really exists.
+                continue;
+            }
+            let strained = BackroomsLevel
+                .generate_with_reality(chunk, 42, config, &noise, &parched)
+                .supply_items
+                .iter()
+                .any(|item| item.id == id);
+            assert!(
+                !strained,
+                "cell ({cx},{cz}) must be withheld from a strained reality"
+            );
+            verified = true;
+            break 'cells;
+        }
+    }
+    assert!(verified, "no in-band supply cell stamped; widen the hunt");
+}
+
 /// Geometry priority is not presentation priority: the main corridor stays
 /// carved open through a blackout (you can always walk it), but past the
 /// approach band the blackout owns the dark — the corridor's light strips

@@ -289,19 +289,32 @@ planner works as follows:
    finishes at an implausible scale instead of producing a low office maze.
 
 **The Peripheral Shift.** "Whenever not directly observed, the layout can
-warp, stretch, or rearrange itself." `RealitySnapshot` (RTY v3) carries one
-drift epoch per 40 u fabric cell. The epoch re-salts only the fabric's
-cosmetic and porosity decisions — wall dropout, doorway
-direction/position/framing, dead lights — read at each deciding lattice
-cell's own anchor, so walls rebuild whole and the binary-tree doorway rule
-(hence global connectivity) holds at any epoch mix. Corridors, portals,
-assemblies, anomaly identities, arch-anchor surroundings, and the spawn
-opening sequence never drift: navigation survives; hallway memory does not.
+warp, stretch, or rearrange itself." `RealitySnapshot` (RTY v5) carries one
+drift epoch per 40 u fabric cell plus the mismanagement *strain* tier
+(delirium 0–3). The epoch re-salts the fabric's decisions — wall dropout,
+doorway direction/position/framing, dead lights — and re-deals each
+corridor section's edge mouths, read at each deciding lattice cell's own
+anchor, so walls rebuild whole. At tier 0 the binary-tree doorway rule
+(hence global connectivity) holds at any epoch mix. Under strain the
+guarantee erodes *by design*: warren cells brick over their guaranteed
+doorway (~10 % per tier) into dead-end pockets, second doorways thin,
+corridor mouths narrow and (tier ≥ 2) seal whole sections, supply cells
+withhold a 15 % share per tier, and rare 0.8 u secret slips open in
+otherwise doorless walls (tier ≥ 2) — the punished labyrinth grows secrets
+alongside its dead ends. Corridor interiors, portals, assemblies, anomaly
+identities, arch-anchor surroundings, and the spawn opening sequence never
+drift or strain: the spine survives; hallway memory — and, mismanaged,
+hallway mercy — does not.
 The engine advances epochs two ways: territory abandoned beyond the
 streaming footprint (plus hysteresis) drifts on departure, and *inside a
 blackout* the shift runs in real time — cells wholly behind the player's
 facing, beyond any light's reach, and fully inside the blackout advance on
-a slow cadence and force-rebuild in place, hidden by the dark.
+a slow cadence and force-rebuild in place, hidden by the dark. Strain is
+fed from both ends of resource mismanagement — dehydration bands
+(underconsumption) and the excess meter of wasted supply value, i.e.
+drinking or eating past a full reserve (overconsumption) — and the max of
+the two also shrinks drift hysteresis and speeds the blackout's rear-shift
+cadence.
 
 **Fixture decay and flicker.** The `institution_age` field steers the
 fabric's dead-light ratio (young wings ~1.15x survival, ancient wings
