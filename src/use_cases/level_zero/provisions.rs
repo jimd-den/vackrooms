@@ -33,14 +33,16 @@ const ALMOND_CHANCE: f32 = 0.72;
 /// Of the successful cells, this fraction holds food instead of water.
 const RATION_SHARE: f32 = 0.25;
 
-/// Fraction of 80u regions holding an organic door to Level 1.
+/// Fraction of 80u regions holding an organic door to Level 1 (at the
+/// default `level_doors` tuning of 1.0).
 const DOOR_CHANCE: f32 = 0.08;
 /// How far past its bounds a chunk stamps door geometry. Must stay within
 /// the region-plan window margin (1.0) and cover the frame plus clearing.
 const DOOR_STAMP_MARGIN: f32 = 1.0;
-/// The authored always-present door near spawn (region (0, -1)); an
-/// unmistakably wrong object for Level 0, exactly as intended.
-const SPAWN_DOOR: (f32, f32) = (12.0, -8.0);
+/// The authored always-present door: guaranteed to exist, but a real hike
+/// from spawn — finding it should feel earned, not scripted. Debug runs
+/// raise `level_doors` (or walk straight here).
+const SPAWN_DOOR: (f32, f32) = (172.0, -116.0);
 
 pub(crate) struct ProvisionContext<'a> {
     pub seed: u32,
@@ -92,8 +94,10 @@ pub(crate) fn stamp_level_zero_provisions(
     chunk_pos: Position,
     ctx: &ProvisionContext<'_>,
 ) {
-    let provisions = ctx.config.tuning.provisions.clamp(0.0, 2.0);
-    if provisions <= 0.0 {
+    let water = ctx.config.tuning.almond_water.clamp(0.0, 4.0);
+    let food = ctx.config.tuning.rations.clamp(0.0, 4.0);
+    let doors = ctx.config.tuning.level_doors.clamp(0.0, 4.0);
+    if water <= 0.0 && food <= 0.0 && doors <= 0.0 {
         return;
     }
     let s = ctx.config.voxel_scale;
@@ -118,7 +122,13 @@ pub(crate) fn stamp_level_zero_provisions(
     for cz in c0z..=c1z {
         for cx in c0x..=c1x {
             let roll = hash(ctx.seed, 0x0A1A_09D0_57A7_0000, cx, cz);
-            if unit(roll) > ALMOND_CHANCE * provisions {
+            // Water and food frequencies scale their halves of the density
+            // independently; the kind roll then splits proportionally, so
+            // e.g. rations=0 yields a pure-water world at water's density.
+            let water_weight = (1.0 - RATION_SHARE) * water;
+            let food_weight = RATION_SHARE * food;
+            let cell_chance = ALMOND_CHANCE * (water_weight + food_weight);
+            if unit(roll) > cell_chance {
                 continue;
             }
             let id = roll | 1;
@@ -134,7 +144,8 @@ pub(crate) fn stamp_level_zero_provisions(
             if !near_chunk(px, pz, 0.5) || !ctx.is_open_floor(px, pz) {
                 continue;
             }
-            let kind = if unit(roll.rotate_left(11)) < RATION_SHARE {
+            let kind = if unit(roll.rotate_left(11)) * (water_weight + food_weight) < food_weight
+            {
                 SupplyKind::Ration
             } else {
                 SupplyKind::AlmondWater
@@ -160,17 +171,20 @@ pub(crate) fn stamp_level_zero_provisions(
     // The whole door footprint (frame + clearing) fits inside the region
     // plan window's 1.0u margin, so every chunk that must stamp part of a
     // door can also evaluate its acceptance identically.
+    if doors <= 0.0 {
+        return;
+    }
     for rz in r0z..=r1z {
         for rx in r0x..=r1x {
             let spawn_door_region =
                 rx == region_index(SPAWN_DOOR.0) && rz == region_index(SPAWN_DOOR.1);
             let (dx, dz) = if spawn_door_region {
-                // The authored spawn door carves its own clearing; no floor
-                // check, so it exists in every reality.
+                // The authored guaranteed door carves its own clearing; no
+                // floor check, so it exists in every reality.
                 SPAWN_DOOR
             } else {
                 let roll = hash(ctx.seed, 0xD00E_0000_5EED_0000, rx, rz);
-                if unit(roll) > DOOR_CHANCE * provisions {
+                if unit(roll) > DOOR_CHANCE * doors {
                     continue;
                 }
                 // One deterministic spot per region; a spot on solid or

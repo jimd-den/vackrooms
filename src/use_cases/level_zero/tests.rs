@@ -604,7 +604,9 @@ fn tuning_knobs_control_density() {
     // Provisions (bottles, doors) are content, not architecture: zero them
     // so the knob comparison sees only pillar/wall mass.
     let no_provisions = LevelTuning {
-        provisions: 0.0,
+        almond_water: 0.0,
+        rations: 0.0,
+        level_doors: 0.0,
         ..Default::default()
     };
     let none = count_solids(LevelTuning {
@@ -633,6 +635,33 @@ fn tuning_knobs_control_density() {
         default < dense,
         "default ({default}) must be < dense ({dense})"
     );
+}
+
+/// The guaranteed Level 1 door exists at its authored spot, exports its
+/// LevelExit from exactly one chunk, and the `level_doors` knob at zero
+/// removes it entirely.
+#[test]
+fn spawn_door_exports_a_level_exit_and_knob_zero_removes_it() {
+    let noise = SimpleNoiseProvider::new();
+    let config = GeneratorConfig::low_spec();
+    // Chunk (170, -120)..(180, -110) contains the authored door (172, -116).
+    let chunk = Position::new(170.0, -120.0);
+    let grid = BackroomsLevel.generate(chunk, 42, config, &noise);
+    assert_eq!(grid.level_exits.len(), 1, "authored door must export");
+    let exit = grid.level_exits[0];
+    assert_eq!(exit.target_level, 1);
+    assert!(exit.contains(172.0, -116.0));
+
+    let mut doorless = config;
+    doorless.tuning.level_doors = 0.0;
+    let grid = BackroomsLevel.generate(chunk, 42, doorless, &noise);
+    assert!(grid.level_exits.is_empty(), "level_doors=0 removes doors");
+
+    let mut dry = config;
+    dry.tuning.almond_water = 0.0;
+    dry.tuning.rations = 0.0;
+    let grid = BackroomsLevel.generate(chunk, 42, dry, &noise);
+    assert!(grid.supply_items.is_empty(), "provision knobs at 0 strip supplies");
 }
 
 /// Every LOD of a chunk must voxelize the same plan: coarse walls stay

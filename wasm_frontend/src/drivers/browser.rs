@@ -19,7 +19,7 @@ use vackrooms::use_cases::generate_chunk::GeneratorConfig;
 
 use crate::adapters::input::InputCollector;
 use crate::adapters::local_chunk_source::LocalChunkSource;
-use crate::adapters::query_config::generator_setup_from_query;
+use crate::adapters::query_config::{generator_setup_from_query, query_flag, query_param};
 use crate::adapters::section_locator::SectionLocator;
 use crate::application::engine::{Engine, EngineConfig};
 use crate::application::generation_worker_policy::parse_generation_worker_preference;
@@ -161,6 +161,13 @@ impl RendererPort for DriverRenderer {
             DriverRenderer::Cpu(r) => r.draw(frame, chunks),
         }
     }
+    fn upload_label_atlas(&mut self, rgba: &[u8], width: u32, height: u32) {
+        // Only the surface path draws label billboards today; the other
+        // renderers keep the port's no-op default.
+        if let DriverRenderer::Surface(r) = self {
+            r.upload_label_atlas(rgba, width, height);
+        }
+    }
 }
 
 /// Engine owns its renderer behind the port; the driver also needs to call
@@ -196,6 +203,21 @@ impl RendererPort for SharedRenderer {
     fn draw(&mut self, frame: &FrameParams, chunks: &[ChunkDraw]) {
         self.0.borrow_mut().draw(frame, chunks);
     }
+    fn upload_label_atlas(&mut self, rgba: &[u8], width: u32, height: u32) {
+        self.0.borrow_mut().upload_label_atlas(rgba, width, height);
+    }
+}
+
+/// The embedded product-label atlas: row 0 almond water, row 1 rations.
+/// The rations row stays transparent until a rations logo lands in
+/// `wasm_frontend/assets/` and gets blitted here.
+fn build_label_atlas() -> Option<(Vec<u8>, u32, u32)> {
+    const ALMOND_LABEL_PNG: &[u8] = include_bytes!("../../assets/almond_water_label.png");
+    let label = image::load_from_memory(ALMOND_LABEL_PNG).ok()?.to_rgba8();
+    let (width, row_height) = label.dimensions();
+    let mut atlas = vec![0u8; (width * row_height * 2 * 4) as usize];
+    atlas[..(width * row_height * 4) as usize].copy_from_slice(label.as_raw());
+    Some((atlas, width, row_height * 2))
 }
 
 /// Touch-play session state. On touch devices there is no pointer lock:
@@ -217,14 +239,15 @@ struct TouchState {
 /// confirmed), `?renderer=raymarch` for the retained SVO debug path,
 /// `?renderer=cpu` for software fallback.
 fn create_renderer(canvas: &HtmlCanvasElement, query: &str) -> Result<DriverRenderer, JsValue> {
-    if query.contains("renderer=cpu") {
+    let renderer_choice = query_param(query, "renderer");
+    if renderer_choice == Some("cpu") {
         return Ok(DriverRenderer::Cpu(CpuCanvasRenderer::new(canvas)?));
     }
-    if query.contains("renderer=raymarch") {
+    if renderer_choice == Some("raymarch") {
         return WebGl2Renderer::new(canvas).map(DriverRenderer::Raymarch);
     }
-    if query.contains("renderer=splat") {
-        let profile = if query.contains("spec=high") {
+    if renderer_choice == Some("splat") {
+        let profile = if query_param(query, "spec") == Some("high") {
             SplatProfile::high()
         } else {
             SplatProfile::low()
@@ -290,10 +313,7 @@ pub fn boot() -> Result<(), JsValue> {
     let spawn_yaw = -std::f32::consts::FRAC_PI_2;
     // ?level=34 boots straight into the grassland (debugging any level in
     // any renderer without waiting on a noclip roll).
-    let initial_level = query
-        .trim_start_matches('?')
-        .split('&')
-        .find_map(|pair| pair.strip_prefix("level="))
+    let initial_level = query_param(&query, "level")
         .and_then(|v| v.parse::<u32>().ok())
         .unwrap_or(0);
     let engine_config = if high_spec {
@@ -321,6 +341,11 @@ pub fn boot() -> Result<(), JsValue> {
     };
 
     let renderer = Rc::new(RefCell::new(create_renderer(&canvas, &query)?));
+    if let Some((label_rgba, label_w, label_h)) = build_label_atlas() {
+        renderer
+            .borrow_mut()
+            .upload_label_atlas(&label_rgba, label_w, label_h);
+    }
     if let Ok(hud_renderer) = element::<HtmlElement>(&document, "hud-renderer") {
         hud_renderer.set_text_content(Some(renderer.borrow().label()));
     }
@@ -382,39 +407,25 @@ pub fn boot() -> Result<(), JsValue> {
     let input = Rc::new(RefCell::new(InputCollector::new()));
     let touch = Rc::new(RefCell::new(TouchState::default()));
 
-    let is_capture = query.contains("capture=1");
+    let is_capture = query_flag(&query, "capture");
     if is_capture {
         let mut cam_pos = spawn;
-        if let Some(pos_idx) = query.find("camera=") {
-            let s = &query[pos_idx + 7..];
-            let end = s.find('&').unwrap_or(s.len());
-            let parts: Vec<&str> = s[..end].split(',').collect();
-            if parts.len() == 3 {
-                if let (Ok(x), Ok(y), Ok(z)) = (
-                    parts[0].parse::<f32>(),
-                    parts[1].parse::<f32>(),
-                    parts[2].parse::<f32>(),
-                ) {
-                    cam_pos = [x, y, z];
-                }
-            }
+        if let Some(parts) = query_param(&query, "camera").map(|v| v.split(',').collect::<Vec<_>>())
+            && parts.len() == 3
+            && let (Ok(x), Ok(y), Ok(z)) = (
+                parts[0].parse::<f32>(),
+                parts[1].parse::<f32>(),
+                parts[2].parse::<f32>(),
+            )
+        {
+            cam_pos = [x, y, z];
         }
-        let mut yaw_val = 1.5708f32;
-        if let Some(yaw_idx) = query.find("yaw=") {
-            let s = &query[yaw_idx + 4..];
-            let end = s.find('&').unwrap_or(s.len());
-            if let Ok(y) = s[..end].parse::<f32>() {
-                yaw_val = y;
-            }
-        }
-        let mut pitch_val = -0.05f32;
-        if let Some(pitch_idx) = query.find("pitch=") {
-            let s = &query[pitch_idx + 6..];
-            let end = s.find('&').unwrap_or(s.len());
-            if let Ok(p) = s[..end].parse::<f32>() {
-                pitch_val = p;
-            }
-        }
+        let yaw_val = query_param(&query, "yaw")
+            .and_then(|v| v.parse::<f32>().ok())
+            .unwrap_or(1.5708);
+        let pitch_val = query_param(&query, "pitch")
+            .and_then(|v| v.parse::<f32>().ok())
+            .unwrap_or(-0.05);
         engine
             .borrow_mut()
             .teleport_player(cam_pos, yaw_val, pitch_val);
@@ -732,12 +743,12 @@ fn run_frame_loop(
     let death_shown_at = Rc::new(Cell::new(0.0f64));
 
     let query = window.location().search().unwrap_or_default();
-    let is_capture = query.contains("capture=1");
+    let is_capture = query_flag(&query, "capture");
     // Visual baselines get fifteen settled frames; renderer smoke tests only
     // need proof that a loaded scene completed a couple of real draws. The
     // shorter path keeps deliberately unoptimized reference renderers usable
     // under software WebGL in CI without weakening screenshot baselines.
-    let capture_settle_frames = if query.contains("smoke=1") { 2 } else { 15 };
+    let capture_settle_frames = if query_flag(&query, "smoke") { 2 } else { 15 };
     let capture_frame_counter = Rc::new(Cell::new(0u32));
 
     let last_time = Rc::new(Cell::new(0.0f64));

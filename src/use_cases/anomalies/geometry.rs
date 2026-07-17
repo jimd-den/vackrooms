@@ -85,6 +85,12 @@ pub(crate) fn sample_anomaly(
     }
 }
 
+/// Dehydration multiplies mutable-infill probability: tier 3 nearly
+/// doubles how much anomalous mass a re-dealt space grows.
+fn delirium_gain(reality: &RealitySnapshot) -> f32 {
+    1.0 + 0.3 * reality.delirium() as f32
+}
+
 fn anomaly_hash(instance: &AnomalyInstance, epoch: u32, salt: u64, x: i64, z: i64) -> f32 {
     let mut hash = instance.id
         ^ salt
@@ -158,7 +164,10 @@ fn sample_pillar_expanse(context: &SampleContext<'_>) -> ColumnPlan {
     if !solid && let Some(epoch) = wake_epoch {
         let edge_x = within_x < PLAN_WALL_T || lattice.bay_x - within_x < PLAN_WALL_T;
         let edge_z = within_z < PLAN_WALL_T || lattice.bay_z - within_z < PLAN_WALL_T;
-        let threshold = (0.12 * context.config.anomalies.remap_intensity).clamp(0.0, 0.48);
+        let threshold = (0.12
+            * context.config.anomalies.remap_intensity
+            * delirium_gain(context.reality))
+        .clamp(0.0, 0.48);
         solid = (edge_x && anomaly_hash(instance, epoch, 0x11F1, cell_x, cell_z) < threshold)
             || (edge_z && anomaly_hash(instance, epoch, 0x11F2, cell_x, cell_z) < threshold);
     }
@@ -251,8 +260,11 @@ fn sample_blackout_expanse(context: &SampleContext<'_>) -> ColumnPlan {
 
     // Deception is nearly unbounded on purpose: blackouts are meant to be
     // almost impossible to walk out of, so decoy glimmers may heavily
-    // outnumber the honest skeleton.
-    let decoys = context.config.anomalies.blackout_decoys.clamp(0.0, 0.9);
+    // outnumber the honest skeleton — and a delirious wanderer sees more
+    // liars still.
+    let decoys = (context.config.anomalies.blackout_decoys
+        + 0.03 * context.reality.delirium() as f32)
+        .clamp(0.0, 0.95);
     let off_lane = (local_z.abs() - (instance.skeleton_half_width + 7.2)).abs() < 0.45;
     if off_lane
         && depth > 0.3
@@ -279,7 +291,10 @@ fn sample_blackout_expanse(context: &SampleContext<'_>) -> ColumnPlan {
         let within_x = local_x.rem_euclid(cell);
         let within_z = local_z.rem_euclid(cell);
         let edge = within_x < PLAN_WALL_T || within_z < PLAN_WALL_T;
-        let threshold = (0.20 * context.config.anomalies.remap_intensity).clamp(0.0, 0.65);
+        let threshold = (0.20
+            * context.config.anomalies.remap_intensity
+            * delirium_gain(context.reality))
+        .clamp(0.0, 0.65);
         if edge && anomaly_hash(instance, epoch, 0xB1AC, cell_x, cell_z) < threshold {
             plan.solid = true;
             plan.light = false;

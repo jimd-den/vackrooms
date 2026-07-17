@@ -305,6 +305,19 @@ impl Default for Environment {
     }
 }
 
+/// A camera-facing label floating over a supply pickup. The atlas row
+/// selects which product logo the quad shows.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SupplySprite {
+    /// World-space center of the label quad.
+    pub position: [f32; 3],
+    /// Atlas row: 0 = almond water, 1 = rations.
+    pub atlas_row: u8,
+}
+
+/// Most label sprites a single frame will draw.
+pub const MAX_SUPPLY_SPRITES: usize = 16;
+
 /// Camera state for one frame, in world space.
 #[derive(Debug, Clone, PartialEq)]
 pub struct FrameParams {
@@ -322,6 +335,8 @@ pub struct FrameParams {
     pub scene_lights: Vec<LightSource>,
     /// Level atmosphere (sky, fog, ambient scale).
     pub environment: Environment,
+    /// Nearby supply labels, nearest first, at most [`MAX_SUPPLY_SPRITES`].
+    pub supply_sprites: Vec<SupplySprite>,
 }
 
 impl FrameParams {
@@ -346,6 +361,7 @@ impl Default for FrameParams {
             dynamic_light_count: 0,
             scene_lights: Vec::new(),
             environment: Environment::default(),
+            supply_sprites: Vec::new(),
         }
     }
 }
@@ -392,6 +408,10 @@ pub trait RendererPort {
     fn upload_atlas_rows(&mut self, _first_row: u32, _texels: &[u32]) -> bool {
         false
     }
+
+    /// Receives the decoded RGBA label atlas (stacked product logos). Ships
+    /// once at boot; renderers without a sprite path simply ignore it.
+    fn upload_label_atlas(&mut self, _rgba: &[u8], _width: u32, _height: u32) {}
 
     /// Draws one frame: fullscreen raymarch of every chunk in `chunks`.
     fn draw(&mut self, frame: &FrameParams, chunks: &[ChunkDraw]);

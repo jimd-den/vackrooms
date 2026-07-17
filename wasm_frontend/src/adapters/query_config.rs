@@ -30,6 +30,26 @@ pub struct GenerationParams {
     pub anomalies: AnomalyTuning,
 }
 
+/// Exact-key lookup in a location search string (`?a=1&b=2`, leading `?`
+/// optional). Every query consumer must go through this (or an equivalent
+/// `split('&')` loop): raw `str::find("key=")` substring probes have caused
+/// settings to apply that nobody asked for — `?spawn_yaw=2` silently
+/// matching `yaw=`, values containing `capture=1`, and the like.
+pub fn query_param<'a>(query: &'a str, key: &str) -> Option<&'a str> {
+    query
+        .trim_start_matches('?')
+        .split('&')
+        .find_map(|pair| match pair.split_once('=') {
+            Some((k, v)) if k == key => Some(v),
+            _ => None,
+        })
+}
+
+/// True when the query holds exactly `key=1`.
+pub fn query_flag(query: &str, key: &str) -> bool {
+    query_param(query, key) == Some("1")
+}
+
 /// Parses `window.location.search` (with or without the leading `?`).
 /// Unknown keys are ignored; malformed values fall back to defaults.
 pub fn parse_generation_params(query: &str, default_seed: u32) -> GenerationParams {
@@ -69,8 +89,11 @@ pub fn parse_generation_params(query: &str, default_seed: u32) -> GenerationPara
             "walls" => knob(&mut params.tuning.walls),
             "atria" => knob(&mut params.tuning.atria),
             "lights" => knob(&mut params.tuning.lights),
-            // Supply pickups and Level 1 doors; 0 strips the world bare.
-            "provisions" => knob(&mut params.tuning.provisions),
+            // World provisioning: drink, food, and level-door frequency.
+            // 0 removes that class of content entirely.
+            "almond_water" => knob(&mut params.tuning.almond_water),
+            "rations" => knob(&mut params.tuning.rations),
+            "level_doors" => knob(&mut params.tuning.level_doors),
             "anomalies" => knob(&mut params.anomalies.frequency),
             "anomaly_size" => ranged(&mut params.anomalies.size, 0.5, 2.0),
             "pillar_expanses" => knob(&mut params.anomalies.pillar_expanses),
@@ -157,6 +180,19 @@ mod tests {
         assert_eq!(p.voxel_size, None);
         assert_eq!(p.tuning, LevelTuning::default());
         assert_eq!(p.anomalies, AnomalyTuning::default());
+    }
+
+    #[test]
+    fn query_params_match_exact_keys_only() {
+        // The historical bug: substring probes made `?spawn_yaw=2` set the
+        // capture yaw, and any value containing `capture=1` froze the game.
+        assert_eq!(query_param("?spawn_yaw=2&pitch2=9", "yaw"), None);
+        assert_eq!(query_param("?spawn_yaw=2&yaw=0.5", "yaw"), Some("0.5"));
+        assert_eq!(query_param("?note=capture=1", "capture"), None);
+        assert!(!query_flag("?recapture=1", "capture"));
+        assert!(query_flag("capture=1", "capture"));
+        assert_eq!(query_param("?renderer=cpux", "renderer"), Some("cpux"));
+        assert_eq!(query_param("", "anything"), None);
     }
 
     #[test]

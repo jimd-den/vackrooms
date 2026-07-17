@@ -29,7 +29,7 @@ use crate::drivers::gl::program::{ContextOptions, create_context, link_program};
 use crate::drivers::gl::shadow_target::{ShadowTarget, create_shadow_target};
 use crate::drivers::gl::timer::GpuFrameTimer;
 use crate::drivers::gl::upload_scene_lights::SceneLightTexture;
-use crate::drivers::shaders::{shadow, surface};
+use crate::drivers::shaders::{shadow, supply_labels, surface};
 
 use upload_world_surface_chunks::GpuMesh;
 
@@ -71,6 +71,20 @@ pub(crate) struct ShadowUniforms {
     pub chunk_origin: Option<WebGlUniformLocation>,
 }
 
+/// Uniforms of the supply-label billboard pass.
+pub(crate) struct LabelUniforms {
+    pub projection: Option<WebGlUniformLocation>,
+    pub view: Option<WebGlUniformLocation>,
+    pub sprites: Option<WebGlUniformLocation>,
+    pub cam_right: Option<WebGlUniformLocation>,
+    pub half_size: Option<WebGlUniformLocation>,
+    pub atlas: Option<WebGlUniformLocation>,
+    pub camera_position: Option<WebGlUniformLocation>,
+    pub fog_color: Option<WebGlUniformLocation>,
+    pub fog_density: Option<WebGlUniformLocation>,
+    pub fog_start: Option<WebGlUniformLocation>,
+}
+
 /// Surface rasterizer with incremental chunk mesh uploads. One VAO/VBO/IBO
 /// tuple per resident chunk keeps the draw path allocation-free.
 pub struct SurfaceRenderer {
@@ -85,6 +99,10 @@ pub struct SurfaceRenderer {
     pub(crate) shadow_program: WebGlProgram,
     pub(crate) shadow_uniforms: ShadowUniforms,
     pub(crate) shadow: ShadowTarget,
+    pub(crate) label_program: WebGlProgram,
+    pub(crate) label_uniforms: LabelUniforms,
+    /// Present once the driver has decoded and shipped the label atlas.
+    pub(crate) label_atlas: Option<web_sys::WebGlTexture>,
 }
 
 impl SurfaceRenderer {
@@ -133,6 +151,24 @@ impl SurfaceRenderer {
         };
         let shadow = create_shadow_target(&gl, 128)?;
 
+        let label_program = link_program(
+            &gl,
+            supply_labels::VERTEX_SHADER,
+            &supply_labels::fragment_source(),
+        )?;
+        let label_uniforms = LabelUniforms {
+            projection: gl.get_uniform_location(&label_program, "uProjection"),
+            view: gl.get_uniform_location(&label_program, "uView"),
+            sprites: gl.get_uniform_location(&label_program, "uSprites"),
+            cam_right: gl.get_uniform_location(&label_program, "uCamRight"),
+            half_size: gl.get_uniform_location(&label_program, "uHalfSize"),
+            atlas: gl.get_uniform_location(&label_program, "uAtlas"),
+            camera_position: gl.get_uniform_location(&label_program, "uCameraPosition"),
+            fog_color: gl.get_uniform_location(&label_program, "uFogColor"),
+            fog_density: gl.get_uniform_location(&label_program, "uFogDensity"),
+            fog_start: gl.get_uniform_location(&label_program, "uFogStart"),
+        };
+
         Ok(Self {
             gl,
             program,
@@ -145,6 +181,9 @@ impl SurfaceRenderer {
             shadow_program,
             shadow_uniforms,
             shadow,
+            label_program,
+            label_uniforms,
+            label_atlas: None,
         })
     }
 

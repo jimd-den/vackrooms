@@ -124,9 +124,13 @@ pub struct LevelTuning {
     pub junction_density: f32,
     /// Frequency of stairs / vertical traversal generation.
     pub stairs_density: f32,
-    /// Supply pickups and level doors (almond water, rations, Level 1
-    /// doors). 0 strips the world of provisions entirely.
-    pub provisions: f32,
+    /// Almond water pickup frequency. 0 removes every bottle.
+    pub almond_water: f32,
+    /// Ration pickup frequency. 0 removes all food.
+    pub rations: f32,
+    /// Level-door frequency. 0 removes every door, including the authored
+    /// one near spawn.
+    pub level_doors: f32,
 }
 
 impl Default for LevelTuning {
@@ -138,7 +142,9 @@ impl Default for LevelTuning {
             lights: 1.0,
             junction_density: 1.0,
             stairs_density: 1.0,
-            provisions: 1.0,
+            almond_water: 1.0,
+            rations: 1.0,
+            level_doors: 1.0,
         }
     }
 }

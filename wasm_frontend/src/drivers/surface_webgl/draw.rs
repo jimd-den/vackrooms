@@ -83,6 +83,29 @@ impl RendererPort for SurfaceRenderer {
 
     fn upload_atlas(&mut self, _texels: &[u32]) {}
 
+    fn upload_label_atlas(&mut self, rgba: &[u8], width: u32, height: u32) {
+        let gl = &self.gl;
+        let texture = gl.create_texture();
+        gl.active_texture(Gl::TEXTURE7);
+        gl.bind_texture(Gl::TEXTURE_2D, texture.as_ref());
+        let _ = gl.tex_image_2d_with_i32_and_i32_and_i32_and_format_and_type_and_opt_u8_array(
+            Gl::TEXTURE_2D,
+            0,
+            Gl::RGBA as i32,
+            width as i32,
+            height as i32,
+            0,
+            Gl::RGBA,
+            Gl::UNSIGNED_BYTE,
+            Some(rgba),
+        );
+        gl.tex_parameteri(Gl::TEXTURE_2D, Gl::TEXTURE_MIN_FILTER, Gl::LINEAR as i32);
+        gl.tex_parameteri(Gl::TEXTURE_2D, Gl::TEXTURE_MAG_FILTER, Gl::LINEAR as i32);
+        gl.tex_parameteri(Gl::TEXTURE_2D, Gl::TEXTURE_WRAP_S, Gl::CLAMP_TO_EDGE as i32);
+        gl.tex_parameteri(Gl::TEXTURE_2D, Gl::TEXTURE_WRAP_T, Gl::CLAMP_TO_EDGE as i32);
+        self.label_atlas = texture;
+    }
+
     fn draw(&mut self, frame: &FrameParams, _chunks: &[ChunkDraw]) {
         let toggles = crate::get_render_toggles();
 
@@ -121,6 +144,75 @@ fn render_frame(renderer: &mut SurfaceRenderer, frame: &FrameParams, toggles: Re
         toggles.baked_lighting,
     );
     draw_visible_meshes(renderer, &visible, &shadow);
+    draw_supply_labels(renderer, frame);
+}
+
+/// Camera-facing product labels over nearby supply pickups. A cutout pass:
+/// depth-tested and depth-writing, so it needs no ordering against the
+/// opaque world and never x-rays through walls.
+fn draw_supply_labels(renderer: &SurfaceRenderer, frame: &FrameParams) {
+    use crate::drivers::shaders::supply_labels;
+
+    let Some(atlas) = renderer.label_atlas.as_ref() else {
+        return;
+    };
+    if frame.supply_sprites.is_empty() {
+        return;
+    }
+    let gl = &renderer.gl;
+    let uniforms = &renderer.label_uniforms;
+    gl.use_program(Some(&renderer.label_program));
+
+    let (projection, view) =
+        camera_matrices(frame, renderer.width, renderer.height, MAX_DRAW_DISTANCE);
+    gl.uniform_matrix4fv_with_f32_array(uniforms.projection.as_ref(), false, &projection);
+    gl.uniform_matrix4fv_with_f32_array(uniforms.view.as_ref(), false, &view);
+
+    let count = frame
+        .supply_sprites
+        .len()
+        .min(supply_labels::MAX_SPRITES);
+    let mut sprites = [0.0f32; supply_labels::MAX_SPRITES * 4];
+    for (i, sprite) in frame.supply_sprites.iter().take(count).enumerate() {
+        sprites[i * 4] = sprite.position[0];
+        sprites[i * 4 + 1] = sprite.position[1];
+        sprites[i * 4 + 2] = sprite.position[2];
+        sprites[i * 4 + 3] = sprite.atlas_row as f32;
+    }
+    gl.uniform4fv_with_f32_array(uniforms.sprites.as_ref(), &sprites);
+    // Cylindrical billboard: turn with the player's yaw, stay upright.
+    let right = [frame.yaw.cos(), 0.0, -frame.yaw.sin()];
+    gl.uniform3fv_with_f32_array(uniforms.cam_right.as_ref(), &right);
+    gl.uniform2f(
+        uniforms.half_size.as_ref(),
+        supply_labels::HALF_WIDTH,
+        supply_labels::HALF_HEIGHT,
+    );
+    gl.uniform3f(
+        uniforms.camera_position.as_ref(),
+        frame.camera_pos[0],
+        frame.camera_pos[1],
+        frame.camera_pos[2],
+    );
+    let environment = frame.environment;
+    gl.uniform3f(
+        uniforms.fog_color.as_ref(),
+        environment.fog_color[0],
+        environment.fog_color[1],
+        environment.fog_color[2],
+    );
+    gl.uniform1f(uniforms.fog_density.as_ref(), environment.fog_density);
+    gl.uniform1f(uniforms.fog_start.as_ref(), environment.fog_start);
+
+    gl.active_texture(Gl::TEXTURE7);
+    gl.bind_texture(Gl::TEXTURE_2D, Some(atlas));
+    gl.uniform1i(uniforms.atlas.as_ref(), 7);
+
+    // Both label faces read; the quad expands entirely from gl_VertexID.
+    gl.disable(Gl::CULL_FACE);
+    gl.bind_vertex_array(None);
+    gl.draw_arrays(Gl::TRIANGLES, 0, (count * 6) as i32);
+    gl.enable(Gl::CULL_FACE);
 }
 
 /// Establishes every fixed-function state relied on by either raster pass.

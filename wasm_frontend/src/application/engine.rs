@@ -622,6 +622,19 @@ impl Engine {
         if self.vitals.is_dead() {
             self.succumb();
         }
+        // Delirium: dehydration bands raise the reality tier, and chunks
+        // generated from here on carry more anomalous infill and more
+        // deceptive glimmers. Resident chunks are untouched — the world
+        // worsens as it streams, never as a visible pop.
+        let tier = match self.vitals.hydration {
+            h if h > 0.6 => 0,
+            h if h > 0.35 => 1,
+            h if h > 0.15 => 2,
+            _ => 3,
+        };
+        if tier != self.reality.delirium() {
+            self.reality = self.reality.with_delirium(tier);
+        }
 
         let frame = FrameParams {
             camera_pos: self.player.position,
@@ -632,6 +645,7 @@ impl Engine {
             dynamic_light_count: self.flare_light_count(),
             scene_lights,
             environment: self.environment(),
+            supply_sprites: self.collect_supply_sprites(),
         };
         self.renderer.draw(&frame, &self.draws);
     }
@@ -901,6 +915,40 @@ impl Engine {
         }
     }
 
+    /// The nearest unconsumed supply labels, ready for billboard drawing.
+    /// Labels float a little above the marker so the logo reads over the
+    /// bottle/tin voxels.
+    pub fn collect_supply_sprites(&self) -> Vec<crate::application::ports::SupplySprite> {
+        use crate::application::ports::{MAX_SUPPLY_SPRITES, SupplySprite};
+        const LABEL_CULL: f32 = 14.0;
+        let (px, pz) = (self.player.position[0], self.player.position[2]);
+        let mut near: Vec<(f32, SupplySprite)> = self
+            .store
+            .all_supply_items()
+            .filter(|item| !self.reality.supply_consumed(item.id))
+            .filter_map(|item| {
+                let dx = item.position.x - px;
+                let dz = item.position.z - pz;
+                let d2 = dx * dx + dz * dz;
+                (d2 < LABEL_CULL * LABEL_CULL).then_some((
+                    d2,
+                    SupplySprite {
+                        position: [item.position.x, item.rest_y + 0.62, item.position.z],
+                        atlas_row: match item.kind {
+                            SupplyKind::AlmondWater => 0,
+                            SupplyKind::Ration => 1,
+                        },
+                    },
+                ))
+            })
+            .collect();
+        near.sort_by(|a, b| a.0.total_cmp(&b.0));
+        // Halo overlap can list one item twice; identical positions dedupe.
+        near.dedup_by(|a, b| a.1 == b.1);
+        near.truncate(MAX_SUPPLY_SPRITES);
+        near.into_iter().map(|(_, sprite)| sprite).collect()
+    }
+
     /// Consumes carried supplies once their vital runs low.
     fn auto_consume_supplies(&mut self) {
         if self.vitals.hydration < AUTO_CONSUME_AT && self.almond_bottles > 0 {
@@ -943,8 +991,16 @@ impl Engine {
         (self.visual_policy.radius as f32 + 1.0) * self.config.chunk_size
     }
 
+    /// Dehydration, 0 provisioned .. 1 parched. Thirst is the world's
+    /// aggression dial: more thirst, more shift, more anomaly.
+    fn dehydration(&self) -> f32 {
+        (1.0 - self.vitals.hydration).clamp(0.0, 1.0)
+    }
+
     fn drift_far_radius(&self) -> f32 {
-        self.drift_near_radius() + 2.0 * FABRIC_DRIFT_CELL
+        // A parched wanderer loses the hysteresis: the fabric rearranges
+        // almost the moment it leaves the streaming footprint.
+        self.drift_near_radius() + 2.0 * FABRIC_DRIFT_CELL * (1.0 - 0.85 * self.dehydration())
     }
 
     /// The Peripheral Shift: "whenever not directly observed, the layout can
@@ -1040,7 +1096,9 @@ impl Engine {
             return;
         }
         self.blackout_shift_debug.2 += shifted.len();
-        self.blackout_shift_cooldown = BLACKOUT_SHIFT_PERIOD_S;
+        // Thirst accelerates the stalking dark: at full dehydration the
+        // rear shift fires three times as often.
+        self.blackout_shift_cooldown = BLACKOUT_SHIFT_PERIOD_S / (1.0 + 2.0 * self.dehydration());
         for &(cx, cz) in &shifted {
             self.reality = self.reality.with_fabric_drift_advanced(cx, cz);
         }

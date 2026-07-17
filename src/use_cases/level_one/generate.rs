@@ -314,8 +314,20 @@ impl HabitableLevel {
     }
 
     /// Deterministic supply spot for one supply cell, or None. Supplies are
-    /// canon-dense in Gild (crates), present in Aquila, rare elsewhere.
-    fn supply_for_cell(seed: u32, cx: i64, cz: i64) -> Option<SupplyItem> {
+    /// canon-dense in Gild (crates), present in Aquila, rare elsewhere; the
+    /// world tuning scales drink and food frequency independently.
+    fn supply_for_cell(
+        seed: u32,
+        cx: i64,
+        cz: i64,
+        water: f32,
+        food: f32,
+    ) -> Option<SupplyItem> {
+        let water_weight = 0.72 * water.clamp(0.0, 4.0);
+        let food_weight = 0.28 * food.clamp(0.0, 4.0);
+        if water_weight + food_weight <= 0.0 {
+            return None;
+        }
         let roll = hash(seed, 0x5A17_AB1E_00BB_0000, cx, cz);
         let origin_x = cx as f32 * SUPPLY_CELL;
         let origin_z = cz as f32 * SUPPLY_CELL;
@@ -331,7 +343,7 @@ impl HabitableLevel {
                 Sector::Aquila => 0.35,
                 Sector::Gothic => 0.2,
                 Sector::Construction => 0.15,
-            };
+            } * (water_weight + food_weight);
             if unit(roll) > chance {
                 return None;
             }
@@ -339,7 +351,8 @@ impl HabitableLevel {
             if column.solid || !column.floor {
                 continue;
             }
-            let kind = if unit(roll.rotate_left(9)) < 0.72 {
+            let kind = if unit(roll.rotate_left(9)) * (water_weight + food_weight) < water_weight
+            {
                 SupplyKind::AlmondWater
             } else {
                 SupplyKind::Ration
@@ -355,12 +368,15 @@ impl HabitableLevel {
     }
 
     /// All supply items overlapping a chunk, minus what reality consumed.
+    #[allow(clippy::too_many_arguments)]
     fn supplies_in_bounds(
         seed: u32,
         min_x: f32,
         min_z: f32,
         max_x: f32,
         max_z: f32,
+        water: f32,
+        food: f32,
         reality: &RealitySnapshot,
     ) -> Vec<SupplyItem> {
         let mut items = Vec::new();
@@ -370,7 +386,7 @@ impl HabitableLevel {
         let c1z = (max_z / SUPPLY_CELL).floor() as i64;
         for cz in c0z..=c1z {
             for cx in c0x..=c1x {
-                let Some(item) = Self::supply_for_cell(seed, cx, cz) else {
+                let Some(item) = Self::supply_for_cell(seed, cx, cz, water, food) else {
                     continue;
                 };
                 if reality.supply_consumed(item.id) {
@@ -521,6 +537,8 @@ impl LevelGenerator for HabitableLevel {
             chunk_pos.z - 0.5,
             max_x + 0.5,
             max_z + 0.5,
+            config.tuning.almond_water,
+            config.tuning.rations,
             reality,
         ) {
             stamp_supply_marker(&mut grid, chunk_pos, s, &item);

@@ -27,5 +27,6 @@ pub mod raymarch;
 pub mod sample_scene_lights;
 pub mod shadow;
 pub mod splat;
+pub mod supply_labels;
 #[path = "render_world_surfaces/mod.rs"]
 pub mod surface;

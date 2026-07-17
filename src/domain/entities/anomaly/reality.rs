@@ -100,6 +100,10 @@ pub struct FabricDriftStamp {
     pub epoch: u32,
 }
 
+/// Highest delirium tier. Tiers derive from hydration bands: a parched
+/// wanderer perceives (and therefore *gets*) a more anomalous Backrooms.
+pub const MAX_DELIRIUM: u8 = 3;
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct RealitySnapshot {
     stamps: Vec<AnomalyStateStamp>,
@@ -108,6 +112,10 @@ pub struct RealitySnapshot {
     /// Supply items the wanderer has consumed, canonical-sorted by id.
     /// Generation omits a consumed item and its marker deterministically.
     consumed_supplies: Vec<u64>,
+    /// Dehydration-driven perception tier (0 provisioned .. 3 parched).
+    /// Part of request identity: chunks generated while delirious carry
+    /// more anomalous infill and more deceptive glimmers.
+    delirium: u8,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -217,7 +225,7 @@ fn transition_for(
 }
 
 impl RealitySnapshot {
-    const MAGIC: u32 = 0x5254_5904; // "RTY" v4: v3 plus consumed supplies
+    const MAGIC: u32 = 0x5254_5905; // "RTY" v5: v4 plus the delirium tier
     const STAMP_WORDS: usize = 7;
     const DRIFT_WORDS: usize = 5;
 
@@ -269,6 +277,20 @@ impl RealitySnapshot {
                 })
                 .collect(),
             consumed_supplies: consumed,
+            delirium: 0,
+        }
+    }
+
+    /// The dehydration-driven perception tier (0..=MAX_DELIRIUM).
+    pub fn delirium(&self) -> u8 {
+        self.delirium
+    }
+
+    /// The same reality perceived at a different delirium tier.
+    pub fn with_delirium(&self, tier: u8) -> Self {
+        Self {
+            delirium: tier.min(MAX_DELIRIUM),
+            ..self.clone()
         }
     }
 
@@ -287,6 +309,7 @@ impl RealitySnapshot {
             stamps: self.stamps.clone(),
             drifts: self.drifts.clone(),
             consumed_supplies: consumed,
+            delirium: self.delirium,
         }
     }
 
@@ -329,6 +352,7 @@ impl RealitySnapshot {
             stamps: self.stamps.clone(),
             drifts,
             consumed_supplies: self.consumed_supplies.clone(),
+            delirium: self.delirium,
         }
     }
 
@@ -374,11 +398,14 @@ impl RealitySnapshot {
             next.loop_count,
             gate.id,
         ));
-        Self::with_drifts_and_supplies(
-            stamps,
-            self.drifts.clone(),
-            self.consumed_supplies.clone(),
-        )
+        Self {
+            delirium: self.delirium,
+            ..Self::with_drifts_and_supplies(
+                stamps,
+                self.drifts.clone(),
+                self.consumed_supplies.clone(),
+            )
+        }
     }
 
     fn hash_words(words: &[u32]) -> u64 {
@@ -432,6 +459,7 @@ impl RealitySnapshot {
             out.push(id as u32);
             out.push((id >> 32) as u32);
         }
+        out.push(self.delirium as u32);
         out
     }
 
@@ -454,13 +482,17 @@ impl RealitySnapshot {
         }
         let drift_count = words[drift_header] as usize;
         let supply_header = drift_header + 1 + drift_count.saturating_mul(Self::DRIFT_WORDS);
-        if words.len() < supply_header + 3 {
+        if words.len() < supply_header + 4 {
             return Err(RealitySnapshotDecodeError::Length);
         }
         let supply_count = words[supply_header] as usize;
-        let body_len = supply_header + 1 + supply_count.saturating_mul(2);
+        let delirium_at = supply_header + 1 + supply_count.saturating_mul(2);
+        let body_len = delirium_at + 1;
         if words.len() != body_len + 2 {
             return Err(RealitySnapshotDecodeError::Length);
+        }
+        if words[delirium_at] > MAX_DELIRIUM as u32 {
+            return Err(RealitySnapshotDecodeError::Value);
         }
         let expected = words[body_len] as u64 | ((words[body_len + 1] as u64) << 32);
         if Self::hash_words(&words[..body_len]) != expected {
@@ -491,10 +523,11 @@ impl RealitySnapshot {
             });
         }
         let mut consumed = Vec::with_capacity(supply_count);
-        for chunk in words[supply_header + 1..body_len].chunks_exact(2) {
+        for chunk in words[supply_header + 1..delirium_at].chunks_exact(2) {
             consumed.push(chunk[0] as u64 | ((chunk[1] as u64) << 32));
         }
-        let decoded = Self::with_drifts_and_supplies(stamps, drifts, consumed);
+        let decoded = Self::with_drifts_and_supplies(stamps, drifts, consumed)
+            .with_delirium(words[delirium_at] as u8);
         if decoded.to_words() != words {
             return Err(RealitySnapshotDecodeError::Value);
         }
@@ -697,6 +730,29 @@ mod tests {
             reality.fingerprint(),
             RealitySnapshot::empty().fingerprint()
         );
+    }
+
+    #[test]
+    fn delirium_is_identity_survives_transitions_and_transport() {
+        let calm = RealitySnapshot::empty();
+        let parched = calm.with_delirium(3);
+        assert_ne!(calm, parched);
+        assert_ne!(calm.fingerprint(), parched.fingerprint());
+        assert_eq!(parched.with_delirium(9).delirium(), MAX_DELIRIUM, "clamped");
+
+        // Every transition preserves the tier.
+        let after = parched
+            .with_supply_consumed(5)
+            .with_fabric_drift_advanced(1, 1)
+            .with_advanced_gate(
+                &gate(1, TraversalGateKind::RedThreshold),
+                AxisDirection::Positive,
+            );
+        assert_eq!(after.delirium(), 3);
+
+        // And it is part of transport identity.
+        let round = RealitySnapshot::from_words(&after.to_words()).unwrap();
+        assert_eq!(round, after);
     }
 
     #[test]
