@@ -460,6 +460,18 @@ sliding**: X and Z are moved and tested independently against the
 clamped to 100 ms so a background-tab hitch cannot teleport the player
 through a wall.
 
+`application::body` is the embodied-telemetry layer on top: a pure,
+deterministic model of session steps (stride 0.7 m over collision-resolved
+walking only), short-term exertion, long-term fatigue with a rest loop, and
+a target-BPM pulse with asymmetric smoothing. Its bounded movement factor
+(≥ 0.35 before death) feeds back into `Player::step_with_effort`, scaling
+acceleration — and therefore terminal speed — without touching collision.
+`application::navigation` supplies pure route/bearing selection over the
+resident `LevelExit`/gate/pit records: nearest-door prioritization, 0–359°
+relative bearings, and deterministic anomaly focus for the diagnostic
+aperture. Neither module invents targets — no resident record, no reading.
+The browser driver stays a passive presenter of `HudStats`.
+
 ## Testing strategy
 
 Ports make the interesting logic natively testable — no browser, no GPU:

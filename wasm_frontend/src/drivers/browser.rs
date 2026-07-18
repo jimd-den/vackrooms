@@ -440,6 +440,42 @@ pub fn boot() -> Result<(), JsValue> {
     )
 }
 
+/// Renders the engine's `§`-sectioned diagnostic report as aperture panels.
+/// Body lines are escaped; only the fixed panel scaffolding is markup.
+fn diagnostic_sections_html(report: &str) -> String {
+    fn escape(text: &str) -> String {
+        text.replace('&', "&amp;")
+            .replace('<', "&lt;")
+            .replace('>', "&gt;")
+    }
+    let mut html = String::with_capacity(report.len() + 256);
+    let mut open = false;
+    for line in report.lines() {
+        if let Some(title) = line.strip_prefix("§ ") {
+            if open {
+                html.push_str("</pre></section>");
+            }
+            html.push_str("<section class=\"diag-section\"><h4>");
+            html.push_str(&escape(title));
+            html.push_str("</h4><pre>");
+            open = true;
+        } else if open {
+            html.push_str(&escape(line));
+            html.push('\n');
+        } else {
+            // Preamble lines before the first section header.
+            html.push_str("<section class=\"diag-section\"><pre>");
+            html.push_str(&escape(line));
+            html.push('\n');
+            open = true;
+        }
+    }
+    if open {
+        html.push_str("</pre></section>");
+    }
+    html
+}
+
 fn element<T: JsCast>(document: &Document, id: &str) -> Result<T, JsValue> {
     document
         .get_element_by_id(id)
@@ -674,6 +710,28 @@ fn attach_touch_listeners(
         btn.add_event_listener_with_callback("click", closure.as_ref().unchecked_ref())?;
         closure.forget();
     }
+    if let Ok(btn) = element::<HtmlElement>(document, "btn-drink") {
+        let input = input.clone();
+        let closure = Closure::<dyn FnMut(web_sys::Event)>::new(move |e: web_sys::Event| {
+            e.prevent_default();
+            e.stop_propagation();
+            input.borrow_mut().queue_drink();
+        });
+        btn.add_event_listener_with_callback("touchend", closure.as_ref().unchecked_ref())?;
+        btn.add_event_listener_with_callback("click", closure.as_ref().unchecked_ref())?;
+        closure.forget();
+    }
+    if let Ok(btn) = element::<HtmlElement>(document, "btn-eat") {
+        let input = input.clone();
+        let closure = Closure::<dyn FnMut(web_sys::Event)>::new(move |e: web_sys::Event| {
+            e.prevent_default();
+            e.stop_propagation();
+            input.borrow_mut().queue_eat();
+        });
+        btn.add_event_listener_with_callback("touchend", closure.as_ref().unchecked_ref())?;
+        btn.add_event_listener_with_callback("click", closure.as_ref().unchecked_ref())?;
+        closure.forget();
+    }
     if let Ok(btn) = element::<HtmlElement>(document, "btn-flashlight") {
         let input = input.clone();
         let closure = Closure::<dyn FnMut(web_sys::Event)>::new(move |e: web_sys::Event| {
@@ -713,31 +771,47 @@ fn run_frame_loop(
     input: Rc<RefCell<InputCollector>>,
     locator: Rc<RefCell<SectionLocator>>,
 ) -> Result<(), JsValue> {
-    let hud_fps: HtmlElement = element(window.document().as_ref().unwrap(), "hud-fps")?;
-    let hud_chunks: HtmlElement = element(window.document().as_ref().unwrap(), "hud-chunks")?;
-    let hud_nodes: HtmlElement = element(window.document().as_ref().unwrap(), "hud-nodes")?;
-    let hud_scale: HtmlElement = element(window.document().as_ref().unwrap(), "hud-scale")?;
-    let hud_gpu: HtmlElement = element(window.document().as_ref().unwrap(), "hud-gpu")?;
-    let hud_dist: Option<HtmlElement> =
-        element(window.document().as_ref().unwrap(), "hud-dist").ok();
-    let last_dist_text = Rc::new(RefCell::new(String::new()));
-    // Top-right section readout and the anomaly debug overlay; both are
+    let document = window.document().unwrap();
+    // Engine metrics live inside the diagnostic aperture in the redesigned
+    // shell; the ids are unchanged so older/embedded shells keep working.
+    let hud_fps: HtmlElement = element(&document, "hud-fps")?;
+    let hud_chunks: HtmlElement = element(&document, "hud-chunks")?;
+    let hud_nodes: HtmlElement = element(&document, "hud-nodes")?;
+    let hud_scale: HtmlElement = element(&document, "hud-scale")?;
+    let hud_gpu: HtmlElement = element(&document, "hud-gpu")?;
+    // Top-right section readout and the diagnostic aperture; both are
     // optional page elements so older/embedded shells keep working.
-    let hud_section: Option<HtmlElement> =
-        element(window.document().as_ref().unwrap(), "hud-section").ok();
+    let hud_section: Option<HtmlElement> = element(&document, "hud-section").ok();
     let last_section_text = Rc::new(RefCell::new(String::new()));
-    let debug_overlay: Option<HtmlElement> =
-        element(window.document().as_ref().unwrap(), "debug-overlay").ok();
+    let debug_overlay: Option<HtmlElement> = element(&document, "debug-overlay").ok();
+    // The aperture wrapper also holds the always-in-DOM engine channels;
+    // visibility toggles on it when present (older shells fall back to the
+    // report element itself).
+    let diagnostics_shell: Option<HtmlElement> = element(&document, "diagnostics").ok();
     let debug_overlay_visible = Rc::new(Cell::new(false));
 
-    // Survival vitals panel; optional so embedded shells keep working.
-    let document = window.document().unwrap();
-    let vitals_thirst: Option<HtmlElement> = element(&document, "vitals-thirst-fill").ok();
-    let vitals_hunger: Option<HtmlElement> = element(&document, "vitals-hunger-fill").ok();
-    let vitals_cond: Option<HtmlElement> = element(&document, "vitals-cond-fill").ok();
-    let vitals_thirst_bar: Option<HtmlElement> = element(&document, "vitals-thirst").ok();
-    let vitals_hunger_bar: Option<HtmlElement> = element(&document, "vitals-hunger").ok();
-    let vitals_inv: Option<HtmlElement> = element(&document, "vitals-inv").ok();
+    // Body trace: heart glyph container, pulse figure, step count, carried
+    // supply ticks. All optional; text/attributes only change when the
+    // presented value materially changes.
+    let body_trace: Option<HtmlElement> = element(&document, "body-trace").ok();
+    let hud_bpm: Option<HtmlElement> = element(&document, "hud-bpm").ok();
+    let hud_steps: Option<HtmlElement> = element(&document, "hud-steps").ok();
+    let supply_water: Option<HtmlElement> = element(&document, "supply-water").ok();
+    let supply_ration: Option<HtmlElement> = element(&document, "supply-ration").ok();
+    let last_steps = Rc::new(Cell::new(u64::MAX));
+    let last_bpm_text = Rc::new(RefCell::new(String::new()));
+    let last_signal = Rc::new(RefCell::new(String::new()));
+    let last_beat_period_ms = Rc::new(Cell::new(0i32));
+    let last_supplies = Rc::new(Cell::new((u32::MAX, u32::MAX)));
+
+    // Route anchor near the reticle; hidden whenever no real door is known.
+    let route_anchor: Option<HtmlElement> = element(&document, "route-anchor").ok();
+    let route_target_el: Option<HtmlElement> = element(&document, "route-target").ok();
+    let route_bearing_el: Option<HtmlElement> = element(&document, "route-bearing").ok();
+    let route_range_el: Option<HtmlElement> = element(&document, "route-range").ok();
+    let route_visible = Rc::new(Cell::new(false));
+    let last_route_text = Rc::new(RefCell::new(String::new()));
+
     let death_overlay: Option<HtmlElement> = element(&document, "death-overlay").ok();
     let last_deaths = Rc::new(Cell::new(0u32));
     let death_shown_at = Rc::new(Cell::new(0.0f64));
@@ -816,11 +890,14 @@ fn run_frame_loop(
         frame_count.set(frame_count.get() + 1);
         if frame_count.get() % HUD_INTERVAL == 0 {
             let elapsed = (time_ms - hud_window_start.get()) / 1000.0;
+            hud_window_start.set(time_ms);
+            // Engine channels live inside the diagnostic aperture but stay
+            // current even while it is closed: their text doubles as the
+            // deterministic ready/refinement signal for automated tests.
             if elapsed > 0.0 {
                 let fps = (HUD_INTERVAL as f64 / elapsed).round();
                 hud_fps.set_text_content(Some(&fps.to_string()));
             }
-            hud_window_start.set(time_ms);
             hud_chunks.set_text_content(Some(&format!(
                 "{}/{}",
                 stats.fine_chunks, stats.resident_chunks
@@ -829,15 +906,6 @@ fn run_frame_loop(
             let effective_scale =
                 effective_resolution_scale(&renderer.borrow(), stats.resolution_scale);
             hud_scale.set_text_content(Some(&format!("{:.0}%", effective_scale * 100.0)));
-            if let Some(hud_dist) = &hud_dist {
-                // Restrained rounding, and only touch the DOM on change.
-                let text = format!("{:.0} m", stats.distance_m);
-                let mut last = last_dist_text.borrow_mut();
-                if *last != text {
-                    hud_dist.set_text_content(Some(&text));
-                    *last = text;
-                }
-            }
             let gpu = renderer.borrow().gpu_frame_ms();
             let cpu_telemetry = renderer.borrow().cpu_telemetry_string();
             if let Some(text) = cpu_telemetry {
@@ -865,33 +933,113 @@ fn run_frame_loop(
                 }
             }
 
-            // Survival vitals: bar widths + inventory/temperature line.
-            if let Some(fill) = &vitals_thirst {
-                let _ = fill
-                    .style()
-                    .set_property("width", &format!("{:.0}%", stats.hydration * 100.0));
+            // Accessibility switch is a page-level preference; forward it to
+            // the engine on the same bounded cadence as everything else.
+            engine.borrow_mut().set_assisted_consumption(
+                crate::ASSISTED_CONSUMPTION.load(std::sync::atomic::Ordering::Relaxed),
+            );
+
+            // Body trace: the beat is driven entirely by CSS (period and
+            // amplitude custom properties), so the DOM is only touched when
+            // a presented value materially changes.
+            let body = stats.body;
+            if let Some(trace) = &body_trace {
+                let signal = match body.signal {
+                    crate::application::body::PulseSignal::Quiet => "quiet",
+                    crate::application::body::PulseSignal::Active => "active",
+                    crate::application::body::PulseSignal::Strained => "strained",
+                    crate::application::body::PulseSignal::Critical => "critical",
+                };
+                if *last_signal.borrow() != signal {
+                    let _ = trace.set_attribute("data-signal", signal);
+                    *last_signal.borrow_mut() = signal.to_string();
+                }
+                let period_ms = (60_000.0 / body.bpm.max(30.0)) as i32;
+                // Re-time the animation only on a meaningful shift (~4%).
+                if (period_ms - last_beat_period_ms.get()).abs() > period_ms / 25 {
+                    last_beat_period_ms.set(period_ms);
+                    let _ = trace
+                        .style()
+                        .set_property("--beat-period", &format!("{period_ms}ms"));
+                    let _ = trace.style().set_property(
+                        "--beat-amp",
+                        &format!("{:.2}", body.beat_intensity.clamp(0.0, 1.0)),
+                    );
+                }
             }
-            if let Some(fill) = &vitals_hunger {
-                let _ = fill
-                    .style()
-                    .set_property("width", &format!("{:.0}%", stats.satiety * 100.0));
+            if let Some(hud_bpm) = &hud_bpm {
+                // The figure appears only when the body makes it relevant.
+                let text = if body.signal == crate::application::body::PulseSignal::Quiet {
+                    String::new()
+                } else {
+                    format!("{:.0}", body.bpm)
+                };
+                let mut last = last_bpm_text.borrow_mut();
+                if *last != text {
+                    hud_bpm.set_text_content(Some(&text));
+                    *last = text;
+                }
             }
-            if let Some(fill) = &vitals_cond {
-                let _ = fill
-                    .style()
-                    .set_property("width", &format!("{:.0}%", stats.condition * 100.0));
+            if let Some(hud_steps) = &hud_steps {
+                if last_steps.get() != body.steps {
+                    last_steps.set(body.steps);
+                    hud_steps.set_text_content(Some(&body.steps.to_string()));
+                }
             }
-            if let Some(bar) = &vitals_thirst_bar {
-                let _ = bar.set_class_name(if stats.hydration < 0.25 { "bar low" } else { "bar" });
+            // Carried supplies as discrete ticks, never numeric meters.
+            if last_supplies.get() != (stats.almond_bottles, stats.rations) {
+                last_supplies.set((stats.almond_bottles, stats.rations));
+                if let Some(el) = &supply_water {
+                    el.set_text_content(Some(&"▪".repeat(stats.almond_bottles as usize)));
+                }
+                if let Some(el) = &supply_ration {
+                    el.set_text_content(Some(&"▪".repeat(stats.rations as usize)));
+                }
             }
-            if let Some(bar) = &vitals_hunger_bar {
-                let _ = bar.set_class_name(if stats.satiety < 0.25 { "bar low" } else { "bar" });
-            }
-            if let Some(inv) = &vitals_inv {
-                inv.set_text_content(Some(&format!(
-                    "🥛 {} · 🥫 {} · {:.0}°C",
-                    stats.almond_bottles, stats.rations, stats.ambient_c
-                )));
+
+            // Route anchor: shown only while a real resident door is known.
+            if let Some(anchor) = &route_anchor {
+                match stats.route {
+                    Some(route) => {
+                        if !route_visible.get() {
+                            route_visible.set(true);
+                            let _ = anchor.style().set_property("display", "block");
+                        }
+                        let text = format!(
+                            "{}|{:03}|{:.0}",
+                            route.target_level, route.bearing_deg, route.range_m
+                        );
+                        let mut last = last_route_text.borrow_mut();
+                        if *last != text {
+                            *last = text;
+                            if let Some(el) = &route_target_el {
+                                el.set_text_content(Some(&format!(
+                                    "THRESHOLD / L{}",
+                                    route.target_level
+                                )));
+                            }
+                            if let Some(el) = &route_bearing_el {
+                                el.set_text_content(Some(&format!(
+                                    "VECTOR {:03}°",
+                                    route.bearing_deg
+                                )));
+                            }
+                            if let Some(el) = &route_range_el {
+                                el.set_text_content(Some(&format!(
+                                    "RANGE {:.0} m",
+                                    route.range_m
+                                )));
+                            }
+                        }
+                    }
+                    None => {
+                        if route_visible.get() {
+                            route_visible.set(false);
+                            last_route_text.borrow_mut().clear();
+                            let _ = anchor.style().set_property("display", "none");
+                        }
+                    }
+                }
             }
             // Death flash: appears on each new death, fades after ~2.5 s.
             if let Some(overlay) = &death_overlay {
@@ -906,15 +1054,20 @@ fn run_frame_loop(
                 }
             }
 
-            // Anomaly debug overlay (F3 or the settings switch).
+            // Diagnostic aperture (F3 or the settings switch): the engine's
+            // sectioned report rendered as structured panels. The section
+            // split is presentation only; the text itself is authored by
+            // `Engine::diagnostic_text` and stays natively testable.
             if let Some(overlay_el) = &debug_overlay {
                 let on = crate::ANOMALY_DEBUG.load(std::sync::atomic::Ordering::Relaxed);
                 if on {
-                    overlay_el.set_text_content(Some(&engine.borrow().anomaly_debug_text()));
+                    let report = engine.borrow().diagnostic_text();
+                    overlay_el.set_inner_html(&diagnostic_sections_html(&report));
                 }
                 if on != debug_overlay_visible.get() {
                     debug_overlay_visible.set(on);
-                    let _ = overlay_el
+                    let toggled = diagnostics_shell.as_ref().unwrap_or(overlay_el);
+                    let _ = toggled
                         .style()
                         .set_property("display", if on { "block" } else { "none" });
                 }

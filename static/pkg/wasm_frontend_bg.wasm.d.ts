@@ -2,9 +2,6 @@
 /* eslint-disable */
 export const memory: WebAssembly.Memory;
 export const start: () => void;
-export const set_fov: (a: number) => void;
-export const worker_generate: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number];
-export const worker_init: (a: number, b: number, c: number) => void;
 export const get_blueprint_svg: (a: number, b: number, c: number, d: number, e: number) => [number, number];
 export const get_chunk_blueprint_svg: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number];
 export const get_chunk_voxel_blueprint_svg: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number];
@@ -13,6 +10,7 @@ export const get_debug_region_json: (a: number, b: number, c: number) => [number
 export const get_large_voxel_blueprint_svg: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number];
 export const render_toggle_enabled: (a: number, b: number) => number;
 export const set_anomaly_debug: (a: number) => void;
+export const set_assisted_consumption: (a: number) => void;
 export const set_doom_controls: (a: number) => void;
 export const set_invert_y: (a: number) => void;
 export const set_render_toggle: (a: number, b: number, c: number) => void;
@@ -27,6 +25,9 @@ export const set_cpu_virtual_depth: (a: number) => void;
 export const set_cpu_max_draw_distance: (a: number) => void;
 export const set_render_scale: (a: number) => void;
 export const set_cpu_shadows: (a: number) => void;
+export const worker_generate: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number];
+export const worker_init: (a: number, b: number, c: number) => void;
+export const set_fov: (a: number) => void;
 export const wasm_bindgen__convert__closures_____invoke__h4f7fded1a540d94c: (a: number, b: number, c: number) => void;
 export const wasm_bindgen__convert__closures_____invoke__h23ea99ea78eeb43b: (a: number, b: number, c: any) => void;
 export const wasm_bindgen__convert__closures_____invoke__h23ea99ea78eeb43b_2: (a: number, b: number, c: any) => void;

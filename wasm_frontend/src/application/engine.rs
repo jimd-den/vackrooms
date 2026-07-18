@@ -9,7 +9,11 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::application::atlas::{AtlasPool, MAX_CHUNKS, payload_rows};
+use crate::application::body::{Body, BodyContext, BodyReadout};
 use crate::application::collision::{CollisionWorld, player_aabb};
+use crate::application::navigation::{
+    RouteTarget, range_m, relative_bearing_deg, select_anomaly_focus, select_route_target,
+};
 use crate::application::player::{MoveIntent, Player};
 use crate::application::ports::{
     ChunkDraw, ChunkRequest, ChunkSourcePort, CompletedChunk, DynamicLight, Environment,
@@ -85,6 +89,24 @@ pub struct InputFrame {
     pub flashlight: bool,
     /// Edge-triggered flare drop for this frame (G key / touch button).
     pub drop_flare: bool,
+    /// Edge-triggered deliberate drink of one carried almond water (R key /
+    /// touch button).
+    pub drink: bool,
+    /// Edge-triggered deliberate ration meal (T key / touch button).
+    pub eat: bool,
+}
+
+/// A resolved navigation objective for the route anchor: a real, resident
+/// level door. Range is straight-line on the walking plane (there is no
+/// route graph, so the presenter labels it RANGE, never PATH).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RouteAnchor {
+    /// Level id on the far side of the door.
+    pub target_level: u32,
+    /// Bearing relative to the player's facing, whole degrees 0..=359.
+    pub bearing_deg: u16,
+    /// Straight-line range, meters.
+    pub range_m: f32,
 }
 
 /// Snapshot for the HUD presenter.
@@ -114,6 +136,13 @@ pub struct HudStats {
     pub deaths: u32,
     /// The active Backrooms level id.
     pub level: u32,
+    /// The embodied telemetry the body trace presents: steps, pulse,
+    /// signal state, beat prominence. Raw vitals above stay for diagnostics
+    /// only — the normal HUD never renders them as meters.
+    pub body: BodyReadout,
+    /// Present only when a real resident level door is known. `None` is the
+    /// truthful "route unresolved / beyond field" state.
+    pub route: Option<RouteAnchor>,
 }
 
 /// Adaptive internal-resolution governor. Low-spec machines get fewer rays
@@ -214,6 +243,11 @@ const EXCESS_PER_WASTE: f32 = 0.8;
 const EXCESS_DECAY_PER_S: f32 = 1.0 / 300.0;
 /// Seconds between level-door transits (re-arming, not gameplay pacing).
 const DOOR_COOLDOWN_S: f32 = 2.0;
+/// Route-objective reselection cadence. Selection walks the resident exits
+/// (a handful at most), so this is bookkeeping hygiene, not a hot path.
+const ROUTE_RECOMPUTE_PERIOD_S: f32 = 0.5;
+/// Debug-only anomaly awareness radius for the diagnostic aperture, meters.
+const AWARENESS_RANGE_M: f32 = 60.0;
 /// Thermal inertia: seconds for the felt ambient to close ~63% of the gap
 /// to the instantaneous lit-scene temperature.
 const THERMAL_TAU_S: f32 = 8.0;
@@ -358,6 +392,17 @@ pub struct Engine {
     flare_sequence: u64,
     /// Session pedometer: resolved horizontal movement (world units).
     distance_m: f64,
+    /// The wanderer's embodied telemetry: pedometer, exertion, fatigue,
+    /// pulse. Advanced once per tick with the collision-resolved movement.
+    body: Body,
+    /// Cached navigation objective (a resident level door) plus the
+    /// recompute cooldown; selection re-runs on a bounded cadence and is
+    /// invalidated on level switches and reality transitions.
+    route_target: Option<RouteTarget>,
+    route_cooldown: f32,
+    /// Accessibility option: consume carried supplies automatically when a
+    /// vital runs low. Off by default — drinking and eating are deliberate.
+    assisted_consumption: bool,
     /// Engine-time seconds, used only for flare flicker phase.
     time_seconds: f64,
     /// Survival vitals; advanced once per tick under the felt ambient.
@@ -427,6 +472,10 @@ impl Engine {
             flares: Vec::new(),
             flare_sequence: 0,
             distance_m: 0.0,
+            body: Body::default(),
+            route_target: None,
+            route_cooldown: 0.0,
+            assisted_consumption: false,
             time_seconds: 0.0,
             vitals: PlayerVitals::default(),
             excess: 0.0,
@@ -518,6 +567,8 @@ impl Engine {
             self.player.relocate(arrival);
         }
         self.last_safe_position = self.player.position;
+        // Telemetry from the departed level must never survive the door.
+        self.invalidate_route();
         // The felt air snaps toward the new level's baseline over the
         // ordinary inertia; no need to reset it here.
         self.door_cooldown = DOOR_COOLDOWN_S;
@@ -566,9 +617,17 @@ impl Engine {
         self.time_seconds += dt as f64;
 
         let old_pos = self.player.position;
+        // The body's bounded movement multiplier from the *previous* tick's
+        // state degrades acceleration and sustainable speed together;
+        // collision resolution itself is untouched.
+        let effort = self.body.movement_factor();
+        // Resolved walking distance of this tick only; feeds the pedometer
+        // and the exertion model.
+        let mut walked_m = 0.0f32;
         if input.locked {
             self.player.apply_look(input.look_dx, input.look_dy);
-            self.player.step(dt, &input.intent, &self.world);
+            self.player
+                .step_with_effort(dt, &input.intent, &self.world, effort);
 
             // Pedometer: measured here — immediately after the one
             // collision-resolved integration step — so relocations that
@@ -582,6 +641,7 @@ impl Engine {
             // discontinuity, not walking.
             if step < 1.0 {
                 self.distance_m += step as f64;
+                walked_m = step;
             }
         }
         self.update_flares(dt, input);
@@ -633,7 +693,31 @@ impl Engine {
         let blend = (dt / THERMAL_TAU_S).clamp(0.0, 1.0);
         self.ambient_c += (instantaneous_c - self.ambient_c) * blend;
         self.vitals = self.vitals.advanced(dt, self.ambient_c);
-        self.auto_consume_supplies();
+        // Consumption is deliberate: an edge-triggered drink/eat input spends
+        // one carried supply. The assisted option restores the old automatic
+        // behavior for players who opt in.
+        if input.drink {
+            self.drink_carried();
+        }
+        if input.eat {
+            self.eat_carried();
+        }
+        if self.assisted_consumption {
+            self.auto_consume_supplies();
+        }
+        // The body listens to the same survival state the vitals own; the
+        // resolved walking distance is the only movement it ever sees.
+        self.body.advance(
+            dt,
+            walked_m,
+            BodyContext {
+                hydration: self.vitals.hydration,
+                satiety: self.vitals.satiety,
+                condition: self.vitals.condition,
+                ambient_c: self.ambient_c,
+            },
+        );
+        self.update_route(dt);
         if self.vitals.is_dead() {
             self.succumb();
         }
@@ -849,6 +933,9 @@ impl Engine {
                 continue;
             }
             self.reality = next_reality;
+            // A reality transition retires every cached telemetry selection:
+            // the route must reselect against the new address, never mix.
+            self.invalidate_route();
 
             if gate.anomaly_kind == AnomalyKind::RedRoom {
                 // A committed Red Room selects another infinite Level 0
@@ -894,25 +981,25 @@ impl Engine {
         grabbed.sort_by_key(|item| item.id);
         grabbed.dedup_by_key(|item| item.id);
         for item in grabbed {
-            self.reality = self.reality.with_supply_consumed(item.id);
+            // Pickups stock the pockets; drinking and eating are deliberate
+            // acts (`drink_carried`/`eat_carried`). Full pockets leave the
+            // item standing in the world instead of force-feeding the
+            // wanderer — walking past a bottle is never gluttony by itself.
             match item.kind {
                 SupplyKind::AlmondWater => {
-                    if self.vitals.hydration < 0.98 || self.almond_bottles >= CARRY_CAP {
-                        self.register_waste(self.vitals.hydration, ALMOND_WATER_HYDRATION);
-                        self.vitals = self.vitals.drank_almond_water();
-                    } else {
-                        self.almond_bottles += 1;
+                    if self.almond_bottles >= CARRY_CAP {
+                        continue;
                     }
+                    self.almond_bottles += 1;
                 }
                 SupplyKind::Ration => {
-                    if self.vitals.satiety < 0.98 || self.rations >= CARRY_CAP {
-                        self.register_waste(self.vitals.satiety, RATION_SATIETY);
-                        self.vitals = self.vitals.ate_ration();
-                    } else {
-                        self.rations += 1;
+                    if self.rations >= CARRY_CAP {
+                        continue;
                     }
+                    self.rations += 1;
                 }
             }
+            self.reality = self.reality.with_supply_consumed(item.id);
             // Rebuild the chunk holding the marker under the advanced
             // reality so the bottle visibly leaves the world.
             let cs = self.config.chunk_size;
@@ -977,10 +1064,32 @@ impl Engine {
         near.into_iter().map(|(_, sprite)| sprite).collect()
     }
 
-    /// Consumes carried supplies once their vital runs low. Even here a
-    /// little restoration overshoots the full mark, and the overshoot is
-    /// booked as waste — a small, honest cost next to the gluttony of
-    /// drinking at a full reserve.
+    /// Deliberately drinks one carried almond water. Overshooting a full
+    /// reserve is booked as waste — gluttony feeds the excess meter exactly
+    /// like it always has.
+    fn drink_carried(&mut self) {
+        if self.almond_bottles == 0 {
+            return;
+        }
+        self.almond_bottles -= 1;
+        self.register_waste(self.vitals.hydration, ALMOND_WATER_HYDRATION);
+        self.vitals = self.vitals.drank_almond_water();
+    }
+
+    /// Deliberately eats one carried ration.
+    fn eat_carried(&mut self) {
+        if self.rations == 0 {
+            return;
+        }
+        self.rations -= 1;
+        self.register_waste(self.vitals.satiety, RATION_SATIETY);
+        self.vitals = self.vitals.ate_ration();
+    }
+
+    /// Accessibility option (off by default): consumes carried supplies once
+    /// their vital runs low. Even here a little restoration overshoots the
+    /// full mark, and the overshoot is booked as waste — a small, honest
+    /// cost next to the gluttony of drinking at a full reserve.
     fn auto_consume_supplies(&mut self) {
         if self.vitals.hydration < AUTO_CONSUME_AT && self.almond_bottles > 0 {
             self.almond_bottles -= 1;
@@ -1002,15 +1111,59 @@ impl Engine {
 
     /// Death by attrition: the wanderer wakes at the level's arrival point
     /// with reset vitals and empty pockets. The world — drift, consumed
-    /// supplies, sealed rooms — remembers everything.
+    /// supplies, sealed rooms — remembers everything; only the body's
+    /// strain resets (the session pedometer keeps its count).
     fn succumb(&mut self) {
         self.deaths += 1;
         self.vitals = PlayerVitals::default();
         self.almond_bottles = 0;
         self.rations = 0;
+        self.body.reset_strain();
         let spawn = level_spawn(self.level, self.config.spawn);
         self.player.relocate(spawn);
         self.last_safe_position = spawn;
+        self.invalidate_route();
+    }
+
+    /// Drops the cached navigation objective; the next tick reselects from
+    /// whatever the *current* level/reality has resident. Called on level
+    /// switches, reality transitions, and death so telemetry never crosses
+    /// a reality address.
+    fn invalidate_route(&mut self) {
+        self.route_target = None;
+        self.route_cooldown = 0.0;
+    }
+
+    /// Reselects the route objective on a bounded cadence from the resident
+    /// level exits — authoritative generator output, never invented. No
+    /// resident door means no route, truthfully.
+    fn update_route(&mut self, dt: f32) {
+        self.route_cooldown -= dt;
+        if self.route_cooldown > 0.0 {
+            return;
+        }
+        self.route_cooldown = ROUTE_RECOMPUTE_PERIOD_S;
+        let player = [self.player.position[0], self.player.position[2]];
+        let selected = select_route_target(self.store.all_level_exits(), player);
+        self.route_target = selected;
+    }
+
+    /// The presenter-facing route anchor: bearing/range are derived fresh
+    /// from the cached target and the live player pose (cheap trig), so the
+    /// needle tracks head movement between reselections.
+    fn route_anchor(&self) -> Option<RouteAnchor> {
+        let target = self.route_target?;
+        let player = [self.player.position[0], self.player.position[2]];
+        Some(RouteAnchor {
+            target_level: target.target_level,
+            bearing_deg: relative_bearing_deg(self.player.yaw, player, target.position),
+            range_m: range_m(player, target.position),
+        })
+    }
+
+    /// Accessibility option: automatic consumption of carried supplies.
+    pub fn set_assisted_consumption(&mut self, enabled: bool) {
+        self.assisted_consumption = enabled;
     }
 
     /// Squared distance from a point to a drift cell's world rectangle
@@ -1797,7 +1950,125 @@ impl Engine {
             ambient_c: self.ambient_c,
             deaths: self.deaths,
             level: self.level,
+            body: self.body.readout(),
+            route: self.route_anchor(),
         }
+    }
+
+    /// The diagnostic aperture's full report: information-dense, truthful
+    /// about unavailable data, and organized into `§`-headed sections the
+    /// presenter renders as panels. Pure formatting over engine state —
+    /// natively testable, and it deliberately reveals everything the normal
+    /// HUD hides (raw vitals, multipliers, stress contributions, targets).
+    pub fn diagnostic_text(&self) -> String {
+        use std::fmt::Write;
+        let mut out = String::with_capacity(2048);
+        let readout = self.body.readout();
+        let debug = self.body.debug();
+
+        let _ = writeln!(out, "§ SUBJECT");
+        let _ = writeln!(
+            out,
+            "steps {}  walked {:.1} m  (raw session distance {:.1} m)",
+            readout.steps,
+            self.body.walked_m(),
+            self.distance_m,
+        );
+        let _ = writeln!(
+            out,
+            "pulse {:.0} bpm -> target {:.0}  signal {:?}  beat x{:.2}",
+            readout.bpm, readout.target_bpm, readout.signal, readout.beat_intensity,
+        );
+        let _ = writeln!(
+            out,
+            "exertion {:.2}  fatigue {:.2}  movement x{:.2}",
+            readout.exertion, readout.fatigue, readout.movement_factor,
+        );
+        let _ = writeln!(
+            out,
+            "factors: capacity x{:.2}  hydr x{:.2}  sati x{:.2}  cond x{:.2}  fatig x{:.2}",
+            debug.exertion_capacity,
+            debug.hydration_factor,
+            debug.satiety_factor,
+            debug.condition_factor,
+            debug.fatigue_factor,
+        );
+        let _ = writeln!(
+            out,
+            "recovery quality {:.2}  heat stress {:.2}  ambient {:.1} C",
+            debug.recovery_quality, debug.heat_stress, self.ambient_c,
+        );
+        let _ = writeln!(
+            out,
+            "hydration {:.2}  satiety {:.2}  condition {:.2}  excess {:.2}",
+            self.vitals.hydration, self.vitals.satiety, self.vitals.condition, self.excess,
+        );
+        let _ = writeln!(
+            out,
+            "carried: water {}  rations {}  | assisted consumption {}  deaths {}",
+            self.almond_bottles,
+            self.rations,
+            if self.assisted_consumption { "on" } else { "off" },
+            self.deaths,
+        );
+
+        let _ = writeln!(out, "§ ROUTE");
+        match (self.route_target, self.route_anchor()) {
+            (Some(target), Some(anchor)) => {
+                let _ = writeln!(
+                    out,
+                    "door {:08x} -> level {}  at ({:.1}, {:.1})",
+                    (target.exit_id & 0xFFFF_FFFF) as u32,
+                    target.target_level,
+                    target.position[0],
+                    target.position[1],
+                );
+                let _ = writeln!(
+                    out,
+                    "range {:.1} m  bearing {:03}  [straight-line; no route graph exists]",
+                    anchor.range_m, anchor.bearing_deg,
+                );
+            }
+            _ => {
+                let _ = writeln!(out, "unresolved: no door inside the streamed field");
+            }
+        }
+
+        let _ = writeln!(out, "§ AWARENESS");
+        let player = [self.player.position[0], self.player.position[2]];
+        let focus = select_anomaly_focus(
+            self.store.all_traversal_gates(),
+            self.store.all_pit_hazards(),
+            player,
+            AWARENESS_RANGE_M,
+        );
+        match focus {
+            Some(focus) => {
+                let _ = writeln!(
+                    out,
+                    "{:?} {:08x}  range {:.1} m  bearing {:03}  priority {}",
+                    focus.kind,
+                    (focus.instance_id & 0xFFFF_FFFF) as u32,
+                    focus.range_m,
+                    relative_bearing_deg(self.player.yaw, player, focus.position),
+                    focus.priority,
+                );
+                let _ = writeln!(
+                    out,
+                    "(debug-only: no player-facing sensing mechanic exists yet)"
+                );
+            }
+            None => {
+                let _ = writeln!(
+                    out,
+                    "no anomaly signature resident within {AWARENESS_RANGE_M:.0} m"
+                );
+            }
+        }
+
+        let _ = writeln!(out, "§ FIELD");
+        out.push_str(&self.anomaly_debug_text());
+        out
     }
 }
 
@@ -1863,25 +2134,103 @@ mod tests {
     }
 
     #[test]
-    fn pickup_folds_into_reality_and_quenches_or_stocks() {
+    fn pickup_stocks_and_drinking_is_deliberate() {
         let mut engine = provisioned_engine();
         let input = InputFrame::default();
         // Tick 1 streams the spawn chunk; tick 2 grabs the bottle at reach.
         engine.tick(1.0 / 60.0, &input);
         engine.tick(1.0 / 60.0, &input);
         assert!(engine.reality_snapshot().supply_consumed(41));
-        // Fresh vitals are near-full, so the bottle is carried, not drunk.
+        // A pickup always stocks the pockets; nothing is force-drunk.
         assert_eq!(engine.stats().almond_bottles, 1);
 
-        // The carried bottle is drunk the moment thirst runs low.
+        // Low thirst alone changes nothing: consumption is a choice.
         engine.set_vitals_for_test(PlayerVitals {
             hydration: 0.2,
             satiety: 0.9,
             condition: 0.9,
         });
         engine.tick(1.0 / 60.0, &input);
+        assert_eq!(engine.stats().almond_bottles, 1, "no silent auto-drink");
+        assert!(engine.vitals().hydration < 0.3);
+
+        // The deliberate drink input spends the bottle and quenches.
+        let drink = InputFrame {
+            drink: true,
+            ..InputFrame::default()
+        };
+        engine.tick(1.0 / 60.0, &drink);
         assert_eq!(engine.stats().almond_bottles, 0);
-        assert!(engine.vitals().hydration > 0.5, "auto-drink restored thirst");
+        assert!(engine.vitals().hydration > 0.5, "drink restored thirst");
+    }
+
+    #[test]
+    fn assisted_consumption_is_an_explicit_opt_in() {
+        let mut engine = provisioned_engine();
+        engine.set_assisted_consumption(true);
+        let input = InputFrame::default();
+        engine.tick(1.0 / 60.0, &input);
+        engine.tick(1.0 / 60.0, &input);
+        assert_eq!(engine.stats().almond_bottles, 1);
+        engine.set_vitals_for_test(PlayerVitals {
+            hydration: 0.2,
+            satiety: 0.9,
+            condition: 0.9,
+        });
+        engine.tick(1.0 / 60.0, &input);
+        assert_eq!(engine.stats().almond_bottles, 0, "assist drinks when low");
+        assert!(engine.vitals().hydration > 0.5);
+    }
+
+    #[test]
+    fn route_anchor_targets_the_resident_door_and_dies_with_the_level() {
+        let mut engine = provisioned_engine();
+        let input = InputFrame::default();
+        engine.tick(1.0 / 60.0, &input);
+        let route = engine.stats().route.expect("resident door yields a route");
+        assert_eq!(route.target_level, 1);
+        let expected = range_m(
+            [engine.player().position[0], engine.player().position[2]],
+            [8.0, 5.0],
+        );
+        assert!((route.range_m - expected).abs() < 0.5, "{}", route.range_m);
+        assert!(route.bearing_deg < 360);
+
+        // Crossing the door switches levels; the cached route from Level 0
+        // must not survive into Level 1's address space.
+        engine.player.relocate([8.0, 1.7, 5.0]);
+        engine.tick(1.0 / 60.0, &input);
+        assert_eq!(engine.level(), 1);
+        assert_eq!(
+            engine.stats().route,
+            None,
+            "no Level 1 door is resident, so the route is truthfully gone"
+        );
+    }
+
+    #[test]
+    fn body_telemetry_reaches_the_hud_snapshot() {
+        let mut engine = provisioned_engine();
+        let input = InputFrame::default();
+        engine.tick(1.0 / 60.0, &input);
+        let stats = engine.stats();
+        assert_eq!(stats.body.steps, 0, "no movement yet");
+        assert!(stats.body.bpm > 40.0 && stats.body.bpm < 90.0);
+        assert!((0.35..=1.0).contains(&stats.body.movement_factor));
+    }
+
+    #[test]
+    fn diagnostic_text_reports_vessel_route_and_awareness_sections() {
+        let mut engine = provisioned_engine();
+        let input = InputFrame::default();
+        engine.tick(1.0 / 60.0, &input);
+        let text = engine.diagnostic_text();
+        assert!(text.contains("§ SUBJECT"), "{text}");
+        assert!(text.contains("§ ROUTE"), "{text}");
+        assert!(text.contains("§ AWARENESS"), "{text}");
+        assert!(text.contains("§ FIELD"), "{text}");
+        assert!(text.contains("pulse"), "{text}");
+        assert!(text.contains("door"), "resident door must be reported: {text}");
     }
 
     #[test]

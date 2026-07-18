@@ -5,8 +5,10 @@
 //! it exclusively through the ports declared in [`ports`].
 
 pub mod atlas;
+pub mod body;
 pub mod collision;
 pub mod engine;
+pub mod navigation;
 pub mod generation_worker_policy;
 pub mod player;
 pub mod ports;

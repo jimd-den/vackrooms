@@ -38,7 +38,10 @@ async function waitForCapturedScene(page: import('@playwright/test').Page) {
 
 async function hideChrome(page: import('@playwright/test').Page) {
   await page.evaluate(() => {
-    for (const id of ['overlay', 'hud', 'hud-section', 'debug-overlay', 'touch-ui']) {
+    for (const id of [
+      'overlay', 'hud-section', 'diagnostics', 'debug-overlay', 'touch-ui',
+      'reticle', 'body-trace', 'hud-steps-wrap', 'route-anchor',
+    ]) {
       const element = document.getElementById(id);
       if (element) element.style.display = 'none';
     }

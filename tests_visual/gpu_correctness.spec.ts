@@ -165,7 +165,10 @@ for (const backend of referenceBackends) {
     );
 
     await page.evaluate(() => {
-      for (const id of ['overlay', 'hud', 'hud-section', 'debug-overlay']) {
+      for (const id of [
+        'overlay', 'hud-section', 'diagnostics', 'debug-overlay',
+        'reticle', 'body-trace', 'hud-steps-wrap', 'route-anchor',
+      ]) {
         const element = document.getElementById(id);
         if (element) element.style.display = 'none';
       }

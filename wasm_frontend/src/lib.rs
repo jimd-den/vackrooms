@@ -49,10 +49,22 @@ pub static RENDER_SCALE_BITS: AtomicU32 = AtomicU32::new(0);
 #[cfg(target_arch = "wasm32")]
 pub static ANOMALY_DEBUG: AtomicBool = AtomicBool::new(false);
 
+/// Accessibility: automatic consumption of carried supplies when a vital
+/// runs low. Off by default — drinking and eating are deliberate acts. The
+/// frame loop forwards this to the engine each HUD refresh.
+#[cfg(target_arch = "wasm32")]
+pub static ASSISTED_CONSUMPTION: AtomicBool = AtomicBool::new(false);
+
 #[cfg(target_arch = "wasm32")]
 #[wasm_bindgen::prelude::wasm_bindgen]
 pub fn set_anomaly_debug(enabled: bool) {
     ANOMALY_DEBUG.store(enabled, Ordering::Relaxed);
+}
+
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen::prelude::wasm_bindgen]
+pub fn set_assisted_consumption(enabled: bool) {
+    ASSISTED_CONSUMPTION.store(enabled, Ordering::Relaxed);
 }
 
 #[cfg(target_arch = "wasm32")]

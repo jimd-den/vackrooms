@@ -24,6 +24,28 @@
                       ?force_anomaly=pillars|blackout|pits|archway|redroom (debug spawn)
     -->
     <style>
+        /* ------------------------------------------------------------------
+           Field-terminal shell. The interface reads like research-grade
+           DOS-era survival instrumentation from a cutting-edge dimensional
+           experiment: sparse text channels, thin 1px rules, square
+           geometry, explicit units, no chrome. Quiet during calm
+           exploration; present only when the body or the situation makes a
+           signal relevant. No scanlines, no phosphor, no glow by default.
+           ------------------------------------------------------------------ */
+        :root {
+            --ink: #d5dbd0;        /* neutral readable signal */
+            --quiet: #7f8b82;      /* dormant structure */
+            --route: #d7bd70;      /* viable route / architectural direction */
+            --system: #7caeaa;     /* stable technical signal */
+            --hazard: #d45a4c;     /* danger only */
+            --critical: #f0dfcf;   /* urgent focus */
+            --panel: rgba(7, 10, 8, 0.44);
+            --panel-solid: rgba(7, 10, 8, 0.9);
+            --hairline: rgba(127, 139, 130, 0.4);
+            --mono: "Consolas", "Menlo", "DejaVu Sans Mono", monospace;
+            --fs: clamp(10px, 0.5vw + 8px, 14px);
+            --fs-small: clamp(9px, 0.4vw + 7px, 11px);
+        }
         html, body {
             margin: 0;
             padding: 0;
@@ -31,8 +53,9 @@
             height: 100%;
             overflow: hidden;
             background: #000;
-            font-family: 'Courier New', monospace;
-            color: #d8cf9f;
+            font-family: var(--mono);
+            font-size: var(--fs);
+            color: var(--ink);
             /* Touch: the page itself never scrolls or zooms. */
             touch-action: none;
             -webkit-user-select: none;
@@ -49,144 +72,237 @@
             image-rendering: pixelated;
             touch-action: none;
         }
-        /* ---- 80's phosphor HUD -------------------------------------------
-           One type scale drives every panel, so the HUD reads like the same
-           instrument cluster from a 5" phone to a wall projection. */
-        :root {
-            --hud-fs: clamp(10px, 0.65vw + 8px, 18px);
-            --hud-pad: clamp(6px, 0.6vw + 3px, 14px);
-            --hud-amber: #ffb448;
-            --hud-amber-dim: rgba(255, 180, 72, 0.55);
-            --hud-green: #7dff9a;
-            --hud-cyan: #59e0e0;
-            --hud-bg: rgba(10, 8, 2, 0.62);
-            --hud-glow: 0 0 6px rgba(255, 180, 72, 0.35);
-        }
-        .hud-panel {
-            font-family: "Consolas", "Menlo", "DejaVu Sans Mono", monospace;
-            font-size: var(--hud-fs);
-            line-height: 1.55;
-            color: var(--hud-amber);
-            text-shadow: var(--hud-glow);
-            text-transform: uppercase;
-            background: var(--hud-bg);
-            border: 1px solid var(--hud-amber-dim);
-            box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.6);
-            padding: var(--hud-pad) calc(var(--hud-pad) * 1.5);
-            pointer-events: none;
-            position: absolute;
-        }
-        /* CRT scanlines over every panel; cheap and purely decorative. */
-        .hud-panel::after {
+        /* Legibility over dark scenes without panel backings. */
+        .etch { text-shadow: 0 1px 2px rgba(0, 0, 0, 0.9), 0 0 1px rgba(0, 0, 0, 0.9); }
+
+        /* Partial corner brackets instead of complete boxes. */
+        .bracket { position: relative; }
+        .bracket::before, .bracket::after {
             content: "";
             position: absolute;
-            inset: 0;
+            width: 7px;
+            height: 7px;
             pointer-events: none;
-            background: repeating-linear-gradient(
-                0deg,
-                rgba(0, 0, 0, 0.18) 0 1px,
-                transparent 1px 3px
-            );
         }
-        #hud {
-            bottom: calc(12px + env(safe-area-inset-bottom, 0px));
-            left: calc(12px + env(safe-area-inset-left, 0px));
+        .bracket::before {
+            top: -1px; left: -1px;
+            border-top: 1px solid var(--quiet);
+            border-left: 1px solid var(--quiet);
         }
-        #hud b { color: #fff3c4; font-weight: 600; }
-        #hud-dist { letter-spacing: 1px; }
-
-        /* Top-right section readout: which level/zone the player is in. */
-        #hud-section {
-            top: calc(12px + env(safe-area-inset-top, 0px));
-            right: calc(12px + env(safe-area-inset-right, 0px));
-            letter-spacing: 0.18em;
-            text-align: right;
+        .bracket::after {
+            bottom: -1px; right: -1px;
+            border-bottom: 1px solid var(--quiet);
+            border-right: 1px solid var(--quiet);
         }
 
-        /* Survival vitals: segmented phosphor meters, bottom-right. */
-        #vitals {
+        /* Center mark: a single restrained fixation point. */
+        #reticle {
+            position: absolute;
+            left: 50%;
+            top: 50%;
+            width: 3px;
+            height: 3px;
+            margin: -2px 0 0 -2px;
+            border: 1px solid var(--quiet);
+            opacity: 0.55;
+            pointer-events: none;
+        }
+
+        /* ---- Body trace: heart glyph, pulse figure, supply ticks --------- */
+        #body-trace {
+            position: absolute;
+            left: calc(14px + env(safe-area-inset-left, 0px));
+            bottom: calc(34px + env(safe-area-inset-bottom, 0px));
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            pointer-events: none;
+            --beat-period: 1030ms;
+            --beat-amp: 0.12;
+        }
+        #pulse-glyph {
+            width: 15px;
+            height: 15px;
+            display: block;
+            stroke: var(--quiet);
+            fill: none;
+            stroke-width: 1.2;
+            transform-origin: 50% 55%;
+            animation: beat var(--beat-period) steps(1, end) infinite;
+            opacity: 0.8;
+        }
+        /* The beat is a stepped contraction, not a bouncy tween: brief
+           systole, long diastole. Amplitude follows the body's strain. */
+        @keyframes beat {
+            0%   { transform: scale(calc(1 + 0.22 * var(--beat-amp))); opacity: 1; }
+            12%  { transform: scale(1); opacity: 0.8; }
+            100% { transform: scale(1); opacity: 0.8; }
+        }
+        #hud-bpm {
+            font-size: var(--fs);
+            letter-spacing: 0.08em;
+            color: var(--quiet);
+            min-width: 3ch;
+        }
+        #hud-bpm:not(:empty)::after {
+            content: " bpm";
+            font-size: var(--fs-small);
+            color: var(--quiet);
+        }
+        #body-trace[data-signal="active"] #pulse-glyph { stroke: var(--ink); }
+        #body-trace[data-signal="active"] #hud-bpm { color: var(--ink); }
+        #body-trace[data-signal="strained"] #pulse-glyph { stroke: var(--route); }
+        #body-trace[data-signal="strained"] #hud-bpm { color: var(--route); }
+        #body-trace[data-signal="critical"] #pulse-glyph {
+            stroke: var(--hazard);
+            /* The only sanctioned glow: a temporary critical-state cue. */
+            filter: drop-shadow(0 0 3px rgba(212, 90, 76, 0.6));
+        }
+        #body-trace[data-signal="critical"] #hud-bpm { color: var(--hazard); }
+
+        /* Carried supplies: discrete ticks, not meters. */
+        #supply-rack {
+            display: flex;
+            flex-direction: column;
+            gap: 2px;
+            font-size: 8px;
+            line-height: 1;
+            letter-spacing: 2px;
+        }
+        #supply-water { color: var(--system); }
+        #supply-ration { color: var(--quiet); }
+        #supply-water:not(:empty)::before { content: "aw "; color: var(--quiet); letter-spacing: 0; }
+        #supply-ration:not(:empty)::before { content: "rn "; color: var(--quiet); letter-spacing: 0; }
+
+        /* Steps: a recovered record along the lower edge. */
+        #hud-steps-wrap {
+            position: absolute;
+            left: calc(15px + env(safe-area-inset-left, 0px));
             bottom: calc(12px + env(safe-area-inset-bottom, 0px));
-            right: calc(12px + env(safe-area-inset-right, 0px));
-            width: clamp(150px, 16vw, 260px);
+            font-size: var(--fs-small);
+            letter-spacing: 0.12em;
+            color: var(--quiet);
+            pointer-events: none;
+        }
+        #hud-steps { color: var(--ink); }
+        #hud-steps-wrap .unit { margin-left: 5px; }
+
+        /* ---- Route anchor: near the center mark, only when real -------- */
+        #route-anchor {
+            display: none;
+            position: absolute;
+            left: 50%;
+            bottom: 22%;
+            transform: translateX(-50%);
+            text-align: center;
+            pointer-events: none;
+            padding: 3px 10px 4px;
+            border-left: 1px solid var(--hairline);
+        }
+        #route-target {
+            font-size: var(--fs-small);
+            letter-spacing: 0.2em;
+            color: var(--quiet);
+        }
+        #route-bearing {
+            font-size: var(--fs);
             letter-spacing: 0.14em;
+            color: var(--route);
+            margin-top: 1px;
         }
-        #vitals .bar {
-            height: clamp(6px, 0.5vw + 4px, 10px);
-            margin: 3px 0 8px;
-            background: rgba(255, 255, 255, 0.08);
-            border: 1px solid var(--hud-amber-dim);
+        #route-range {
+            font-size: var(--fs-small);
+            letter-spacing: 0.12em;
+            color: var(--ink);
+            margin-top: 1px;
         }
-        #vitals .bar > div {
-            height: 100%;
-            width: 100%;
-            transition: width 0.4s linear;
-            /* Segmented LED look: lit cells with thin gaps. */
-            -webkit-mask-image: repeating-linear-gradient(
-                90deg, #000 0 7px, transparent 7px 9px);
-            mask-image: repeating-linear-gradient(
-                90deg, #000 0 7px, transparent 7px 9px);
-        }
-        #vitals-thirst-fill { background: var(--hud-cyan); box-shadow: 0 0 8px var(--hud-cyan); }
-        #vitals-hunger-fill { background: var(--hud-amber); box-shadow: 0 0 8px var(--hud-amber); }
-        #vitals-cond-fill { background: var(--hud-green); box-shadow: 0 0 8px var(--hud-green); }
-        #vitals .low > div { animation: vitals-blink 1s steps(2) infinite; }
-        @keyframes vitals-blink { 50% { opacity: 0.3; } }
-        #vitals-inv { color: #efe6cf; letter-spacing: 0.08em; }
 
-        /* Death flash: fades in when the wanderer succumbs. */
+        /* Top-right locality readout: which stratum the wanderer is in. */
+        #hud-section {
+            position: absolute;
+            top: calc(12px + env(safe-area-inset-top, 0px));
+            right: calc(14px + env(safe-area-inset-right, 0px));
+            font-size: var(--fs-small);
+            letter-spacing: 0.16em;
+            text-align: right;
+            color: var(--quiet);
+            pointer-events: none;
+        }
+
+        /* ---- Death: signal interruption, not a jump scare --------------- */
         #death-overlay {
             position: absolute;
             inset: 0;
             display: flex;
+            flex-direction: column;
             align-items: center;
             justify-content: center;
-            font-family: "Consolas", "Menlo", "DejaVu Sans Mono", monospace;
-            font-size: clamp(18px, 4vw, 42px);
-            letter-spacing: 0.35em;
-            color: #ff5a4a;
-            text-shadow: 0 0 18px rgba(255, 90, 74, 0.7);
-            background: rgba(8, 4, 2, 0.85);
+            gap: 10px;
+            background: rgba(4, 3, 2, 0.88);
             opacity: 0;
             pointer-events: none;
             transition: opacity 0.8s ease;
             z-index: 5;
+            letter-spacing: 0.4em;
+            text-align: center;
+        }
+        #death-overlay .rule { width: 120px; height: 1px; background: var(--hairline); }
+        #death-overlay .headline {
+            font-size: clamp(14px, 2.4vw, 24px);
+            color: var(--critical);
+        }
+        #death-overlay .sub {
+            font-size: var(--fs-small);
+            letter-spacing: 0.24em;
+            color: var(--quiet);
         }
         #death-overlay.shown { opacity: 1; }
 
-        /* Anomaly debug overlay (F3 or Settings > Debug). */
-        #debug-overlay {
+        /* ---- Diagnostic aperture (F3 / Settings > Debug) ---------------- */
+        #diagnostics {
             display: none;
             position: absolute;
-            top: calc(48px + env(safe-area-inset-top, 0px));
+            top: calc(40px + env(safe-area-inset-top, 0px));
             left: calc(12px + env(safe-area-inset-left, 0px));
-            max-width: min(560px, calc(100vw - 24px));
-            max-height: 60vh;
-            overflow: hidden;
-            font-size: 11px;
-            line-height: 1.45;
-            white-space: pre;
-            color: #9fe8a0;
-            background: rgba(0, 0, 0, 0.7);
-            border: 1px solid #2f5c30;
-            padding: 8px 10px;
+            width: min(620px, calc(100vw - 24px));
+            max-height: 72vh;
+            overflow-y: auto;
+            background: rgba(7, 10, 8, 0.78);
+            border-top: 1px solid var(--hairline);
+            border-bottom: 1px solid var(--hairline);
+            padding: 8px 12px 10px;
             pointer-events: none;
             z-index: 6;
         }
+        .diag-section { margin: 0 0 8px; padding-left: 8px; border-left: 1px solid var(--hairline); }
+        .diag-section h4 {
+            margin: 0 0 3px;
+            font-size: var(--fs-small);
+            font-weight: normal;
+            letter-spacing: 0.28em;
+            color: var(--system);
+        }
+        .diag-section pre {
+            margin: 0;
+            font-family: var(--mono);
+            font-size: 11px;
+            line-height: 1.5;
+            white-space: pre-wrap;
+            color: var(--ink);
+        }
+        #diag-engine pre b { color: var(--critical); font-weight: normal; }
 
-        /* Small screens: clear both thumb zones — stats dock top-left,
-           vitals stay bottom-right but tighter. Type scale is already
-           handled by the clamp()ed --hud-fs. */
+        /* Small screens: clear both thumb zones — the locality label
+           tightens and the aperture narrows. */
         @media (max-width: 700px) {
-            #hud {
-                bottom: auto;
-                top: calc(48px + env(safe-area-inset-top, 0px));
-                left: calc(8px + env(safe-area-inset-left, 0px));
-            }
             #hud-section { letter-spacing: 0.08em; max-width: 55vw; }
-            #vitals { bottom: 8px; right: 8px; }
-            #overlay h1 { font-size: 22px !important; }
+            #body-trace { bottom: calc(56px + env(safe-area-inset-bottom, 0px)); }
+            #hud-steps-wrap { bottom: calc(36px + env(safe-area-inset-bottom, 0px)); }
+            #route-anchor { bottom: 30%; }
+            #overlay h1 { font-size: 20px !important; }
         }
 
+        /* ---- Entry overlay ---------------------------------------------- */
         #overlay {
             position: absolute;
             inset: 0;
@@ -194,213 +310,294 @@
             flex-direction: column;
             align-items: center;
             justify-content: center;
-            background: rgba(0, 0, 0, 0.78);
+            background: rgba(2, 3, 2, 0.82);
             cursor: pointer;
             text-align: center;
             z-index: 10;
         }
         #overlay h1 {
-            font-size: 28px;
-            letter-spacing: 6px;
-            color: #fff3c4;
-            text-shadow: 0 0 18px rgba(255, 240, 180, 0.35);
-            margin-bottom: 8px;
+            font-size: 26px;
+            font-weight: normal;
+            letter-spacing: 0.55em;
+            text-indent: 0.55em;
+            color: var(--ink);
+            margin: 0 0 6px;
+            padding: 10px 26px;
+            position: relative;
         }
-        #overlay p { font-size: 14px; color: #9a916c; padding: 0 16px; }
-        #play-msg { display: none; font-size: 15px; color: #d8cf9f; margin-bottom: 24px; }
+        #overlay h1::before, #overlay h1::after {
+            content: "";
+            position: absolute;
+            width: 10px;
+            height: 10px;
+        }
+        #overlay h1::before { top: 0; left: 0; border-top: 1px solid var(--quiet); border-left: 1px solid var(--quiet); }
+        #overlay h1::after { bottom: 0; right: 0; border-bottom: 1px solid var(--quiet); border-right: 1px solid var(--quiet); }
+        #overlay p { font-size: var(--fs); color: var(--quiet); padding: 0 16px; line-height: 1.7; }
+        #play-msg { display: none; margin-bottom: 22px; color: var(--ink); }
+        #play-msg .alt { color: var(--quiet); }
 
+        button {
+            font-family: var(--mono);
+            border-radius: 0;
+        }
         #settings-btn {
-            padding: 10px 20px; background: transparent; border: 1px solid #9a916c;
-            color: #d8cf9f; cursor: pointer; font-family: inherit; font-size: 14px;
-            transition: all 0.2s; min-height: 44px; border-radius: 6px;
+            padding: 10px 22px;
+            background: transparent;
+            border: 1px solid var(--hairline);
+            color: var(--ink);
+            cursor: pointer;
+            font-size: 13px;
+            letter-spacing: 0.18em;
+            transition: border-color 0.15s, color 0.15s;
+            min-height: 44px;
         }
-        #settings-btn:hover { background: #4a4433; color: #fff3c4; }
+        #settings-btn:hover { border-color: var(--ink); color: var(--critical); }
 
-        /* Redesigned Settings menu */
+        /* ---- Settings: maintenance parameters --------------------------- */
         #settings-menu {
-            display: none; position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
-            background: rgba(18, 18, 18, 0.95); border: 1px solid rgba(216, 207, 159, 0.25); padding: 24px;
-            width: min(440px, calc(100vw - 32px));
-            max-height: min(90vh, 640px);
+            display: none;
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            background: var(--panel-solid);
+            border: 1px solid var(--hairline);
+            padding: 18px 22px;
+            width: min(460px, calc(100vw - 32px));
+            max-height: min(90vh, 660px);
             overflow-y: auto;
-            border-radius: 12px;
-            backdrop-filter: blur(12px);
-            z-index: 20; color: #d8cf9f; box-shadow: 0 10px 30px rgba(0,0,0,0.8);
-            text-align: left; cursor: default;
+            z-index: 20;
+            color: var(--ink);
+            text-align: left;
+            cursor: default;
             touch-action: pan-y;   /* the menu itself may scroll */
         }
-        #settings-menu h2 { margin-top: 0; color: #fff3c4; font-size: 20px; letter-spacing: 4px; border-bottom: 1px solid rgba(216, 207, 159, 0.15); padding-bottom: 10px; margin-bottom: 15px; text-align: center; }
+        #settings-menu h2 {
+            margin: 0 0 12px;
+            color: var(--ink);
+            font-size: 13px;
+            font-weight: normal;
+            letter-spacing: 0.34em;
+            border-bottom: 1px solid var(--hairline);
+            padding-bottom: 9px;
+        }
 
         .tabs-bar {
             display: flex;
-            border-bottom: 1px solid rgba(216, 207, 159, 0.15);
-            margin-bottom: 16px;
-            gap: 4px;
+            border-bottom: 1px solid var(--hairline);
+            margin-bottom: 14px;
+            gap: 2px;
             overflow-x: auto;
             -webkit-overflow-scrolling: touch;
         }
         .tab-btn {
             flex: 1;
-            padding: 8px 4px;
+            padding: 9px 4px;
             background: transparent;
             border: none;
-            color: #9a916c;
-            font-family: inherit;
-            font-weight: bold;
+            color: var(--quiet);
             cursor: pointer;
             font-size: 11px;
-            letter-spacing: 1px;
+            letter-spacing: 0.08em;
             text-align: center;
-            transition: all 0.2s;
-            border-bottom: 2px solid transparent;
-            min-width: 70px;
+            transition: color 0.15s;
+            border-bottom: 1px solid transparent;
+            margin-bottom: -1px;
+            min-width: 64px;
+            min-height: 40px;
         }
         .tab-btn.active {
-            color: #fff3c4;
-            border-bottom: 2px solid #fff3c4;
+            color: var(--critical);
+            border-bottom: 1px solid var(--route);
         }
 
-        .setting-row { margin-bottom: 16px; }
-        .setting-row label { display: block; margin-bottom: 6px; font-size: 13px; color: #bcae7e; }
-        .setting-row .value { color: #fff3c4; float: right; font-weight: bold; }
+        .setting-row { margin-bottom: 14px; }
+        .setting-row label { display: block; margin-bottom: 5px; font-size: 12px; color: var(--quiet); }
+        .setting-row .value { color: var(--critical); float: right; }
         .setting-row select, .setting-row input[type="text"], .setting-row input[type="number"] {
-            width: 100%; padding: 10px; background: rgba(0, 0, 0, 0.6); border: 1px solid rgba(216, 207, 159, 0.2);
-            color: #d8cf9f; font-family: inherit; box-sizing: border-box; font-size: 14px; border-radius: 6px;
+            width: 100%;
+            padding: 10px;
+            background: rgba(0, 0, 0, 0.55);
+            border: 1px solid var(--hairline);
+            border-radius: 0;
+            color: var(--ink);
+            font-family: var(--mono);
+            box-sizing: border-box;
+            font-size: 13px;
             outline: none;
         }
-        .setting-row select:focus, .setting-row input[type="text"]:focus {
-            border-color: #fff3c4;
+        .setting-row select:focus, .setting-row input[type="text"]:focus,
+        .setting-row input[type="number"]:focus {
+            border-color: var(--system);
         }
-        .setting-row input[type="range"] { 
-            width: 100%; 
-            accent-color: #d8cf9f; 
-            height: 28px; 
+        .setting-row input[type="range"] {
+            width: 100%;
+            accent-color: var(--system);
+            height: 28px;
             background: transparent;
             cursor: pointer;
         }
         .settings-group {
-            margin: 14px 0 18px;
-            padding: 12px 12px 1px;
-            border: 1px solid rgba(216, 207, 159, 0.14);
-            border-radius: 8px;
-            background: rgba(0, 0, 0, 0.16);
+            margin: 12px 0 16px;
+            padding: 10px 12px 1px;
+            border-left: 1px solid var(--hairline);
         }
         .settings-group h3 {
-            margin: 0 0 12px;
-            color: #fff3c4;
-            font-size: 11px;
-            letter-spacing: 2px;
+            margin: 0 0 10px;
+            color: var(--system);
+            font-size: 10px;
+            font-weight: normal;
+            letter-spacing: 0.26em;
             text-transform: uppercase;
         }
 
-        /* Switch styling for checkboxes */
+        /* Checkboxes: square state indicators, not pill toggles. */
         .setting-row.inline-switch {
             display: flex;
             justify-content: space-between;
             align-items: center;
-            margin-bottom: 16px;
+            margin-bottom: 13px;
+            min-height: 28px;
         }
         .setting-row.inline-switch label {
             display: inline;
             margin-bottom: 0;
         }
         .setting-row.inline-switch input[type="checkbox"] {
-            width: 44px;
-            height: 22px;
             appearance: none;
-            background: rgba(0, 0, 0, 0.6);
-            border: 1px solid rgba(216, 207, 159, 0.2);
-            border-radius: 11px;
+            width: 30px;
+            height: 18px;
+            margin: 0;
+            background: rgba(0, 0, 0, 0.55);
+            border: 1px solid var(--hairline);
             position: relative;
             outline: none;
             cursor: pointer;
-            transition: background 0.2s;
-        }
-        .setting-row.inline-switch input[type="checkbox"]:checked {
-            background: #4a4433;
+            flex-shrink: 0;
         }
         .setting-row.inline-switch input[type="checkbox"]::before {
-            content: '';
+            content: "";
             position: absolute;
-            width: 16px;
-            height: 16px;
-            border-radius: 50%;
-            top: 2px;
-            left: 2px;
-            background: #9a916c;
-            transition: transform 0.2s, background 0.2s;
+            inset: 3px;
+            right: 15px;
+            background: var(--quiet);
+            opacity: 0.35;
+            transition: none;
         }
         .setting-row.inline-switch input[type="checkbox"]:checked::before {
-            transform: translateX(22px);
-            background: #fff3c4;
+            inset: 3px;
+            left: 15px;
+            right: 3px;
+            background: var(--system);
+            opacity: 1;
+        }
+        .setting-row.inline-switch input[type="checkbox"]:focus-visible {
+            border-color: var(--system);
         }
 
-        .hint { font-size: 11px; color: #8e8363; margin: 12px 0; line-height: 1.4; text-align: center; }
+        .hint { font-size: 11px; color: var(--quiet); margin: 10px 0; line-height: 1.5; }
 
-        .settings-actions { display: flex; gap: 8px; margin-top: 16px; }
+        .settings-actions { display: flex; gap: 6px; margin-top: 14px; }
         .settings-actions button {
-            flex: 1; padding: 12px 8px; background: rgba(50, 45, 35, 0.4); border: 1px solid rgba(216, 207, 159, 0.3);
-            color: #fff3c4; cursor: pointer; font-family: inherit; min-height: 44px; font-size: 13px; border-radius: 6px;
-            transition: all 0.2s;
+            flex: 1;
+            padding: 12px 8px;
+            background: transparent;
+            border: 1px solid var(--hairline);
+            color: var(--ink);
+            cursor: pointer;
+            min-height: 44px;
+            font-size: 12px;
+            letter-spacing: 0.08em;
+            transition: border-color 0.15s, color 0.15s;
         }
-        .settings-actions button:hover { background: rgba(74, 68, 51, 0.6); }
-        #apply-settings-btn { background: #4a4433; border-color: #9a916c; }
-        #apply-settings-btn:hover { background: #6b634b; }
+        .settings-actions button:hover { border-color: var(--ink); }
+        #apply-settings-btn { border-color: var(--route); color: var(--route); }
+        #apply-settings-btn:hover { color: var(--critical); border-color: var(--critical); }
 
-        /* Touch play chrome: shown by the engine while a touch session is
-           active. Big hit targets, corners out of the joystick zones. */
+        /* ---- Touch chrome ----------------------------------------------- */
         #touch-ui {
             display: none;
             position: absolute;
             top: calc(10px + env(safe-area-inset-top, 0px));
             left: calc(10px + env(safe-area-inset-left, 0px));
-            gap: 10px; z-index: 5;
+            gap: 8px;
+            z-index: 5;
         }
         #touch-ui button {
-            width: 52px; height: 52px; font-size: 22px;
-            background: rgba(0, 0, 0, 0.55); color: #d8cf9f;
-            border: 1px solid #4a4433; border-radius: 8px;
-            font-family: inherit; touch-action: none;
+            width: 52px;
+            height: 52px;
+            font-size: 10px;
+            letter-spacing: 0.1em;
+            background: var(--panel);
+            color: var(--ink);
+            border: 1px solid var(--hairline);
+            font-family: var(--mono);
+            touch-action: none;
         }
-        #btn-flare { color: #ff9a55; }
+        #btn-flare { color: var(--route); }
+        #btn-drink { color: var(--system); }
         #touch-hint {
-            position: absolute; bottom: 10px; width: 100%; text-align: center;
-            font-size: 11px; color: rgba(216, 207, 159, 0.5); pointer-events: none;
+            position: absolute;
+            bottom: calc(8px + env(safe-area-inset-bottom, 0px));
+            width: 100%;
+            text-align: center;
+            font-size: 10px;
+            letter-spacing: 0.1em;
+            color: rgba(127, 139, 130, 0.6);
+            pointer-events: none;
         }
     </style>
 </head>
 <body>
     <canvas id="view"></canvas>
 
-    <div id="hud" class="hud-panel">
-        DISTANCE <b id="hud-dist">0 m</b><br>
-        Renderer <b id="hud-renderer">—</b><br>
-        FPS <b id="hud-fps">—</b><br>
-        Chunks <b id="hud-chunks">0</b><br>
-        SVO nodes <b id="hud-nodes">0</b><br>
-        Res scale <b id="hud-scale">—</b><br>
-        GPU <b id="hud-gpu">—</b>
+    <div id="reticle"></div>
+
+    <!-- Route anchor: appears only when a real resident door is known. -->
+    <div id="route-anchor" class="etch">
+        <div id="route-target">THRESHOLD / —</div>
+        <div id="route-bearing">VECTOR ---°</div>
+        <div id="route-range">RANGE — m</div>
     </div>
 
-    <div id="hud-section" class="hud-panel">&hellip;</div>
-
-    <div id="vitals" class="hud-panel">
-        THIRST
-        <div class="bar" id="vitals-thirst"><div id="vitals-thirst-fill"></div></div>
-        HUNGER
-        <div class="bar" id="vitals-hunger"><div id="vitals-hunger-fill"></div></div>
-        CONDITION
-        <div class="bar" id="vitals-cond"><div id="vitals-cond-fill"></div></div>
-        <span id="vitals-inv">🥛 0 · 🥫 0 · <span id="vitals-temp">21°C</span></span>
+    <!-- Body trace: the only permanent vital presence. -->
+    <div id="body-trace" class="etch" data-signal="quiet">
+        <svg id="pulse-glyph" viewBox="0 0 16 16" aria-hidden="true">
+            <path d="M8 14 L1.5 7.5 L1.5 4 L4.5 1.5 L8 4.5 L11.5 1.5 L14.5 4 L14.5 7.5 Z"/>
+        </svg>
+        <span id="hud-bpm"></span>
+        <div id="supply-rack"><span id="supply-water"></span><span id="supply-ration"></span></div>
     </div>
-    <div id="death-overlay">YOU SUCCUMBED</div>
-    <pre id="debug-overlay"></pre>
+    <div id="hud-steps-wrap" class="etch"><span id="hud-steps">0</span><span class="unit">steps</span></div>
+
+    <div id="hud-section" class="etch">&hellip;</div>
+
+    <div id="death-overlay">
+        <div class="rule"></div>
+        <div class="headline">TELEMETRY LOST</div>
+        <div class="sub">subject reacquired at anchor point</div>
+        <div class="rule"></div>
+    </div>
+
+    <!-- Diagnostic aperture: engine channels stay in the DOM permanently;
+         the report body is re-rendered by the wasm driver while open. -->
+    <div id="diagnostics">
+        <section class="diag-section" id="diag-engine">
+            <h4>ENGINE</h4>
+            <pre>renderer <b id="hud-renderer">—</b>   fps <b id="hud-fps">—</b>   frame <b id="hud-gpu">—</b>
+chunks <b id="hud-chunks">0</b>   svo nodes <b id="hud-nodes">0</b>   scale <b id="hud-scale">—</b></pre>
+        </section>
+        <div id="debug-overlay"></div>
+    </div>
 
     <!-- Touch-session chrome; the wasm driver toggles its visibility. -->
     <div id="touch-ui">
-        <button id="btn-menu" aria-label="Menu">&#9776;</button>
-        <button id="btn-flashlight" aria-label="Flashlight">&#128294;</button>
-        <button id="btn-flare" aria-label="Drop flare">&#128293;</button>
+        <button id="btn-menu" aria-label="Menu">MENU</button>
+        <button id="btn-flashlight" aria-label="Flashlight">LAMP</button>
+        <button id="btn-flare" aria-label="Drop flare">FLARE</button>
+        <button id="btn-drink" aria-label="Drink almond water">AW</button>
+        <button id="btn-eat" aria-label="Eat ration">MRE</button>
         <div id="touch-hint">left: move &middot; right: look</div>
     </div>
 
@@ -408,22 +605,22 @@
         <h1>VACKROOMS</h1>
         <p id="status-msg">Generating world in WebAssembly&hellip;</p>
         <p id="play-msg">
-            Click to enter &mdash; WASD move &middot; mouse look &middot; F flashlight &middot; G drop flare &middot; ESC release<br>
-            <span style="color:#9a916c">Touch: tap to enter &mdash; left thumb move &middot; right thumb look &middot; &#128293; drop flare</span>
+            Click to enter &mdash; WASD move &middot; mouse look &middot; F lamp &middot; G flare &middot; R drink &middot; T eat &middot; ESC release<br>
+            <span class="alt">Touch: tap to enter &mdash; left thumb move &middot; right thumb look</span>
         </p>
-        <button id="settings-btn" style="display: none;">Settings</button>
+        <button id="settings-btn" style="display: none;">SETTINGS</button>
     </div>
 
-    <div id="settings-menu">
-        <h2>SETTINGS</h2>
+    <div id="settings-menu" class="bracket">
+        <h2>CONFIGURATION &mdash; FIELD TERMINAL</h2>
 
         <div class="tabs-bar">
-            <button class="tab-btn active" data-tab="tab-controls">CONTROLS</button>
-            <button class="tab-btn" data-tab="tab-graphics">GRAPHICS</button>
-            <button class="tab-btn" data-tab="tab-optimizations">OPTIMIZE</button>
-            <button class="tab-btn" data-tab="tab-world">WORLD</button>
-            <button class="tab-btn" data-tab="tab-cpu">CPU RENDER</button>
-            <button class="tab-btn" data-tab="tab-debug">DEBUG</button>
+            <button class="tab-btn active" data-tab="tab-controls">Controls</button>
+            <button class="tab-btn" data-tab="tab-graphics">Graphics</button>
+            <button class="tab-btn" data-tab="tab-optimizations">Optimize</button>
+            <button class="tab-btn" data-tab="tab-world">World</button>
+            <button class="tab-btn" data-tab="tab-cpu">CPU render</button>
+            <button class="tab-btn" data-tab="tab-debug">Debug</button>
         </div>
 
         <!-- Controls Tab -->
@@ -443,6 +640,11 @@
                 <label for="setting-invert-y">Invert Y axis</label>
                 <input type="checkbox" id="setting-invert-y">
             </div>
+            <div class="setting-row inline-switch">
+                <label for="setting-assist-consume">Assisted consumption (auto drink/eat when low)</label>
+                <input type="checkbox" id="setting-assist-consume">
+            </div>
+            <p class="hint">Provisions are used deliberately: R drinks almond water, T eats a ration. The assisted option restores automatic use for accessibility.</p>
         </div>
 
         <!-- Graphics Tab -->
@@ -670,7 +872,7 @@
         <!-- Debug Tab -->
         <div id="tab-debug" class="tab-content" style="display: none;">
             <div class="setting-row inline-switch">
-                <label for="setting-anomaly-debug">Anomaly debug overlay (F3)</label>
+                <label for="setting-anomaly-debug">Diagnostic aperture (F3)</label>
                 <input type="checkbox" id="setting-anomaly-debug">
             </div>
             <div class="setting-row">
@@ -684,7 +886,7 @@
                     <option value="redroom">Red room</option>
                 </select>
             </div>
-            <p class="hint">The forced anomaly is placed deterministically on the spawn's macro cell so every worker generates the same world. The overlay lists reality epochs, traversal gates and pit hazards near you.</p>
+            <p class="hint">The forced anomaly is placed deterministically on the spawn's macro cell so every worker generates the same world. The aperture reports body telemetry, route state, reality epochs, traversal gates and pit hazards near you.</p>
         </div>
 
         <p class="hint">Controls and unmarked Graphics/CPU settings apply instantly. Rows marked “reload” require Apply &amp; Reload.</p>
@@ -712,6 +914,7 @@
             set_cpu_max_draw_distance,
             set_cpu_shadows,
             set_anomaly_debug,
+            set_assisted_consumption,
             set_render_toggle,
         } from './pkg/wasm_frontend.js';
 
@@ -786,6 +989,7 @@
             scheme: 'modern',
             sensitivity: 1.0,
             invertY: false,
+            assistConsume: false,
             scale: 0,
             fov: 75,
             generationWorkers: 'auto',
@@ -885,6 +1089,7 @@
         $('setting-sensitivity').value = prefs.sensitivity;
         $('sensitivity-value').textContent = Number(prefs.sensitivity).toFixed(1);
         $('setting-invert-y').checked = !!prefs.invertY;
+        $('setting-assist-consume').checked = !!prefs.assistConsume;
         $('setting-scale').value = String(prefs.scale);
         $('setting-fov').value = prefs.fov;
         $('fov-value').textContent = `${prefs.fov}°`;
@@ -999,6 +1204,7 @@
             set_doom_controls(prefs.scheme === 'doom');
             set_mouse_sensitivity(Number(prefs.sensitivity));
             set_invert_y(!!prefs.invertY);
+            set_assisted_consumption(!!prefs.assistConsume);
             set_render_scale(Number(prefs.scale));
             set_fov(Number(prefs.fov));
 
@@ -1034,6 +1240,10 @@
         $('setting-invert-y').addEventListener('change', (e) => {
             prefs.invertY = e.target.checked; savePrefs();
             set_invert_y(prefs.invertY);
+        });
+        $('setting-assist-consume').addEventListener('change', (e) => {
+            prefs.assistConsume = e.target.checked; savePrefs();
+            set_assisted_consumption(prefs.assistConsume);
         });
         $('setting-scale').addEventListener('change', (e) => {
             prefs.scale = Number(e.target.value); savePrefs();

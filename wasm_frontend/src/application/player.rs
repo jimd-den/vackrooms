@@ -79,6 +79,25 @@ impl Player {
     /// the X and Z axes are moved and tested independently, so hitting a
     /// wall diagonally slides the player along it instead of stopping dead.
     pub fn step(&mut self, dt: f32, intent: &MoveIntent, world: &CollisionWorld) {
+        self.step_with_effort(dt, intent, world, 1.0);
+    }
+
+    /// [`Player::step`] with a bounded effort multiplier from the embodied
+    /// exertion model. Effort scales the wish acceleration, so both terminal
+    /// speed (`ACCELERATION * effort / FRICTION`) and responsiveness degrade
+    /// together, smoothly — friction and collision behavior are untouched.
+    pub fn step_with_effort(
+        &mut self,
+        dt: f32,
+        intent: &MoveIntent,
+        world: &CollisionWorld,
+        effort: f32,
+    ) {
+        let effort = if effort.is_finite() {
+            effort.clamp(0.05, 1.0)
+        } else {
+            1.0
+        };
         // Friction: exponential-style decay, matching `v -= v * 8 * dt`.
         self.vel_strafe -= self.vel_strafe * FRICTION * dt;
         self.vel_forward -= self.vel_forward * FRICTION * dt;
@@ -100,8 +119,8 @@ impl Player {
             wish_strafe /= len;
         }
 
-        self.vel_forward += wish_forward * ACCELERATION * dt;
-        self.vel_strafe += wish_strafe * ACCELERATION * dt;
+        self.vel_forward += wish_forward * ACCELERATION * effort * dt;
+        self.vel_strafe += wish_strafe * ACCELERATION * effort * dt;
 
         let fwd = self.forward();
         let rgt = self.right();
@@ -207,6 +226,34 @@ mod tests {
             "should have slid along the wall, x = {}",
             p.position[0]
         );
+    }
+
+    #[test]
+    fn effort_scales_terminal_speed_but_never_stops_movement() {
+        let world = CollisionWorld::new();
+        let intent = MoveIntent {
+            forward: true,
+            ..Default::default()
+        };
+        let dt = 1.0 / 60.0;
+        let mut weary = Player::new([0.0, 1.7, 0.0]);
+        for _ in 0..(6.0 / dt) as usize {
+            weary.step_with_effort(dt, &intent, &world, 0.5);
+        }
+        let before = weary.position[2];
+        for _ in 0..(1.0 / dt) as usize {
+            weary.step_with_effort(dt, &intent, &world, 0.5);
+        }
+        let speed = (before - weary.position[2]).abs();
+        assert!((speed - 1.25).abs() < 0.05, "half effort halves terminal: {speed}");
+
+        // Hostile effort values are clamped, never zeroing movement.
+        let mut p = Player::new([0.0, 1.7, 0.0]);
+        for _ in 0..120 {
+            p.step_with_effort(dt, &intent, &world, f32::NAN);
+            p.step_with_effort(dt, &intent, &world, -3.0);
+        }
+        assert!(p.position[2] < -0.2, "movement survives bad effort input");
     }
 
     #[test]

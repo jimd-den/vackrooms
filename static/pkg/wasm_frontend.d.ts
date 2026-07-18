@@ -48,6 +48,8 @@ export function render_toggle_enabled(name: string): boolean | undefined;
 
 export function set_anomaly_debug(enabled: boolean): void;
 
+export function set_assisted_consumption(enabled: boolean): void;
+
 export function set_cpu_lod_cutoff(cutoff: number): void;
 
 export function set_cpu_max_draw_distance(dist: number): void;
@@ -126,9 +128,6 @@ export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembl
 export interface InitOutput {
     readonly memory: WebAssembly.Memory;
     readonly start: () => void;
-    readonly set_fov: (a: number) => void;
-    readonly worker_generate: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number];
-    readonly worker_init: (a: number, b: number, c: number) => void;
     readonly get_blueprint_svg: (a: number, b: number, c: number, d: number, e: number) => [number, number];
     readonly get_chunk_blueprint_svg: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number];
     readonly get_chunk_voxel_blueprint_svg: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number];
@@ -137,6 +136,7 @@ export interface InitOutput {
     readonly get_large_voxel_blueprint_svg: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number];
     readonly render_toggle_enabled: (a: number, b: number) => number;
     readonly set_anomaly_debug: (a: number) => void;
+    readonly set_assisted_consumption: (a: number) => void;
     readonly set_doom_controls: (a: number) => void;
     readonly set_invert_y: (a: number) => void;
     readonly set_render_toggle: (a: number, b: number, c: number) => void;
@@ -151,6 +151,9 @@ export interface InitOutput {
     readonly set_cpu_max_draw_distance: (a: number) => void;
     readonly set_render_scale: (a: number) => void;
     readonly set_cpu_shadows: (a: number) => void;
+    readonly worker_generate: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number];
+    readonly worker_init: (a: number, b: number, c: number) => void;
+    readonly set_fov: (a: number) => void;
     readonly wasm_bindgen__convert__closures_____invoke__h4f7fded1a540d94c: (a: number, b: number, c: number) => void;
     readonly wasm_bindgen__convert__closures_____invoke__h23ea99ea78eeb43b: (a: number, b: number, c: any) => void;
     readonly wasm_bindgen__convert__closures_____invoke__h23ea99ea78eeb43b_2: (a: number, b: number, c: any) => void;

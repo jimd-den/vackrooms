@@ -20,6 +20,12 @@ pub struct InputCollector {
     /// holding G never queues a second drop until the key is released.
     flare_queued: bool,
     flare_key_held: bool,
+    /// Deliberate consumption, edge-triggered exactly like the flare:
+    /// R drinks one carried almond water, T eats one carried ration.
+    drink_queued: bool,
+    drink_key_held: bool,
+    eat_queued: bool,
+    eat_key_held: bool,
 }
 
 impl InputCollector {
@@ -48,6 +54,20 @@ impl InputCollector {
                 self.flare_queued = true;
             }
             self.flare_key_held = pressed;
+        }
+
+        // Deliberate consumption: one supply per key press, only in play.
+        if code == "KeyR" {
+            if pressed && !self.drink_key_held && self.locked {
+                self.drink_queued = true;
+            }
+            self.drink_key_held = pressed;
+        }
+        if code == "KeyT" {
+            if pressed && !self.eat_key_held && self.locked {
+                self.eat_queued = true;
+            }
+            self.eat_key_held = pressed;
         }
 
         if doom {
@@ -117,6 +137,20 @@ impl InputCollector {
         }
     }
 
+    /// Queues one deliberate drink (touch button; keyboard uses KeyR).
+    pub fn queue_drink(&mut self) {
+        if self.locked {
+            self.drink_queued = true;
+        }
+    }
+
+    /// Queues one deliberate meal (touch button; keyboard uses KeyT).
+    pub fn queue_eat(&mut self) {
+        if self.locked {
+            self.eat_queued = true;
+        }
+    }
+
     /// Pointer lock engaged/released. Releasing clears held keys so the
     /// player doesn't keep walking while the overlay is up.
     pub fn set_locked(&mut self, locked: bool) {
@@ -126,6 +160,8 @@ impl InputCollector {
             self.pending_dx = 0.0;
             self.pending_dy = 0.0;
             self.flare_queued = false;
+            self.drink_queued = false;
+            self.eat_queued = false;
         }
     }
 
@@ -143,10 +179,14 @@ impl InputCollector {
             locked: self.locked,
             flashlight: self.flashlight,
             drop_flare: self.flare_queued,
+            drink: self.drink_queued,
+            eat: self.eat_queued,
         };
         self.pending_dx = 0.0;
         self.pending_dy = 0.0;
         self.flare_queued = false;
+        self.drink_queued = false;
+        self.eat_queued = false;
         frame
     }
 }
