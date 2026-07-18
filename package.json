@@ -5,6 +5,7 @@
   "scripts": {
     "build:wasm": "node scripts/build-wasm.mjs",
     "check:wasm": "node scripts/check-wasm-fresh.mjs",
+    "play": "cargo run -p wasm_frontend --bin play --release --",
     "build:single": "npm run build:wasm && node scripts/build-single-file.mjs"
   }
 }

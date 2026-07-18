@@ -12,7 +12,7 @@ pub mod shader;
 
 #[cfg(target_arch = "wasm32")]
 pub mod browser_context;
-#[cfg(target_arch = "wasm32")]
+// Pure thread-local camera policy; the native `play` binary shares it.
 pub mod camera_state;
 #[cfg(target_arch = "wasm32")]
 pub mod renderer;

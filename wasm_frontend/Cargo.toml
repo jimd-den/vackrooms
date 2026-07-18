@@ -34,10 +34,12 @@ image = { version = "0.25.10", default-features = false, features = ["png"] }
 vackrooms = { path = ".." }
 
 # Keep the portable renderer pipelines buildable on the host. Native tests
-# select Vulkan explicitly and render into headless textures; no windowing
-# dependency is needed.
+# select Vulkan explicitly and render into headless textures; the `play`
+# binary opens a real window through winit.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 wgpu = { version = "30.0", default-features = false, features = ["std", "vulkan", "wgsl"] }
+winit = "0.30"
+pollster = "1.0"
 
 # Browser bindings are wasm-only so `cargo test` on the host runs the pure
 # application/adapters layers without pulling in web-sys.
@@ -69,6 +71,18 @@ web-sys = { version = "0.3", features = [
     "WorkerType",
     "MessageEvent",
     "console",
+    "Storage",
+    "CanvasRenderingContext2d",
+    "ImageData",
+    "WebGl2RenderingContext",
+    "WebGlProgram",
+    "WebGlQuery",
+    "WebGlShader",
+    "WebGlTexture",
+    "WebGlBuffer",
+    "WebGlVertexArrayObject",
+    "WebGlUniformLocation",
+    "WebGlFramebuffer",
 ] }
 
 [dev-dependencies]

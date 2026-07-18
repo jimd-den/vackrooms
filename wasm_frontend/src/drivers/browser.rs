@@ -28,6 +28,10 @@ use crate::application::ports::{
     ChunkDraw, FrameParams, RenderArtifactNeeds, RendererPort, SurfaceChunk, SurfaceChunkKey,
 };
 use crate::drivers::console_telemetry::CONSOLE_TELEMETRY;
+use crate::drivers::cpu_canvas::CpuCanvasRenderer;
+use crate::drivers::splat_webgl::{SplatProfile, SplatRenderer};
+use crate::drivers::surface_webgl::SurfaceRenderer;
+use crate::drivers::webgl::WebGl2Renderer;
 use crate::drivers::webgpu::config::{GpuQualityProfile, RendererKind};
 use crate::drivers::webgpu::renderer::WebGpuRenderer;
 
@@ -38,7 +42,154 @@ const WORLD_SEED: u32 = 42;
 /// HUD refresh cadence in frames.
 const HUD_INTERVAL: u32 = 30;
 
-type DriverRenderer = WebGpuRenderer;
+/// The dual-backend renderer set. WebGL2 is the boot default — it runs on
+/// every browser this project targets, including Firefox ESR and mobile —
+/// while the WebGPU stack is an explicit opt-in (`?backend=webgpu` or the
+/// Settings > Backend switch) until its reach catches up.
+enum DriverRenderer {
+    Surface(SurfaceRenderer),
+    Splat(SplatRenderer),
+    Raymarch(WebGl2Renderer),
+    Cpu(CpuCanvasRenderer),
+    WebGpu(WebGpuRenderer),
+}
+
+impl DriverRenderer {
+    fn resize(&mut self, width: u32, height: u32) {
+        match self {
+            DriverRenderer::Surface(r) => r.resize(width, height),
+            DriverRenderer::Splat(r) => r.resize(width, height),
+            DriverRenderer::Raymarch(r) => r.resize(width, height),
+            DriverRenderer::Cpu(r) => r.resize(width, height),
+            DriverRenderer::WebGpu(r) => r.resize(width, height),
+        }
+    }
+
+    /// Internal-resolution multiplier (further scaled by the adaptive
+    /// governor). The CPU quality model owns its bounded fraction so the
+    /// canvas and software framebuffer always have identical dimensions.
+    fn resolution_factor(&self) -> f64 {
+        match self {
+            DriverRenderer::Surface(_) | DriverRenderer::Splat(_) | DriverRenderer::Raymarch(_) => {
+                1.0
+            }
+            DriverRenderer::Cpu(_) => crate::get_cpu_settings().canvas_resolution_factor(),
+            DriverRenderer::WebGpu(r) => r.resolution_factor(),
+        }
+    }
+
+    fn label(&self) -> &'static str {
+        match self {
+            DriverRenderer::Surface(_) => "WebGL2 surfaces",
+            DriverRenderer::Splat(_) => "WebGL2 face splats",
+            DriverRenderer::Raymarch(_) => "WebGL2 raymarch (debug)",
+            DriverRenderer::Cpu(_) => "CPU splat",
+            DriverRenderer::WebGpu(r) => r.label(),
+        }
+    }
+
+    /// HUD backend chip ("frame" column) when no CPU telemetry applies.
+    fn backend_label(&self) -> &'static str {
+        match self {
+            DriverRenderer::WebGpu(_) => "WebGPU",
+            DriverRenderer::Cpu(_) => "Canvas2D",
+            _ => "WebGL2",
+        }
+    }
+}
+
+impl RendererPort for DriverRenderer {
+    fn artifact_needs(&self) -> RenderArtifactNeeds {
+        match self {
+            DriverRenderer::Surface(_) => RenderArtifactNeeds::SURFACE,
+            // The splat driver expands compact face pages, but its hero
+            // shadow pass still rasterizes the indexed mesh.
+            DriverRenderer::Splat(_) => {
+                RenderArtifactNeeds::SPLAT.union(RenderArtifactNeeds::SURFACE)
+            }
+            DriverRenderer::Raymarch(_) => RenderArtifactNeeds::RAYMARCH,
+            DriverRenderer::Cpu(_) => RenderArtifactNeeds::CPU,
+            DriverRenderer::WebGpu(r) => r.artifact_needs(),
+        }
+    }
+
+    fn uses_surface_meshes(&self) -> bool {
+        self.artifact_needs().needs_surface_extraction()
+    }
+
+    fn upload_surfaces(&mut self, chunks: &[SurfaceChunk<'_>]) {
+        match self {
+            DriverRenderer::Surface(r) => r.upload_surfaces(chunks),
+            DriverRenderer::Splat(r) => r.upload_surfaces(chunks),
+            DriverRenderer::WebGpu(r) => r.upload_surfaces(chunks),
+            _ => {}
+        }
+    }
+
+    fn remove_surfaces(&mut self, keys: &[SurfaceChunkKey]) {
+        match self {
+            DriverRenderer::Surface(r) => r.remove_surfaces(keys),
+            DriverRenderer::Splat(r) => r.remove_surfaces(keys),
+            DriverRenderer::WebGpu(r) => r.remove_surfaces(keys),
+            _ => {}
+        }
+    }
+
+    fn clear_surfaces(&mut self) {
+        match self {
+            DriverRenderer::Surface(r) => r.clear_surfaces(),
+            DriverRenderer::Splat(r) => r.clear_surfaces(),
+            DriverRenderer::WebGpu(r) => r.clear_surfaces(),
+            _ => {}
+        }
+    }
+
+    fn cpu_telemetry_string(&self) -> Option<String> {
+        match self {
+            DriverRenderer::Surface(r) => r.cpu_telemetry_string(),
+            DriverRenderer::Splat(r) => r.cpu_telemetry_string(),
+            DriverRenderer::Raymarch(r) => r.cpu_telemetry_string(),
+            DriverRenderer::Cpu(r) => r.cpu_telemetry_string(),
+            DriverRenderer::WebGpu(r) => r.cpu_telemetry_string(),
+        }
+    }
+
+    fn upload_atlas(&mut self, texels: &[u32]) {
+        match self {
+            DriverRenderer::Raymarch(r) => r.upload_atlas(texels),
+            DriverRenderer::Cpu(r) => r.upload_atlas(texels),
+            DriverRenderer::WebGpu(r) => r.upload_atlas(texels),
+            _ => {}
+        }
+    }
+
+    fn upload_atlas_rows(&mut self, first_row: u32, texels: &[u32]) -> bool {
+        match self {
+            DriverRenderer::Raymarch(r) => r.upload_atlas_rows(first_row, texels),
+            DriverRenderer::Cpu(r) => r.upload_atlas_rows(first_row, texels),
+            DriverRenderer::WebGpu(r) => r.upload_atlas_rows(first_row, texels),
+            _ => false,
+        }
+    }
+
+    fn upload_label_atlas(&mut self, rgba: &[u8], width: u32, height: u32) {
+        match self {
+            DriverRenderer::Surface(r) => r.upload_label_atlas(rgba, width, height),
+            DriverRenderer::WebGpu(r) => r.upload_label_atlas(rgba, width, height),
+            _ => {}
+        }
+    }
+
+    fn draw(&mut self, frame: &FrameParams, chunks: &[ChunkDraw]) {
+        match self {
+            DriverRenderer::Surface(r) => r.draw(frame, chunks),
+            DriverRenderer::Splat(r) => r.draw(frame, chunks),
+            DriverRenderer::Raymarch(r) => r.draw(frame, chunks),
+            DriverRenderer::Cpu(r) => r.draw(frame, chunks),
+            DriverRenderer::WebGpu(r) => r.draw(frame, chunks),
+        }
+    }
+}
 
 /// Complete backing-store scale after the global governor/override and the
 /// selected renderer's own bounded workload factor are composed.
@@ -104,20 +255,115 @@ fn build_label_atlas() -> Option<(Vec<u8>, u32, u32)> {
     Some((atlas, width, row_height * 2))
 }
 
-/// Renderer selection: surfaces by default, `?renderer=splat` for the
-/// instanced face-splat path (default candidate once parity/perf is
-/// confirmed), `?renderer=raymarch` for the retained SVO debug path, and
-/// `?renderer=cpu` for deterministic software rasterization with WebGPU
-/// presentation.
+/// Saved backend preference, written by the Settings menu. Query params
+/// always win so shared links stay exact reproductions.
+fn stored_backend_pref(window: &Window) -> Option<String> {
+    window
+        .local_storage()
+        .ok()
+        .flatten()
+        .and_then(|storage| storage.get_item("vackrooms_backend").ok())
+        .flatten()
+}
+
+/// Backend, then renderer, selection.
+///
+/// Backend: `?backend=webgl|webgpu` > saved preference > WebGL2. WebGL2 is
+/// the compatibility floor (Firefox ESR, mobile); WebGPU stays an explicit
+/// opt-in. Renderer within the backend: `?renderer=` (surface, splat,
+/// raymarch, cpu), defaulting to surfaces — on WebGPU without an explicit
+/// choice, the adapter's own compatibility decides (software adapters get
+/// the CPU rasterizer).
 async fn create_renderer(
+    window: &Window,
     canvas: &HtmlCanvasElement,
+    status_msg: &HtmlElement,
     query: &str,
     quality: GpuQualityProfile,
 ) -> Result<DriverRenderer, JsValue> {
-    let kind = query_param(query, "renderer")
-        .and_then(RendererKind::parse)
-        .unwrap_or_default();
-    WebGpuRenderer::new(canvas, kind.profile(quality)).await
+    let backend = query_param(query, "backend")
+        .map(str::to_owned)
+        .or_else(|| stored_backend_pref(window))
+        .unwrap_or_else(|| "webgl".to_owned());
+    if backend == "webgpu" {
+        webgpu_preflight(window, status_msg).await?;
+        let requested = query_param(query, "renderer").and_then(RendererKind::parse);
+        return WebGpuRenderer::new_auto(canvas, requested, quality)
+            .await
+            .map(DriverRenderer::WebGpu);
+    }
+
+    let renderer_choice = query_param(query, "renderer");
+    if renderer_choice == Some("cpu") {
+        return Ok(DriverRenderer::Cpu(CpuCanvasRenderer::new(canvas)?));
+    }
+    if renderer_choice == Some("raymarch") {
+        return WebGl2Renderer::new(canvas).map(DriverRenderer::Raymarch);
+    }
+    if renderer_choice == Some("splat") {
+        let profile = if quality == GpuQualityProfile::High {
+            SplatProfile::high()
+        } else {
+            SplatProfile::low()
+        };
+        match SplatRenderer::new(canvas, profile) {
+            Ok(gpu) => return Ok(DriverRenderer::Splat(gpu)),
+            Err(err) => {
+                web_sys::console::warn_2(
+                    &JsValue::from_str(
+                        "splat renderer unavailable, falling back to surface meshes:",
+                    ),
+                    &err,
+                );
+            }
+        }
+    }
+    match SurfaceRenderer::new(canvas) {
+        Ok(gpu) => Ok(DriverRenderer::Surface(gpu)),
+        Err(err) => {
+            web_sys::console::warn_2(
+                &JsValue::from_str(
+                    "WebGL2 surface renderer unavailable, falling back to CPU splatting:",
+                ),
+                &err,
+            );
+            Ok(DriverRenderer::Cpu(CpuCanvasRenderer::new(canvas)?))
+        }
+    }
+}
+
+/// Preflight for the opt-in WebGPU backend: failures inside wgpu's surface
+/// and adapter glue are unactionable (`getContext` null, or an uncaught
+/// TypeError when `requestAdapter` resolves to null — seen on mobile
+/// Chrome), so probe both layers first and put concrete guidance in the
+/// loading HUD. WebGL2 boots never run this.
+async fn webgpu_preflight(window: &Window, status_msg: &HtmlElement) -> Result<(), JsValue> {
+    let gpu = js_sys::Reflect::get(&window.navigator(), &JsValue::from_str("gpu"))
+        .unwrap_or(JsValue::UNDEFINED);
+    if gpu.is_undefined() || gpu.is_null() {
+        // WebGPU only exists in secure contexts, so a plain-http LAN address
+        // (phone pointed at a dev box) hides navigator.gpu even in browsers
+        // that fully support it. Distinguish that from a browser gap.
+        let msg = if !window.is_secure_context() {
+            "WebGPU requires a secure context and this page was loaded over \
+             plain HTTP. Serve it via https or localhost, or switch the \
+             backend setting back to WebGL2."
+        } else {
+            "WebGPU is not available in this browser (navigator.gpu is missing). \
+             Use Chrome/Edge 113+ or Safari 18+, or switch the backend \
+             setting back to WebGL2."
+        };
+        status_msg.set_text_content(Some(msg));
+        return Err(JsValue::from_str(msg));
+    }
+    if !probe_webgpu_adapter(&gpu).await {
+        let msg = "This device exposes WebGPU but reports no usable graphics \
+                   adapter. Check hardware acceleration (chrome://gpu), or \
+                   switch the backend setting back to WebGL2.";
+        status_msg.set_text_content(Some(msg));
+        return Err(JsValue::from_str(msg));
+    }
+    Ok(())
 }
 
 /// Asks `navigator.gpu.requestAdapter()` directly whether any adapter
@@ -157,30 +403,6 @@ pub async fn boot() -> Result<(), JsValue> {
     let overlay: HtmlElement = element(&document, "overlay")?;
     let status_msg: HtmlElement = element(&document, "status-msg")?;
     let play_msg: HtmlElement = element(&document, "play-msg")?;
-
-    // Preflight: every render path (including the CPU rasterizer's
-    // presentation pass) requires WebGPU. Failures inside wgpu's surface and
-    // adapter glue are unactionable (`getContext` null, or an uncaught
-    // TypeError when `requestAdapter` resolves to null — seen on mobile
-    // Chrome, where `navigator.gpu` exists but no adapter qualifies), so
-    // probe both layers here and turn them into concrete guidance.
-    let gpu = js_sys::Reflect::get(&window.navigator(), &JsValue::from_str("gpu"))
-        .unwrap_or(JsValue::UNDEFINED);
-    if gpu.is_undefined() || gpu.is_null() {
-        let msg = "WebGPU is not available in this browser (navigator.gpu is missing). \
-                   Use Chrome/Edge 113+ or Safari 18+, or in Firefox set \
-                   dom.webgpu.enabled=true in about:config and restart.";
-        status_msg.set_text_content(Some(msg));
-        return Err(JsValue::from_str(msg));
-    }
-    if !probe_webgpu_adapter(&gpu).await {
-        let msg = "This device exposes WebGPU but reports no usable graphics adapter. \
-                   On Android, WebGPU needs Chrome 121+ on Android 12+ with a \
-                   supported GPU; on desktop, check that hardware acceleration \
-                   is enabled (chrome://gpu).";
-        status_msg.set_text_content(Some(msg));
-        return Err(JsValue::from_str(msg));
-    }
 
     // ?spec=high -> 20u chunks, 5x5 streaming radius, 0.1u voxels.
     // Default is the low-spec profile: 10u chunks, 3x3 radius, 0.2u voxels.
@@ -235,7 +457,7 @@ pub async fn boot() -> Result<(), JsValue> {
     };
 
     let renderer = Rc::new(RefCell::new(
-        create_renderer(&canvas, &query, quality).await?,
+        create_renderer(&window, &canvas, &status_msg, &query, quality).await?,
     ));
     if let Some((label_rgba, label_w, label_h)) = build_label_atlas() {
         renderer
@@ -494,7 +716,7 @@ fn run_frame_loop(
             if let Some(text) = cpu_telemetry {
                 hud_gpu.set_text_content(Some(&text));
             } else {
-                hud_gpu.set_text_content(Some("WebGPU"));
+                hud_gpu.set_text_content(Some(renderer.borrow().backend_label()));
             }
 
             // Top-right section readout ("LEVEL 0 · MAIN CORRIDOR · ...").

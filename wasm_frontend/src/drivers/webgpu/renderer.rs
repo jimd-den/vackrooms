@@ -33,12 +33,64 @@ pub struct WebGpuRenderer {
     depth_view: wgpu::TextureView,
 }
 
+/// Picks the strategy this adapter can certainly run well when the player
+/// has not chosen one. A fallback adapter (`isFallbackAdapter`, surfaced by
+/// wgpu as `DeviceType::Cpu`) or a software rasterizer means every
+/// GPU-heavy path would grind; the CPU splatter is built for exactly that
+/// case and asks the device for nothing but one texture blit per frame.
+/// Real GPUs take the default surface strategy.
+fn most_compatible_kind(info: &wgpu::AdapterInfo) -> RendererKind {
+    let name = info.name.to_ascii_lowercase();
+    let software = matches!(info.device_type, wgpu::DeviceType::Cpu)
+        || name.contains("swiftshader")
+        || name.contains("llvmpipe")
+        || name.contains("lavapipe");
+    if software {
+        RendererKind::Cpu
+    } else {
+        RendererKind::Surface
+    }
+}
+
 impl WebGpuRenderer {
+    /// Composition-root entry: honors an explicit `?renderer=` choice, and
+    /// otherwise selects the most compatible strategy for the adapter the
+    /// browser actually granted.
+    pub async fn new_auto(
+        canvas: &HtmlCanvasElement,
+        requested: Option<RendererKind>,
+        quality: crate::drivers::webgpu::config::GpuQualityProfile,
+    ) -> Result<Self, JsValue> {
+        let context = BrowserGpuContext::new(canvas).await?;
+        let kind = match requested {
+            Some(kind) => kind,
+            None => {
+                let kind = most_compatible_kind(&context.adapter_info);
+                if kind != RendererKind::Surface {
+                    web_sys::console::info_1(
+                        &format!(
+                            "auto renderer: {} (adapter \"{}\" is a software/fallback device)",
+                            kind.label(),
+                            context.adapter_info.name
+                        )
+                        .into(),
+                    );
+                }
+                kind
+            }
+        };
+        Self::from_context(context, kind.profile(quality))
+    }
+
     pub async fn new(
         canvas: &HtmlCanvasElement,
         profile: RendererProfile,
     ) -> Result<Self, JsValue> {
         let context = BrowserGpuContext::new(canvas).await?;
+        Self::from_context(context, profile)
+    }
+
+    fn from_context(context: BrowserGpuContext, profile: RendererProfile) -> Result<Self, JsValue> {
         let frame_resources = FrameResources::new(&context.device);
         let strategy = match profile {
             RendererProfile::Surface(settings) => {

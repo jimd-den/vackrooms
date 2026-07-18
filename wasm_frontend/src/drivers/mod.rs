@@ -3,6 +3,18 @@ pub mod browser;
 #[cfg(target_arch = "wasm32")]
 pub mod console_telemetry;
 #[cfg(target_arch = "wasm32")]
+pub mod cpu_canvas;
+#[cfg(target_arch = "wasm32")]
+pub mod gl;
+#[cfg(target_arch = "wasm32")]
+pub mod shaders;
+#[cfg(target_arch = "wasm32")]
+pub mod splat_webgl;
+#[cfg(target_arch = "wasm32")]
+pub mod surface_webgl;
+#[cfg(target_arch = "wasm32")]
+pub mod webgl;
+#[cfg(target_arch = "wasm32")]
 pub mod worker_source;
 
 // Pure request bookkeeping for the browser generation-worker driver. Keeping
