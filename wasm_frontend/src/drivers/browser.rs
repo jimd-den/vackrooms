@@ -120,6 +120,32 @@ async fn create_renderer(
     WebGpuRenderer::new(canvas, kind.profile(quality)).await
 }
 
+/// Asks `navigator.gpu.requestAdapter()` directly whether any adapter
+/// exists. wgpu's generated bindings assume the resolved adapter is
+/// non-null and crash (`null.info`) before our error handling runs, so
+/// this duplicate one-off request is the only way to fail politely.
+async fn probe_webgpu_adapter(gpu: &JsValue) -> bool {
+    let request = match js_sys::Reflect::get(gpu, &JsValue::from_str("requestAdapter"))
+        .ok()
+        .and_then(|value| value.dyn_into::<js_sys::Function>().ok())
+    {
+        Some(function) => function,
+        None => return false,
+    };
+    let promise = match request
+        .call0(gpu)
+        .ok()
+        .and_then(|value| value.dyn_into::<js_sys::Promise>().ok())
+    {
+        Some(promise) => promise,
+        None => return false,
+    };
+    match wasm_bindgen_futures::JsFuture::from(promise).await {
+        Ok(adapter) => !adapter.is_null() && !adapter.is_undefined(),
+        Err(_) => false,
+    }
+}
+
 pub async fn boot() -> Result<(), JsValue> {
     let window = web_sys::window().ok_or_else(|| JsValue::from_str("no window"))?;
     let document = window
@@ -133,16 +159,25 @@ pub async fn boot() -> Result<(), JsValue> {
     let play_msg: HtmlElement = element(&document, "play-msg")?;
 
     // Preflight: every render path (including the CPU rasterizer's
-    // presentation pass) requires WebGPU, and `canvas.getContext("webgpu")`
-    // failing deep inside surface creation produces an unactionable error.
-    // Checking `navigator.gpu` here turns that into concrete guidance.
-    let has_webgpu = js_sys::Reflect::get(&window.navigator(), &JsValue::from_str("gpu"))
-        .map(|gpu| !gpu.is_undefined() && !gpu.is_null())
-        .unwrap_or(false);
-    if !has_webgpu {
+    // presentation pass) requires WebGPU. Failures inside wgpu's surface and
+    // adapter glue are unactionable (`getContext` null, or an uncaught
+    // TypeError when `requestAdapter` resolves to null — seen on mobile
+    // Chrome, where `navigator.gpu` exists but no adapter qualifies), so
+    // probe both layers here and turn them into concrete guidance.
+    let gpu = js_sys::Reflect::get(&window.navigator(), &JsValue::from_str("gpu"))
+        .unwrap_or(JsValue::UNDEFINED);
+    if gpu.is_undefined() || gpu.is_null() {
         let msg = "WebGPU is not available in this browser (navigator.gpu is missing). \
                    Use Chrome/Edge 113+ or Safari 18+, or in Firefox set \
                    dom.webgpu.enabled=true in about:config and restart.";
+        status_msg.set_text_content(Some(msg));
+        return Err(JsValue::from_str(msg));
+    }
+    if !probe_webgpu_adapter(&gpu).await {
+        let msg = "This device exposes WebGPU but reports no usable graphics adapter. \
+                   On Android, WebGPU needs Chrome 121+ on Android 12+ with a \
+                   supported GPU; on desktop, check that hardware acceleration \
+                   is enabled (chrome://gpu).";
         status_msg.set_text_content(Some(msg));
         return Err(JsValue::from_str(msg));
     }
