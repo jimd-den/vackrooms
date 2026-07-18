@@ -240,4 +240,3 @@ fn aquila_reads_as_a_parking_lot() {
     assert!(pillar.solid, "bay-node pillar");
     assert_eq!(pillar.wall_material, VOXEL_CONCRETE_WALL);
 }
-

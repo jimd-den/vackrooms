@@ -1,6 +1,6 @@
 use crate::application::ports::{POSITION_FIXED_SCALE, SurfaceChunk};
-use crate::core::ports::artifact_sink::ArtifactSinkPort;
-use crate::core::ports::reference_renderer::RenderedImage;
+use crate::reference::artifact_sink::ArtifactSinkPort;
+use crate::reference::renderer::RenderedImage;
 use std::fs;
 use std::io::Write;
 use std::path::Path;

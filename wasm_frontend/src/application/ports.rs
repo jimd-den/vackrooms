@@ -5,9 +5,7 @@
 //! streaming logic testable without a GPU or a browser.
 
 use crate::application::collision::Aabb;
-use vackrooms::domain::entities::anomaly::{
-    LevelExit, PitHazard, RealitySnapshot, TraversalGate,
-};
+use vackrooms::domain::entities::anomaly::{LevelExit, PitHazard, RealitySnapshot, TraversalGate};
 use vackrooms::domain::entities::supplies::SupplyItem;
 
 /// Chunk-local fixed-point scale used by [`PackedVertex::position`]. A 20 u
@@ -144,24 +142,17 @@ impl FaceInstanceSet {
     }
 }
 
-/// Indexed greedy-mesh payload for one chunk. The SVO payload remains
-/// authoritative for collision, storage, and ray queries; this exists only
-/// to make visible surfaces cheap to rasterize.
+/// Renderer-selected raster payload for one chunk. Indexed vertices and face
+/// splats are independently optional views over the same greedy-quad source;
+/// collision remains authoritative even when serialized SVO nodes are absent.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SurfaceMeshPayload {
     pub vertices: Vec<PackedVertex>,
     pub indices: Vec<u32>,
     pub bounds: Aabb,
     pub lod: u8,
-    pub light_volume: Vec<u8>,
-    pub light_volume_size: [u32; 3],
-    /// Lateral halo cells retained in `light_volume`. Geometry is still
-    /// chunk-local; this offset exists so a boundary face can sample the
-    /// adjacent air texel instead of falling off the texture and going dark.
-    pub light_volume_padding: u8,
-    pub lights: Vec<LightSource>,
-    /// Face-instance page for the splat renderer, derived from the same
-    /// greedy quads as `vertices`, so both paths describe the same boundary.
+    /// Face-instance page for the splat renderer. When both representations
+    /// are requested, it is derived from the same quads as `vertices`.
     pub faces: FaceInstanceSet,
     /// World size of one voxel cell at this payload's LOD.
     pub voxel_scale: f32,
@@ -174,10 +165,6 @@ impl SurfaceMeshPayload {
             indices: Vec::new(),
             bounds: Aabb::new([0.0; 3], [0.0; 3]),
             lod,
-            light_volume: Vec::new(),
-            light_volume_size: [0, 0, 0],
-            light_volume_padding: 0,
-            lights: Vec::new(),
             faces: FaceInstanceSet::empty(),
             voxel_scale: 1.0,
         }
@@ -202,7 +189,7 @@ pub struct SurfaceChunk<'a> {
 pub struct ChunkDraw {
     /// World-space origin (min corner) of the chunk's SVO cube.
     pub origin: [f32; 3],
-    /// Root node index *within the merged atlas texture*.
+    /// Root node index within the merged SVO atlas.
     pub root_index: i32,
     /// Side length of the chunk's SVO cube in world units.
     pub world_size: f32,
@@ -218,9 +205,8 @@ pub struct ChunkDraw {
 /// Upper bound on per-frame dynamic lights handed to renderers (flares).
 pub const MAX_DYNAMIC_LIGHTS: usize = 4;
 
-/// Fixed light-slot budget retained by the legacy splat path. The rewritten
-/// surface and raymarch paths consume the complete fixture list through a
-/// floating-point texture instead of truncating the physical scene.
+/// Compatibility budget for callers that still expose fixed light arrays.
+/// Production WebGPU strategies use dynamically sized frame storage.
 pub const MAX_SCENE_LIGHTS: usize = 16;
 
 /// A short-lived runtime light (dropped flare). World-space state owned by
@@ -366,13 +352,81 @@ impl Default for FrameParams {
     }
 }
 
-/// Abstraction over the actual rasterizer back end.
-/// Implemented by `drivers::webgl::WebGl2Renderer` in the browser and by
-/// test doubles in native unit tests.
+/// Renderer-selected chunk artifacts, encoded as a stable compact bitfield.
+///
+/// Collision and semantic data are application requirements and are always
+/// generated. These bits describe only optional presentation products, so a
+/// raymarcher never pays to build greedy faces and a rasterizer never pays to
+/// serialize GPU SVO nodes.
+#[repr(transparent)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub struct RenderArtifactNeeds(u8);
+
+impl RenderArtifactNeeds {
+    const INDEXED_SURFACE_MESH_BIT: u8 = 1 << 0;
+    const FACE_SPLATS_BIT: u8 = 1 << 1;
+    const SVO_NODES_BIT: u8 = 1 << 2;
+    const KNOWN_BITS: u8 =
+        Self::INDEXED_SURFACE_MESH_BIT | Self::FACE_SPLATS_BIT | Self::SVO_NODES_BIT;
+
+    pub const NONE: Self = Self(0);
+    pub const SURFACE: Self = Self(Self::INDEXED_SURFACE_MESH_BIT);
+    pub const SPLAT: Self = Self(Self::FACE_SPLATS_BIT);
+    pub const RAYMARCH: Self = Self(Self::SVO_NODES_BIT);
+    pub const CPU: Self = Self(Self::SVO_NODES_BIT);
+    pub const ALL: Self = Self(Self::KNOWN_BITS);
+
+    pub const fn from_bits(bits: u8) -> Option<Self> {
+        if bits & !Self::KNOWN_BITS == 0 {
+            Some(Self(bits))
+        } else {
+            None
+        }
+    }
+
+    pub const fn bits(self) -> u8 {
+        self.0
+    }
+
+    pub const fn indexed_surface_mesh(self) -> bool {
+        self.0 & Self::INDEXED_SURFACE_MESH_BIT != 0
+    }
+
+    pub const fn face_splats(self) -> bool {
+        self.0 & Self::FACE_SPLATS_BIT != 0
+    }
+
+    pub const fn svo_nodes(self) -> bool {
+        self.0 & Self::SVO_NODES_BIT != 0
+    }
+
+    pub const fn union(self, other: Self) -> Self {
+        Self(self.0 | other.0)
+    }
+
+    pub const fn needs_surface_extraction(self) -> bool {
+        self.indexed_surface_mesh() || self.face_splats()
+    }
+}
+
+/// Abstraction over the actual renderer back end.
+/// Implemented by `drivers::webgpu::renderer::WebGpuRenderer` in the browser
+/// and by recording test doubles in native unit tests.
 pub trait RendererPort {
-    /// True for the indexed surface renderer. The engine then skips SVO-atlas
-    /// upload work while preserving the SVO in the chunk payload for collision
-    /// and debug/reference traversal.
+    /// Optional presentation products consumed by this renderer. The default
+    /// preserves older test doubles while concrete renderers report the exact
+    /// representation they own.
+    fn artifact_needs(&self) -> RenderArtifactNeeds {
+        if self.uses_surface_meshes() {
+            RenderArtifactNeeds::SURFACE
+        } else {
+            RenderArtifactNeeds::RAYMARCH
+        }
+    }
+
+    /// Compatibility query for older callers and test doubles. New code uses
+    /// [`Self::artifact_needs`]; true means some surface-derived representation
+    /// is required, not necessarily an indexed mesh.
     fn uses_surface_meshes(&self) -> bool {
         false
     }
@@ -386,22 +440,16 @@ pub trait RendererPort {
     /// Drops all resident meshes (used when noclipping to another level).
     fn clear_surfaces(&mut self) {}
 
-    /// Last asynchronous GPU timing sample, when the driver supports
-    /// `EXT_disjoint_timer_query_webgl2`.
-    fn gpu_frame_ms(&self) -> Option<f32> {
-        None
-    }
-
-    /// Telemetry data from the CPU renderer fallback, if applicable.
+    /// Telemetry data from the CPU reference strategy, if applicable.
     fn cpu_telemetry_string(&self) -> Option<String> {
         None
     }
 
-    /// Uploads the merged SVO node atlas (RGBA32UI texel stream, 4 u32 per
-    /// node, rows of 1024 texels — see `OctreeGpuSerializer` in the core).
+    /// Uploads the merged SVO node atlas (four `u32` words per node, padded
+    /// in 1024-node rows; see `OctreeGpuSerializer` in the core).
     fn upload_atlas(&mut self, texels: &[u32]);
 
-    /// Overwrites whole atlas rows starting at `first_row` (1024 texels per
+    /// Overwrites whole atlas rows starting at `first_row` (1024 nodes per
     /// row) without reallocating or re-uploading the rest of the atlas.
     /// Returns `false` if the back end can't do partial updates (or has no
     /// atlas yet), in which case the caller must fall back to `upload_atlas`.
@@ -429,8 +477,12 @@ pub struct ChunkPayload {
     /// Exact leaf size/depth used to build `nodes`.
     pub voxel_size: f32,
     pub svo_depth: u8,
-    /// Greedy surface mesh used by the default raster path.
+    /// Renderer-selected raster artifacts. Unrequested representations are
+    /// empty while bounds/LOD metadata stays valid for the selected path.
     pub surface: SurfaceMeshPayload,
+    /// Renderer-neutral analytic emitters used by rendering and thermal
+    /// simulation even when no surface artifact was requested.
+    pub lights: Vec<LightSource>,
     /// Solid-voxel bounding boxes in world space, for player collision.
     pub collision: Vec<Aabb>,
     /// Semantic threshold planes derived by the same generation snapshot as
@@ -457,6 +509,9 @@ pub struct ChunkRequest {
     pub origin_z: f32,
     pub level: u32,
     pub lod: u8,
+    /// Compact renderer-owned presentation request, echoed by workers as part
+    /// of exact asynchronous request identity.
+    pub artifacts: RenderArtifactNeeds,
     /// Immutable encounter state used to generate this chunk. It is part of
     /// request identity, not ambient worker state.
     pub reality: RealitySnapshot,
@@ -472,6 +527,7 @@ impl ChunkRequest {
             && self.origin_z.to_bits() == other.origin_z.to_bits()
             && self.level == other.level
             && self.lod == other.lod
+            && self.artifacts == other.artifacts
             && self.reality == other.reality
     }
 }
@@ -512,6 +568,23 @@ pub trait ChunkSourcePort {
         self.load(origin_x, origin_z, level, lod)
     }
 
+    /// Loads against an explicit reality while requesting only the optional
+    /// presentation products consumed by the active renderer. Sources that
+    /// do not specialize artifact production remain compatible by generating
+    /// their ordinary complete payload.
+    fn load_with_artifacts(
+        &self,
+        origin_x: f32,
+        origin_z: f32,
+        level: u32,
+        lod: u8,
+        reality: &RealitySnapshot,
+        artifacts: RenderArtifactNeeds,
+    ) -> ChunkPayload {
+        let _ = artifacts;
+        self.load_with_reality(origin_x, origin_z, level, lod, reality)
+    }
+
     /// True when the source generates in the background. The engine then
     /// drives it with [`Self::request`]/[`Self::poll_completed`] instead of
     /// the blocking [`Self::load`], keeping the frame loop responsive.
@@ -534,5 +607,42 @@ pub trait ChunkSourcePort {
     /// Synchronous sources and infallible test doubles need not override it.
     fn poll_failed_requests(&mut self) -> Vec<ChunkRequest> {
         Vec::new()
+    }
+}
+
+#[cfg(test)]
+mod artifact_tests {
+    use super::RenderArtifactNeeds;
+
+    #[test]
+    fn artifact_bitfield_round_trips_every_valid_combination() {
+        for bits in 0..=RenderArtifactNeeds::ALL.bits() {
+            let needs = RenderArtifactNeeds::from_bits(bits).expect("known bit combination");
+            assert_eq!(needs.bits(), bits);
+            assert_eq!(needs.indexed_surface_mesh(), bits & 1 != 0);
+            assert_eq!(needs.face_splats(), bits & 2 != 0);
+            assert_eq!(needs.svo_nodes(), bits & 4 != 0);
+        }
+        assert_eq!(RenderArtifactNeeds::from_bits(1 << 7), None);
+    }
+
+    #[test]
+    fn renderer_artifact_sets_are_minimal_and_composable() {
+        assert!(RenderArtifactNeeds::SURFACE.indexed_surface_mesh());
+        assert!(!RenderArtifactNeeds::SURFACE.face_splats());
+        assert!(!RenderArtifactNeeds::SURFACE.svo_nodes());
+
+        assert!(!RenderArtifactNeeds::SPLAT.indexed_surface_mesh());
+        assert!(RenderArtifactNeeds::SPLAT.face_splats());
+        assert!(!RenderArtifactNeeds::SPLAT.svo_nodes());
+
+        assert_eq!(RenderArtifactNeeds::RAYMARCH, RenderArtifactNeeds::CPU);
+        assert!(RenderArtifactNeeds::CPU.svo_nodes());
+        assert_eq!(
+            RenderArtifactNeeds::SURFACE
+                .union(RenderArtifactNeeds::SPLAT)
+                .union(RenderArtifactNeeds::RAYMARCH),
+            RenderArtifactNeeds::ALL,
+        );
     }
 }

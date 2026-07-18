@@ -1,0 +1,76 @@
+name: Test
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  rust:
+    name: Rust workspace
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo test --workspace --locked
+
+  wasm:
+    name: WebAssembly and checked-in package
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - run: cargo check --locked -p wasm_frontend --target wasm32-unknown-unknown
+      - run: npm run check:wasm
+
+  vulkan:
+    name: Vulkan renderers (Lavapipe)
+    runs-on: ubuntu-24.04
+    env:
+      RUST_BACKTRACE: "1"
+      WGPU_BACKEND: vulkan
+      WGPU_VALIDATION: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install the software Vulkan stack
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends \
+            libvulkan1 \
+            mesa-vulkan-drivers \
+            vulkan-tools \
+            vulkan-validationlayers
+
+      - name: Force the Lavapipe Vulkan driver
+        shell: bash
+        run: |
+          set -euo pipefail
+          icd="$(find /usr/share/vulkan/icd.d -maxdepth 1 -type f -name 'lvp_icd*.json' -print -quit)"
+          if [[ -z "$icd" ]]; then
+            echo "::error::Lavapipe ICD was not installed"
+            exit 1
+          fi
+          echo "VK_DRIVER_FILES=$icd" >> "$GITHUB_ENV"
+
+      - name: Verify Vulkan and validation layers
+        shell: bash
+        run: |
+          set -euo pipefail
+          summary="$(env -u DISPLAY -u WAYLAND_DISPLAY vulkaninfo --summary 2>&1)"
+          echo "$summary"
+          grep -Eqi 'lavapipe|llvmpipe' <<< "$summary"
+          grep -Fq 'VK_LAYER_KHRONOS_validation' <<< "$summary"
+
+      - name: Run Vulkan renderer contracts
+        run: >-
+          cargo test --locked -p wasm_frontend
+          --features vulkan-tests
+          --test vulkan_renderers
+          -- --test-threads=1 --nocapture

@@ -1,25 +1,25 @@
 //! Pooled SVO node atlas: stable, fixed-size chunk slots inside one shared
-//! RGBA32UI texture.
+//! four-word-per-node storage stream.
 //!
 //! This is the raymarcher's analog of "vertex pooling" in mesh-based voxel
 //! engines. The naive approach (concatenate every resident chunk's node
-//! array and re-upload the whole texture on any change) makes every chunk
-//! load cost O(world) in CPU copies and texture bandwidth. The pool instead
+//! array and re-upload the whole GPU buffer on any change) makes every chunk
+//! load cost O(world) in CPU copies and transfer bandwidth. The pool instead
 //! gives each chunk a fixed row-aligned slot: loading a chunk rebases and
 //! uploads *only that slot's rows*, and evicting a chunk is free (its slot is
-//! simply reused later; stale texels are never referenced by the draw table).
+//! simply reused later; stale nodes are never referenced by the draw table).
 //!
-//! Every chunk's node array is row-padded to whole 1024-texel rows by the
+//! Every chunk's node array is padded to whole 1024-node rows by the
 //! core `OctreeGpuSerializer`, so slots stay row-aligned by construction.
 
 use crate::application::ports::ChunkPayload;
 use crate::application::streaming::ChunkKey;
 
-/// The shader's fixed per-frame chunk table size (uniform array length).
+/// The raymarch pass's fixed per-frame chunk-table capacity.
 pub const MAX_CHUNKS: usize = 25;
 
-/// Texels (= SVO nodes) per atlas row. Must match the shader's `decodeNode`
-/// constant and the core serializer's row padding.
+/// SVO nodes per atlas row. Must match the raymarch upload offset and the
+/// core serializer's row padding.
 pub const ROW_TEXELS: usize = 1024;
 
 /// One air-leaf texel (type flag 1, voxel type 0): what free space decodes to.
@@ -160,6 +160,7 @@ mod tests {
             voxel_size: 0.2,
             svo_depth: 6,
             surface: crate::application::ports::SurfaceMeshPayload::empty(0),
+            lights: vec![],
             collision: vec![],
             traversal_gates: vec![],
             pit_hazards: vec![],

@@ -1,13 +1,14 @@
 //! In-wasm chunk source: implements the application's [`ChunkSourcePort`] by
 //! driving the core engine use cases directly. There is no server round-trip;
-//! the entire pipeline — procedural generation, voxel diffuse bake, SVO build, GPU
-//! serialization, collision extraction — runs inside the wasm module.
+//! the entire pipeline — procedural generation, renderer-selected artifacts,
+//! SVO build, and collision extraction — runs inside the wasm module.
 //!
 //! Pipeline per chunk:
-//!   GenerateChunkArchitectureUseCase  (VoxelGrid, lighting included)
-//!     -> BuildOctreeUseCase           (SparseVoxelOctree)
-//!     -> OctreeGpuSerializer          (row-padded RGBA32UI texel stream)
-//!     -> collision walk               (solid leaves -> world-space AABBs)
+//!   GenerateChunkArchitectureUseCase  (haloed VoxelGrid + lighting)
+//!     -> BuildOctreeUseCase           (always: collision authority)
+//!        -> collision walk            (solid leaves -> world-space AABBs)
+//!        -> OctreeGpuSerializer       (only when SVO upload words are requested)
+//!     -> surface/face extraction      (only when the renderer requests it)
 
 use vackrooms::adapters::octree_gpu_serializer::OctreeGpuSerializer;
 use vackrooms::domain::entities::anomaly::RealitySnapshot;
@@ -22,9 +23,12 @@ use vackrooms::entities::models::Position;
 use vackrooms::use_cases::generate_chunk::{GenerateChunkArchitectureUseCase, GeneratorConfig};
 use vackrooms::use_cases::ports::{NULL_TELEMETRY, NoiseProvider, TelemetryPort};
 
-use crate::adapters::surface_mesh::build_surface_mesh;
+use crate::adapters::collect_emissive_lights::collect_emissive_lights;
+use crate::adapters::surface_mesh::build_surface_artifacts;
 use crate::application::collision::Aabb;
-use crate::application::ports::{ChunkPayload, ChunkSourcePort};
+use crate::application::ports::{
+    ChunkPayload, ChunkSourcePort, RenderArtifactNeeds, SurfaceMeshPayload,
+};
 
 /// Voxel types that block the player. FLOOR/CEILING/LIGHT/GRASS/WATER and
 /// the carpet/fluid classes are visual-only: including them would make the
@@ -70,6 +74,7 @@ impl<N: NoiseProvider> LocalChunkSource<N> {
         level: u32,
         lod: u8,
         reality: &RealitySnapshot,
+        artifacts: RenderArtifactNeeds,
     ) -> ChunkPayload {
         let config = self.config.with_level(level).at_lod(lod);
         let generator =
@@ -95,21 +100,36 @@ impl<N: NoiseProvider> LocalChunkSource<N> {
             reality,
         );
         let grid = crop_lateral_halo(&halo_grid, 1);
-        let surface = build_surface_mesh(&halo_grid, config.voxel_scale, lod, 1, halo_world_origin);
+        let lights = collect_emissive_lights(&halo_grid, config.voxel_scale, halo_world_origin, 1);
+        let surface = if artifacts.needs_surface_extraction() {
+            build_surface_artifacts(&halo_grid, config.voxel_scale, lod, 1, artifacts)
+        } else {
+            let mut empty = SurfaceMeshPayload::empty(lod);
+            empty.voxel_scale = config.voxel_scale;
+            empty
+        };
 
         let svo_depth = config.svo_depth();
         let svo = BuildOctreeUseCase::new().execute(&grid, svo_depth, config.svo_world_size());
 
-        let gpu = OctreeGpuSerializer::serialize_to_gpu_data(&svo);
+        let (root, nodes) = if artifacts.svo_nodes() {
+            (
+                svo.root as u32,
+                OctreeGpuSerializer::serialize_to_gpu_data(&svo).texel_data,
+            )
+        } else {
+            (0, Vec::new())
+        };
         let collision = extract_collision_boxes(&svo, origin_x, origin_z, config.voxel_scale);
 
         ChunkPayload {
-            root: svo.root as u32,
-            nodes: gpu.texel_data,
+            root,
+            nodes,
             world_size: config.svo_world_size(),
             voxel_size: config.voxel_scale,
             svo_depth: svo_depth as u8,
             surface,
+            lights,
             collision,
             traversal_gates: halo_grid.traversal_gates.clone(),
             pit_hazards: halo_grid.pit_hazards.clone(),
@@ -121,7 +141,14 @@ impl<N: NoiseProvider> LocalChunkSource<N> {
 
 impl<N: NoiseProvider> ChunkSourcePort for LocalChunkSource<N> {
     fn load(&self, origin_x: f32, origin_z: f32, level: u32, lod: u8) -> ChunkPayload {
-        self.generate_payload(origin_x, origin_z, level, lod, &RealitySnapshot::default())
+        self.generate_payload(
+            origin_x,
+            origin_z,
+            level,
+            lod,
+            &RealitySnapshot::default(),
+            RenderArtifactNeeds::ALL,
+        )
     }
 
     fn load_with_reality(
@@ -132,7 +159,26 @@ impl<N: NoiseProvider> ChunkSourcePort for LocalChunkSource<N> {
         lod: u8,
         reality: &RealitySnapshot,
     ) -> ChunkPayload {
-        self.generate_payload(origin_x, origin_z, level, lod, reality)
+        self.generate_payload(
+            origin_x,
+            origin_z,
+            level,
+            lod,
+            reality,
+            RenderArtifactNeeds::ALL,
+        )
+    }
+
+    fn load_with_artifacts(
+        &self,
+        origin_x: f32,
+        origin_z: f32,
+        level: u32,
+        lod: u8,
+        reality: &RealitySnapshot,
+        artifacts: RenderArtifactNeeds,
+    ) -> ChunkPayload {
+        self.generate_payload(origin_x, origin_z, level, lod, reality, artifacts)
     }
 }
 
@@ -330,10 +376,10 @@ mod tests {
         let payload = source.load(0.0, 30.0, 0, 0);
 
         assert!(
-            !payload.surface.lights.is_empty(),
+            !payload.lights.is_empty(),
             "voxelized emissive panels must not disappear before frame lighting"
         );
-        for light in &payload.surface.lights {
+        for light in &payload.lights {
             assert!(light.enabled);
             assert!(light.position[1] > payload.voxel_size);
             assert!(light.half_size.into_iter().all(|extent| extent > 0.0));
@@ -343,6 +389,42 @@ mod tests {
             );
             assert_ne!(light.kind, crate::application::ports::LightKind::Point);
         }
+    }
+
+    #[test]
+    fn renderer_artifact_selection_omits_unconsumed_outputs() {
+        let source =
+            LocalChunkSource::new(SimpleNoiseProvider::new(), 42, GeneratorConfig::low_spec());
+        let reality = RealitySnapshot::default();
+
+        let surface =
+            source.load_with_artifacts(0.0, 30.0, 0, 1, &reality, RenderArtifactNeeds::SURFACE);
+        assert_eq!(surface.root, 0);
+        assert!(surface.nodes.is_empty());
+        assert!(!surface.surface.vertices.is_empty());
+        assert!(!surface.surface.indices.is_empty());
+        assert!(surface.surface.faces.instances.is_empty());
+        assert!(!surface.lights.is_empty());
+        assert!(!surface.collision.is_empty());
+
+        let splat =
+            source.load_with_artifacts(0.0, 30.0, 0, 1, &reality, RenderArtifactNeeds::SPLAT);
+        assert_eq!(splat.root, 0);
+        assert!(splat.nodes.is_empty());
+        assert!(splat.surface.vertices.is_empty());
+        assert!(splat.surface.indices.is_empty());
+        assert!(!splat.surface.faces.instances.is_empty());
+        assert!(!splat.lights.is_empty());
+        assert!(!splat.collision.is_empty());
+
+        let raymarch =
+            source.load_with_artifacts(0.0, 30.0, 0, 1, &reality, RenderArtifactNeeds::RAYMARCH);
+        assert!(!raymarch.nodes.is_empty());
+        assert!(raymarch.surface.vertices.is_empty());
+        assert!(raymarch.surface.indices.is_empty());
+        assert!(raymarch.surface.faces.instances.is_empty());
+        assert!(!raymarch.lights.is_empty());
+        assert!(!raymarch.collision.is_empty());
     }
 
     #[test]

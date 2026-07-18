@@ -5,8 +5,50 @@
 //! encoded), distances are in world units, and all cosine terms are
 //! dimensionless.
 
+mod camera;
+
+pub use camera::{
+    CameraBasis, DEFAULT_FOV_TAN, camera_basis, multiply_column_major, webgpu_view_projection,
+};
+
 /// Linear RGB radiance or radiance-like intensity.
 pub type LinearRgb = [f32; 3];
+
+/// Canonical diffuse environment irradiance shared by every renderer.
+pub const INDOOR_AMBIENT_IRRADIANCE: LinearRgb = [0.045, 0.040, 0.024];
+pub const OUTDOOR_AMBIENT_IRRADIANCE: LinearRgb = [0.32, 0.38, 0.48];
+/// Restrained gain for the optional quantized diffuse-fill field.
+pub const CACHED_DIFFUSE_FILL_GAIN: f32 = 0.12;
+/// Lambertian BRDF scale applied once after all reflected irradiance terms.
+pub const DIFFUSE_REFLECTANCE_INV_PI: f32 = std::f32::consts::FRAC_1_PI;
+
+/// One authoritative unoccluded hand-lamp contract.
+///
+/// Visibility is intentionally absent: CPU ray queries and future GPU
+/// visibility passes may attenuate this same irradiance without changing its
+/// origin, cone, transport, or spectrum.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FlashlightSpec {
+    pub inner_degrees: f32,
+    pub outer_degrees: f32,
+    pub range: f32,
+    pub intensity: f32,
+    pub minimum_distance: f32,
+    pub forward_offset: f32,
+    pub downward_offset: f32,
+    pub tint: LinearRgb,
+}
+
+pub const FLASHLIGHT_SPEC: FlashlightSpec = FlashlightSpec {
+    inner_degrees: 11.0,
+    outer_degrees: 24.0,
+    range: 14.0,
+    intensity: 32.0,
+    minimum_distance: 0.25,
+    forward_offset: 0.18,
+    downward_offset: 0.10,
+    tint: [1.0, 0.91, 0.72],
+};
 
 /// Converts linear HDR radiance to the canvas' ordinary sRGB encoding.
 ///

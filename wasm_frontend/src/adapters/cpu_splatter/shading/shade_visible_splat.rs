@@ -1,9 +1,7 @@
 //! Facade for one complete visible-splat shading evaluation.
 
-use std::f32::consts::PI;
-
 use crate::application::ports::{ChunkDraw, Environment};
-use crate::application::rendering::LinearRgb;
+use crate::application::rendering::{DIFFUSE_REFLECTANCE_INV_PI, LinearRgb};
 
 use super::super::camera::Camera;
 use super::super::flashlight;
@@ -84,8 +82,10 @@ pub(crate) fn shade_predecoded_with_frame_lighting(
     };
     let mut irradiance =
         ambient_irradiance(environment).map(|channel| channel * ambient_visibility);
-    let cached =
-        cached_fill_irradiance(surface, settings).map(|channel| channel * ambient_visibility);
+    // AO approximates only open environment visibility. The cached field
+    // already represents transported diffuse fill and must not be darkened a
+    // second time.
+    let cached = cached_fill_irradiance(surface, settings);
     let direct_visibility = if settings.shadows == CpuShadowMode::Full {
         DirectLightVisibility::trace_scene(atlas, chunks, surface.world_size)
     } else {
@@ -116,9 +116,9 @@ pub(crate) fn shade_predecoded_with_frame_lighting(
             cached[channel] + fixtures[channel] + dynamics[channel] + flashlight[channel];
     }
     let reflected = [
-        albedo[0] * irradiance[0] / PI,
-        albedo[1] * irradiance[1] / PI,
-        albedo[2] * irradiance[2] / PI,
+        albedo[0] * irradiance[0] * DIFFUSE_REFLECTANCE_INV_PI,
+        albedo[1] * irradiance[1] * DIFFUSE_REFLECTANCE_INV_PI,
+        albedo[2] * irradiance[2] * DIFFUSE_REFLECTANCE_INV_PI,
     ];
     present_radiance(reflected, distance, environment)
 }

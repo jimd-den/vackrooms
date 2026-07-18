@@ -1,6 +1,13 @@
 use crate::domain::entities::sparse_voxel_octree::{SparseVoxelOctree, SvoNode};
 use crate::domain::entities::voxel_grid::{MATERIAL_COLORS, VOXEL_AIR, VoxelGrid};
 
+const AIR_LEAF: SvoNode = SvoNode::Leaf {
+    voxel_type: VOXEL_AIR,
+    color: 0,
+    light_rgb: [0; 3],
+    face_occlusion: 0,
+};
+
 /// Use Case to convert a dense VoxelGrid into a collapsed Sparse Voxel Octree.
 pub struct BuildOctreeUseCase;
 
@@ -11,11 +18,23 @@ impl BuildOctreeUseCase {
 
     /// Converts a dense VoxelGrid into an SVO of the specified depth.
     pub fn execute(&self, grid: &VoxelGrid, depth: u32, world_size: f32) -> SparseVoxelOctree {
+        self.execute_internal::<true>(grid, depth, world_size)
+    }
+
+    /// Shared implementation kept generic over the pruning policy so tests can
+    /// compare the optimized traversal with the former exhaustive traversal.
+    fn execute_internal<const PRUNE_OUTSIDE: bool>(
+        &self,
+        grid: &VoxelGrid,
+        depth: u32,
+        world_size: f32,
+    ) -> SparseVoxelOctree {
         let mut nodes = Vec::new();
         let size = 1 << depth;
 
         // Recursive build from root
-        let root_node = self.build_recursive(grid, &mut nodes, 0, 0, 0, size, depth);
+        let root_node =
+            self.build_recursive::<PRUNE_OUTSIDE>(grid, &mut nodes, 0, 0, 0, size, depth);
 
         // Push the root node to the end of the nodes array
         let root_idx = nodes.len();
@@ -29,7 +48,7 @@ impl BuildOctreeUseCase {
         }
     }
 
-    fn build_recursive(
+    fn build_recursive<const PRUNE_OUTSIDE: bool>(
         &self,
         grid: &VoxelGrid,
         nodes: &mut Vec<SvoNode>,
@@ -39,6 +58,16 @@ impl BuildOctreeUseCase {
         size: u32,
         depth: u32,
     ) -> SvoNode {
+        // Every coordinate sampled outside the dense grid is canonical air.
+        // Recursive cubes only extend in the positive direction, so when the
+        // cube's minimum lies past any grid dimension the former exhaustive
+        // traversal could only collapse back to this same leaf. It also could
+        // not append arena nodes, which makes this short-circuit byte-for-byte
+        // equivalent while avoiding all descendant calls.
+        if PRUNE_OUTSIDE && self.region_is_outside_grid(grid, x, y, z) {
+            return AIR_LEAF;
+        }
+
         if depth == 0 {
             let (v_type, color, ll, fo) = self.get_voxel_attrs(grid, x, y, z);
             return SvoNode::Leaf {
@@ -50,20 +79,22 @@ impl BuildOctreeUseCase {
         }
 
         let child_size = size / 2;
-        let mut children = [SvoNode::Leaf {
-            voxel_type: 0,
-            color: 0,
-            light_rgb: [0; 3],
-            face_occlusion: 0,
-        }; 8];
+        let mut children = [AIR_LEAF; 8];
 
         for octant_idx in 0..8 {
             let dx = (octant_idx & 1) * child_size;
             let dy = ((octant_idx >> 1) & 1) * child_size;
             let dz = ((octant_idx >> 2) & 1) * child_size;
 
-            children[octant_idx as usize] =
-                self.build_recursive(grid, nodes, x + dx, y + dy, z + dz, child_size, depth - 1);
+            children[octant_idx as usize] = self.build_recursive::<PRUNE_OUTSIDE>(
+                grid,
+                nodes,
+                x + dx,
+                y + dy,
+                z + dz,
+                child_size,
+                depth - 1,
+            );
         }
 
         // Check if all 8 children are uniform leaves
@@ -133,6 +164,10 @@ impl BuildOctreeUseCase {
         }
     }
 
+    fn region_is_outside_grid(&self, grid: &VoxelGrid, x: u32, y: u32, z: u32) -> bool {
+        x as usize >= grid.width() || y as usize >= grid.height() || z as usize >= grid.depth()
+    }
+
     fn get_voxel_attrs(&self, grid: &VoxelGrid, x: u32, y: u32, z: u32) -> (u8, u32, [u8; 3], u8) {
         if x >= grid.width() as u32 || y >= grid.height() as u32 || z >= grid.depth() as u32 {
             return (0, 0, [0; 3], 0); // Out of bounds is air
@@ -157,7 +192,42 @@ impl BuildOctreeUseCase {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::entities::voxel_grid::VOXEL_WALL;
+    use crate::domain::entities::voxel_grid::{
+        FACE_OCCLUDED_NEGATIVE_X, FACE_OCCLUDED_POSITIVE_Y, VOXEL_CEILING, VOXEL_RED_WALL,
+        VOXEL_WALL,
+    };
+
+    fn traversal_call_count<const PRUNE_OUTSIDE: bool>(
+        dimensions: [u32; 3],
+        origin: [u32; 3],
+        depth: u32,
+    ) -> usize {
+        if PRUNE_OUTSIDE
+            && (origin[0] >= dimensions[0]
+                || origin[1] >= dimensions[1]
+                || origin[2] >= dimensions[2])
+        {
+            return 1;
+        }
+        if depth == 0 {
+            return 1;
+        }
+
+        let child_size = 1 << (depth - 1);
+        let mut calls = 1;
+        for octant in 0..8u32 {
+            calls += traversal_call_count::<PRUNE_OUTSIDE>(
+                dimensions,
+                [
+                    origin[0] + (octant & 1) * child_size,
+                    origin[1] + ((octant >> 1) & 1) * child_size,
+                    origin[2] + ((octant >> 2) & 1) * child_size,
+                ],
+                depth - 1,
+            );
+        }
+        calls
+    }
 
     #[test]
     fn test_empty_grid_collapses_to_single_root_leaf() {
@@ -198,5 +268,47 @@ mod tests {
         let (v_type, color, _, _) = val.unwrap();
         assert_eq!(v_type, VOXEL_WALL);
         assert_eq!(color, 0xddcc66);
+    }
+
+    #[test]
+    fn outside_pruning_preserves_non_power_of_two_tree_and_lookups() {
+        let mut grid = VoxelGrid::new(5, 3, 6);
+        grid.set(0, 0, 0, VOXEL_WALL);
+        grid.set_light_rgb(0, 0, 0, [7, 5, 3]);
+        grid.set_face_occlusion(0, 0, 0, FACE_OCCLUDED_POSITIVE_Y);
+        grid.set(3, 1, 4, VOXEL_CEILING);
+        grid.set_light_rgb(3, 1, 4, [2, 4, 6]);
+        grid.set(4, 2, 5, VOXEL_RED_WALL);
+        grid.set_face_occlusion(4, 2, 5, FACE_OCCLUDED_NEGATIVE_X);
+
+        let builder = BuildOctreeUseCase::new();
+        let optimized = builder.execute_internal::<true>(&grid, 3, 8.0);
+        let exhaustive = builder.execute_internal::<false>(&grid, 3, 8.0);
+
+        assert_eq!(
+            optimized, exhaustive,
+            "pruning must not renumber or alter nodes"
+        );
+        for z in 0..8 {
+            for y in 0..8 {
+                for x in 0..8 {
+                    assert_eq!(optimized.get(x, y, z), exhaustive.get(x, y, z));
+                }
+            }
+        }
+
+        let dimensions = [
+            grid.width() as u32,
+            grid.height() as u32,
+            grid.depth() as u32,
+        ];
+        let optimized_calls = traversal_call_count::<true>(dimensions, [0; 3], 3);
+        let exhaustive_calls = traversal_call_count::<false>(dimensions, [0; 3], 3);
+        assert_eq!(optimized_calls, 185);
+        assert_eq!(exhaustive_calls, 585);
+        assert!(
+            optimized_calls * 3 <= exhaustive_calls,
+            "expected at least a 3x traversal reduction, got {optimized_calls} optimized calls vs {exhaustive_calls} exhaustive calls"
+        );
     }
 }

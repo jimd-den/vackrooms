@@ -2,7 +2,9 @@
 #   .              -> `vackrooms` core: Entities + Use Cases + Interface Adapters,
 #                     plus the native dev server binary (Frameworks & Drivers).
 #                     The library is platform-agnostic and also compiles to wasm32.
-#   wasm_frontend  -> Browser front end (wasm-bindgen + WebGL2 driver).
+#   wasm_frontend  -> Four portable WebGPU strategies plus the wasm browser
+#                     shell; the same pipelines run headlessly on Vulkan/
+#                     Lavapipe in CI.
 #   wasm_raycaster -> Legacy CPU raycaster experiment (kept for reference).
 [workspace]
 members = [".", "wasm_frontend", "wasm_raycaster"]

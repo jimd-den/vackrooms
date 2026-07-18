@@ -1,17 +1,18 @@
-// Generation worker: a second instance of the same wasm module, running the
-// full chunk pipeline off the main thread. The onmessage handler is
+// Generation worker: a second instance of the same wasm module, producing
+// renderer-selected chunk artifacts off the main thread. The handler is
 // registered synchronously at module scope so no message can be lost while
 // the wasm module is still instantiating; work is serialized through a
 // promise chain.
 //
 // Protocol (main -> worker):
 //   { type: "init", query, seed }        one-time generator setup
-//   { type: "gen", requestId, ox, oz, level, lod, reality } one chunk order;
-//                                                        reality is Uint32Array
+//   { type: "gen", requestId, ox, oz, level, lod, artifacts, reality }
+//                   one chunk order; artifacts is a u8 bitfield and reality
+//                   is Uint32Array
 // (worker -> main):
-//   { type: "done", requestId, ox, oz, level, lod, reality, ms, buf }
+//   { type: "done", requestId, ox, oz, level, lod, artifacts, reality, ms, buf }
 //                                   buf transferred, encoded by chunk_codec
-//   { type: "failed", requestId, ox, oz, level, lod, reality, message }
+//   { type: "failed", requestId, ox, oz, level, lod, artifacts, reality, message }
 //                                   one request failed and may be retried
 //   { type: "fatal", message }      worker initialization failed
 import init, { worker_init, worker_generate } from "./pkg/wasm_frontend.js";
@@ -41,6 +42,7 @@ function reportFailure(message, error) {
         oz: message.oz,
         level: message.level,
         lod: message.lod,
+        artifacts: message.artifacts,
         reality: new Uint32Array(message.reality),
         message: description,
       });
@@ -70,6 +72,7 @@ async function processMessage(message) {
     message.oz,
     message.level,
     message.lod,
+    message.artifacts >>> 0,
     reality
   );
   const ms = performance.now() - t0;
@@ -84,6 +87,7 @@ async function processMessage(message) {
       oz: message.oz,
       level: message.level,
       lod: message.lod,
+      artifacts: message.artifacts,
       reality,
       ms,
       buf: bytes.buffer,

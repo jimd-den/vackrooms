@@ -15,7 +15,7 @@ use crate::application::ports::ChunkDraw;
 #[cfg(test)]
 use crate::application::rendering::compact_support_window;
 use crate::application::rendering::{
-    finite_range_inverse_square_attenuation, lambertian_receiver_cosine,
+    FLASHLIGHT_SPEC, finite_range_inverse_square_attenuation, lambertian_receiver_cosine,
 };
 
 use super::camera::{Camera, dot};
@@ -23,20 +23,20 @@ use super::raycast::{ray_box_interval, svo_segment_is_occluded};
 use super::settings::CpuFlashlightVisibility;
 
 /// Full-strength core and soft outer edge of the angular profile.
-pub const INNER_DEG: f32 = 11.0;
-pub const OUTER_DEG: f32 = 24.0;
+pub const INNER_DEG: f32 = FLASHLIGHT_SPEC.inner_degrees;
+pub const OUTER_DEG: f32 = FLASHLIGHT_SPEC.outer_degrees;
 /// Finite support of the lamp in world units.
-pub const RANGE_END: f32 = 14.0;
+pub const RANGE_END: f32 = FLASHLIGHT_SPEC.range;
 /// Radiometric scale before inverse-square transport. It is intentionally a
 /// named calibration constant rather than a hidden post-lighting boost.
-pub const INTENSITY: f32 = 32.0;
+pub const INTENSITY: f32 = FLASHLIGHT_SPEC.intensity;
 /// Finite source-radius clamp, preventing a singularity against the lamp.
-pub const MINIMUM_DISTANCE: f32 = 0.25;
+pub const MINIMUM_DISTANCE: f32 = FLASHLIGHT_SPEC.minimum_distance;
 /// Lamp offset from the eye: a small hand-held parallax, not an eye glow.
-pub const LAMP_FORWARD: f32 = 0.18;
-pub const LAMP_DOWN: f32 = 0.10;
+pub const LAMP_FORWARD: f32 = FLASHLIGHT_SPEC.forward_offset;
+pub const LAMP_DOWN: f32 = FLASHLIGHT_SPEC.downward_offset;
 /// Warm-white spectral tint in linear RGB.
-pub const TINT: [f32; 3] = [1.0, 0.91, 0.72];
+pub const TINT: [f32; 3] = FLASHLIGHT_SPEC.tint;
 
 /// Fixed world-space endpoint tolerances for the visibility segment.
 const OCCLUSION_ORIGIN_BIAS: f32 = 0.02;

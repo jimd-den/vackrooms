@@ -3,6 +3,7 @@
 //! `?seed=1234&voxel_size=0.1&pillars=0.5&walls=1.2&anomalies=0.8`
 //!
 //! * `seed`    — world seed (u32; any text is hashed so words work too).
+//! * `spec`    — shared case-insensitive `low`/`high` quality decision.
 //! * `pillars` — structural column density multiplier (0 = none).
 //! * `walls`   — office wall density multiplier (0 = open plan).
 //! * `atria`   — how much of the world vaults into tall atria.
@@ -21,6 +22,8 @@
 
 use vackrooms::domain::entities::anomaly::AnomalyKind;
 use vackrooms::use_cases::generate_chunk::{AnomalyTuning, GeneratorConfig, LevelTuning};
+
+use crate::application::quality::QualityProfile;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct GenerationParams {
@@ -135,11 +138,30 @@ pub fn parse_generation_params(query: &str, default_seed: u32) -> GenerationPara
 /// thread and every generation worker call this with the same query string,
 /// so all of them voxelize the identical world by construction.
 pub fn generator_setup_from_query(query: &str, default_seed: u32) -> (u32, GeneratorConfig) {
+    generator_setup_for_quality(query, default_seed, quality_profile_from_query(query))
+}
+
+/// Parses the shared `?spec=low|high` decision. Values are case-insensitive,
+/// matching renderer selection, while malformed or missing values retain the
+/// established low-profile default.
+pub fn quality_profile_from_query(query: &str) -> QualityProfile {
+    query_param(query, "spec")
+        .and_then(QualityProfile::parse)
+        .unwrap_or_default()
+}
+
+/// Resolves generation from an already parsed quality decision. The browser
+/// composition root uses this together with renderer profile construction so
+/// both sides are guaranteed to observe the same value.
+pub fn generator_setup_for_quality(
+    query: &str,
+    default_seed: u32,
+    quality: QualityProfile,
+) -> (u32, GeneratorConfig) {
     let params = parse_generation_params(query, default_seed);
-    let base = if has_exact_pair(query, "spec", "high") {
-        GeneratorConfig::high_spec()
-    } else {
-        GeneratorConfig::low_spec()
+    let base = match quality {
+        QualityProfile::Low => GeneratorConfig::low_spec(),
+        QualityProfile::High => GeneratorConfig::high_spec(),
     };
     let configured = base
         .with_tuning(params.tuning)
@@ -149,14 +171,6 @@ pub fn generator_setup_from_query(query: &str, default_seed: u32) -> (u32, Gener
         .and_then(|voxel_size| configured.try_with_voxel_size(voxel_size).ok())
         .unwrap_or(configured);
     (params.seed, configured)
-}
-
-fn has_exact_pair(query: &str, expected_key: &str, expected_value: &str) -> bool {
-    query
-        .trim_start_matches('?')
-        .split('&')
-        .filter_map(|pair| pair.split_once('='))
-        .any(|(key, value)| key == expected_key && value == expected_value)
 }
 
 /// Non-numeric seeds ("?seed=kitten") hash to a stable u32 (FNV-1a).
@@ -240,6 +254,33 @@ mod tests {
     fn profile_selection_requires_an_exact_query_key() {
         let (_, config) = generator_setup_from_query("?not_spec=high&voxel_size=0.2", 42);
         assert_eq!(config.chunk_size, GeneratorConfig::low_spec().chunk_size);
+    }
+
+    #[test]
+    fn generation_and_rendering_share_one_case_insensitive_quality_decision() {
+        for query in ["?spec=high", "?spec=HIGH", "?spec=High"] {
+            let quality = quality_profile_from_query(query);
+            let (_, config) = generator_setup_for_quality(query, 42, quality);
+            assert_eq!(quality, QualityProfile::High);
+            assert_eq!(config.chunk_size, GeneratorConfig::high_spec().chunk_size);
+        }
+
+        for query in [
+            "",
+            "?spec=low",
+            "?spec=LOW",
+            "?spec=ultra",
+            "?not_spec=high",
+        ] {
+            let quality = quality_profile_from_query(query);
+            let (_, config) = generator_setup_for_quality(query, 42, quality);
+            assert_eq!(quality, QualityProfile::Low, "query {query:?}");
+            assert_eq!(
+                config.chunk_size,
+                GeneratorConfig::low_spec().chunk_size,
+                "query {query:?}"
+            );
+        }
     }
 
     #[test]

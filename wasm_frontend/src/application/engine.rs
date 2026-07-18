@@ -8,30 +8,34 @@
 
 use std::collections::{HashMap, HashSet};
 
+pub use crate::application::perf_governor::PerfGovernor;
+
 use crate::application::atlas::{AtlasPool, MAX_CHUNKS, payload_rows};
 use crate::application::body::{Body, BodyContext, BodyReadout};
 use crate::application::collision::{CollisionWorld, player_aabb};
+use crate::application::flares::FlareField;
 use crate::application::navigation::{
     RouteTarget, range_m, relative_bearing_deg, select_anomaly_focus, select_route_target,
 };
 use crate::application::player::{MoveIntent, Player};
 use crate::application::ports::{
-    ChunkDraw, ChunkRequest, ChunkSourcePort, CompletedChunk, DynamicLight, Environment,
-    FrameParams, MAX_DYNAMIC_LIGHTS, RendererPort, SurfaceChunk,
+    ChunkDraw, ChunkRequest, ChunkSourcePort, CompletedChunk, Environment, FrameParams,
+    RenderArtifactNeeds, RendererPort, SurfaceChunk,
 };
 use crate::application::prepare_frame_lighting::select_scene_lights;
 use crate::application::streaming::{
     ChunkKey, ChunkStore, LoadedChunk, StreamingPolicy, chunk_key,
 };
+use crate::application::survival_inventory::{ConsumptionIntent, SurvivalInventory};
 use crate::application::thermal;
 use vackrooms::domain::entities::anomaly::{
     AnomalyKind, FABRIC_DRIFT_CELL, RealitySnapshot, TraversalGateKind, WorldBounds,
     fabric_drift_cell_of,
 };
-use vackrooms::domain::entities::player_vitals::{
-    ALMOND_WATER_HYDRATION, PlayerVitals, RATION_SATIETY,
-};
+use vackrooms::domain::entities::player_vitals::PlayerVitals;
 use vackrooms::domain::entities::supplies::SupplyKind;
+
+pub use crate::application::flares::Flare;
 
 /// Static configuration chosen by the composition root.
 #[derive(Debug, Clone, Copy)]
@@ -145,76 +149,6 @@ pub struct HudStats {
     pub route: Option<RouteAnchor>,
 }
 
-/// Adaptive internal-resolution governor. Low-spec machines get fewer rays
-/// per frame by rendering at a reduced backing-store resolution; the driver
-/// applies the scale to the canvas. Hysteresis + cooldown prevent flapping.
-#[derive(Debug, Clone, Copy)]
-pub struct PerfGovernor {
-    ema_frame_ms: f32,
-    scale: f32,
-    cooldown_frames: u32,
-    /// Frames since the last scale-up attempt (saturating).
-    frames_since_raise: u32,
-    /// While positive, scale-ups are locked out because a recent raise
-    /// immediately overloaded the GPU and had to be reverted (anti-flap).
-    raise_lockout_frames: u32,
-}
-
-impl PerfGovernor {
-    const SCALES: [f32; 4] = [0.5, 0.65, 0.8, 1.0];
-    /// A drop this soon after a raise counts as a failed raise.
-    const RAISE_PROBE_FRAMES: u32 = 600;
-    /// How long a failed raise blocks further raise attempts (~1 min).
-    const RAISE_LOCKOUT_FRAMES: u32 = 3600;
-
-    pub fn new() -> Self {
-        Self {
-            ema_frame_ms: 16.0,
-            scale: 0.8,
-            cooldown_frames: 0,
-            frames_since_raise: u32::MAX,
-            raise_lockout_frames: 0,
-        }
-    }
-
-    pub fn scale(&self) -> f32 {
-        self.scale
-    }
-
-    pub fn update(&mut self, frame_ms: f32) {
-        self.ema_frame_ms = self.ema_frame_ms * 0.95 + frame_ms.clamp(0.0, 100.0) * 0.05;
-        self.frames_since_raise = self.frames_since_raise.saturating_add(1);
-        self.raise_lockout_frames = self.raise_lockout_frames.saturating_sub(1);
-        if self.cooldown_frames > 0 {
-            self.cooldown_frames -= 1;
-            return;
-        }
-        let idx = Self::SCALES
-            .iter()
-            .position(|&s| s == self.scale)
-            .unwrap_or(2);
-        if self.ema_frame_ms > 33.0 && idx > 0 {
-            // Sustained under ~30 fps: drop one resolution step. If this
-            // happens right after a raise, the raise failed — lock raises
-            // out for a while so the scale doesn't oscillate.
-            if self.frames_since_raise < Self::RAISE_PROBE_FRAMES {
-                self.raise_lockout_frames = Self::RAISE_LOCKOUT_FRAMES;
-            }
-            self.scale = Self::SCALES[idx - 1];
-            self.cooldown_frames = 120;
-        } else if self.ema_frame_ms < 17.5
-            && idx + 1 < Self::SCALES.len()
-            && self.raise_lockout_frames == 0
-        {
-            // Holding 60Hz vsync (rAF EMA floors at ~16.7 ms, so a lower
-            // threshold would never fire): probe one resolution step up.
-            self.scale = Self::SCALES[idx + 1];
-            self.cooldown_frames = 240;
-            self.frames_since_raise = 0;
-        }
-    }
-}
-
 /// The single coarse LOD used for progressive availability: every missing
 /// chunk is first loaded at this LOD (voxels 2x the size, ~1/8 the cost) so
 /// the whole streaming footprint becomes visible before any chunk is refined.
@@ -231,16 +165,6 @@ const LEVEL_HABITABLE: u32 = 1;
 const LEVEL_GRASSLAND: u32 = 34;
 /// Horizontal reach within which a supply pickup fires.
 const PICKUP_REACH: f32 = 0.8;
-/// Carried supplies beyond immediate need, per kind.
-const CARRY_CAP: u32 = 3;
-/// A carried supply is consumed when its vital falls under this level.
-const AUTO_CONSUME_AT: f32 = 0.5;
-/// How much of one wasted supply point (restoration past a full reserve)
-/// lands on the excess meter. Draining a bottle at full hydration books
-/// ~0.5 excess: two greedy pickups put the wanderer deep into strain.
-const EXCESS_PER_WASTE: f32 = 0.8;
-/// The excess meter drains to zero over five frugal minutes.
-const EXCESS_DECAY_PER_S: f32 = 1.0 / 300.0;
 /// Seconds between level-door transits (re-arming, not gameplay pacing).
 const DOOR_COOLDOWN_S: f32 = 2.0;
 /// Route-objective reselection cadence. Selection walks the resident exits
@@ -248,9 +172,6 @@ const DOOR_COOLDOWN_S: f32 = 2.0;
 const ROUTE_RECOMPUTE_PERIOD_S: f32 = 0.5;
 /// Debug-only anomaly awareness radius for the diagnostic aperture, meters.
 const AWARENESS_RANGE_M: f32 = 60.0;
-/// Thermal inertia: seconds for the felt ambient to close ~63% of the gap
-/// to the instantaneous lit-scene temperature.
-const THERMAL_TAU_S: f32 = 8.0;
 /// Where death and Level-1 arrival place the eye, per level.
 fn level_spawn(level: u32, config_spawn: [f32; 3]) -> [f32; 3] {
     if level == LEVEL_HABITABLE {
@@ -263,15 +184,6 @@ fn level_spawn(level: u32, config_spawn: [f32; 3]) -> [f32; 3] {
 const NOCLIP_PUSH_SECONDS: f32 = 1.2;
 /// ...then one roll per second of continued pushing, at this probability.
 const NOCLIP_CHANCE: f32 = 0.2;
-/// Flare lifetime in seconds (fade begins in the final tenth).
-const FLARE_LIFETIME_S: f32 = 90.0;
-/// Global active-flare cap; dropping past it silently retires the oldest.
-const FLARE_CAP: usize = 12;
-/// Flares farther than this from the camera contribute no dynamic light.
-const FLARE_CULL_DISTANCE: f32 = 40.0;
-/// Local warm glow radius of one flare.
-const FLARE_LIGHT_RADIUS: f32 = 9.0;
-
 /// Per-frame intensity gain of one fixture's authored flicker mode.
 /// Deterministic in (id, time): every machine shows the same buzz.
 /// Mode 1 is a tired ballast — a fast shallow shimmer with slow beats.
@@ -290,11 +202,7 @@ fn fixture_flicker_gain(id: u64, mode: u8, time: f32) -> f32 {
             let mut h = id ^ step.wrapping_mul(0x9E37_79B9_7F4A_7C15);
             h ^= h >> 31;
             h = h.wrapping_mul(0xBF58_476D_1CE4_E5B9);
-            if (h >> 40) % 100 < 24 {
-                0.06
-            } else {
-                0.92
-            }
+            if (h >> 40) % 100 < 24 { 0.06 } else { 0.92 }
         }
         _ => 1.0,
     }
@@ -311,26 +219,6 @@ const BLACKOUT_HIDE_DISTANCE: f32 = 5.0;
 /// almost impossible to back out of. Each firing's rebuild work is still
 /// metered by the ordinary install budget.
 const BLACKOUT_SHIFT_PERIOD_S: f32 = 0.75;
-/// Flare flame height above the floor slab.
-const FLARE_HEIGHT: f32 = 0.3;
-
-/// One dropped flare: pure runtime world-space state. Never serialized into
-/// chunks, never part of the reality snapshot, and preserved untouched by
-/// ordinary chunk streaming.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct Flare {
-    pub position: [f32; 3],
-    pub age_seconds: f32,
-    /// Monotonic drop order; doubles as the deterministic flicker phase.
-    pub sequence: u64,
-}
-
-impl Flare {
-    pub fn remaining_seconds(&self) -> f32 {
-        (FLARE_LIFETIME_S - self.age_seconds).max(0.0)
-    }
-}
-
 pub struct Engine {
     config: EngineConfig,
     player: Player,
@@ -342,6 +230,7 @@ pub struct Engine {
     draws: Vec<ChunkDraw>,
     atlas_nodes: usize,
     governor: PerfGovernor,
+    artifact_needs: RenderArtifactNeeds,
     renderer: Box<dyn RendererPort>,
     source: Box<dyn ChunkSourcePort>,
     /// Outstanding background loads (async sources only). The complete
@@ -386,10 +275,8 @@ pub struct Engine {
     noclip_cooldown: f32,
     /// xorshift state for the noclip dice.
     rng: u64,
-    /// Active dropped flares, oldest first.
-    flares: Vec<Flare>,
-    /// Monotonic flare drop counter.
-    flare_sequence: u64,
+    /// Transient dropped-flare state and renderer-light selection.
+    flares: FlareField,
     /// Session pedometer: resolved horizontal movement (world units).
     distance_m: f64,
     /// The wanderer's embodied telemetry: pedometer, exertion, fatigue,
@@ -400,28 +287,13 @@ pub struct Engine {
     /// invalidated on level switches and reality transitions.
     route_target: Option<RouteTarget>,
     route_cooldown: f32,
-    /// Accessibility option: consume carried supplies automatically when a
-    /// vital runs low. Off by default — drinking and eating are deliberate.
-    assisted_consumption: bool,
-    /// Engine-time seconds, used only for flare flicker phase.
+    /// Vitals, carried supplies, felt temperature, consumption, and
+    /// attrition policy form one survival aggregate.
+    survival: SurvivalInventory,
+    /// Engine-time seconds used for deterministic CPU-side light flicker.
     time_seconds: f64,
-    /// Survival vitals; advanced once per tick under the felt ambient.
-    vitals: PlayerVitals,
-    /// Overconsumption pressure, 0 frugal .. 1 glutted. Accumulates from
-    /// wasted supply value (drinking or eating past a full vital) and decays
-    /// slowly. Together with dehydration it forms the mismanagement strain
-    /// that drives the reality's delirium tier and the shift's aggression:
-    /// the level punishes waste exactly as it punishes want.
-    excess: f32,
-    /// Carried supplies awaiting auto-consumption.
-    almond_bottles: u32,
-    rations: u32,
-    /// Smoothed ambient temperature at the player, °C.
-    ambient_c: f32,
     /// Seconds until a level door may fire again.
     door_cooldown: f32,
-    /// Times the wanderer has succumbed this session.
-    deaths: u32,
 }
 
 impl Engine {
@@ -431,7 +303,8 @@ impl Engine {
         source: Box<dyn ChunkSourcePort>,
     ) -> Self {
         let radius = config.chunk_radius.clamp(0, 2);
-        let visual_radius = if renderer.uses_surface_meshes() {
+        let artifact_needs = renderer.artifact_needs();
+        let visual_radius = if artifact_needs.needs_surface_extraction() {
             4
         } else {
             radius
@@ -454,6 +327,7 @@ impl Engine {
             draws: Vec::new(),
             atlas_nodes: 0,
             governor: PerfGovernor::new(),
+            artifact_needs,
             renderer,
             source,
             pending: HashMap::new(),
@@ -469,21 +343,14 @@ impl Engine {
             push_seconds: 0.0,
             noclip_cooldown: 0.0,
             rng: (config.seed as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1,
-            flares: Vec::new(),
-            flare_sequence: 0,
+            flares: FlareField::default(),
             distance_m: 0.0,
             body: Body::default(),
             route_target: None,
             route_cooldown: 0.0,
-            assisted_consumption: false,
+            survival: SurvivalInventory::new(thermal::dark_baseline_c(config.initial_level)),
             time_seconds: 0.0,
-            vitals: PlayerVitals::default(),
-            excess: 0.0,
-            almond_bottles: 0,
-            rations: 0,
-            ambient_c: thermal::dark_baseline_c(config.initial_level),
             door_cooldown: 0.0,
-            deaths: 0,
             config,
         }
     }
@@ -592,14 +459,14 @@ impl Engine {
 
     /// Survival vitals (read-only view for presenters/tests).
     pub fn vitals(&self) -> PlayerVitals {
-        self.vitals
+        self.survival.vitals()
     }
 
     /// Test-only vitals override, for exercising attrition paths without
     /// simulating twenty real minutes.
     #[cfg(test)]
     pub(crate) fn set_vitals_for_test(&mut self, vitals: PlayerVitals) {
-        self.vitals = vitals;
+        self.survival.set_vitals_for_test(vitals);
     }
 
     /// Immutable encounter-state snapshot currently used to key generation.
@@ -652,25 +519,10 @@ impl Engine {
 
         self.stream_chunks();
 
-        // Front-to-back chunk order: the shader marches chunks nearest-first
-        // and its per-pixel insertion sort degenerates to a single linear
-        // pass when the uniform table is already sorted by camera distance.
-        let cam = self.player.position;
-        self.draws.sort_by(|a, b| {
-            let d2 = |c: &ChunkDraw| {
-                let h = c.world_size * 0.5;
-                let dx = c.origin[0] + h - cam[0];
-                let dy = c.origin[1] + h - cam[1];
-                let dz = c.origin[2] + h - cam[2];
-                dx * dx + dy * dy + dz * dz
-            };
-            d2(a).total_cmp(&d2(b))
-        });
-
         let mut scene_lights = select_scene_lights(
             self.store
                 .iter_ordered()
-                .flat_map(|chunk| chunk.payload.surface.lights.iter()),
+                .flat_map(|chunk| chunk.payload.lights.iter()),
             self.player.position,
         );
         // Fluorescent flicker is applied here, once, CPU-side — exactly like
@@ -690,36 +542,29 @@ impl Engine {
             &scene_lights,
             self.world.boxes(),
         );
-        let blend = (dt / THERMAL_TAU_S).clamp(0.0, 1.0);
-        self.ambient_c += (instantaneous_c - self.ambient_c) * blend;
-        self.vitals = self.vitals.advanced(dt, self.ambient_c);
-        // Consumption is deliberate: an edge-triggered drink/eat input spends
-        // one carried supply. The assisted option restores the old automatic
-        // behavior for players who opt in.
-        if input.drink {
-            self.drink_carried();
-        }
-        if input.eat {
-            self.eat_carried();
-        }
-        if self.assisted_consumption {
-            self.auto_consume_supplies();
-        }
+        self.survival.advance_vitals(dt, instantaneous_c);
+        // Consumption is deliberate; the survival aggregate also owns the
+        // optional accessibility policy that acts after explicit choices.
+        self.survival.consume(ConsumptionIntent {
+            drink: input.drink,
+            eat: input.eat,
+        });
         // The body listens to the same survival state the vitals own; the
         // resolved walking distance is the only movement it ever sees.
+        let survival = self.survival.readout();
         self.body.advance(
             dt,
             walked_m,
             BodyContext {
-                hydration: self.vitals.hydration,
-                satiety: self.vitals.satiety,
-                condition: self.vitals.condition,
-                ambient_c: self.ambient_c,
+                hydration: survival.vitals.hydration,
+                satiety: survival.vitals.satiety,
+                condition: survival.vitals.condition,
+                ambient_c: survival.ambient_c,
             },
         );
         self.update_route(dt);
-        if self.vitals.is_dead() {
-            self.succumb();
+        if self.survival.succumb_if_dead() {
+            self.respawn_after_attrition();
         }
         // Strain: mismanagement in either direction raises the reality's
         // delirium tier, and chunks generated from here on carry more
@@ -728,31 +573,21 @@ impl Engine {
         // worsens as it streams, never as a visible pop. Dehydration bands
         // punish the underconsumer; the excess meter (wasted supplies)
         // punishes the overconsumer with the very same tiers.
-        self.excess = (self.excess - dt * EXCESS_DECAY_PER_S).max(0.0);
-        let thirst_tier = match self.vitals.hydration {
-            h if h > 0.6 => 0,
-            h if h > 0.35 => 1,
-            h if h > 0.15 => 2,
-            _ => 3,
-        };
-        let excess_tier = match self.excess {
-            e if e < 0.25 => 0,
-            e if e < 0.5 => 1,
-            e if e < 0.75 => 2,
-            _ => 3,
-        };
-        let tier = thirst_tier.max(excess_tier);
+        let tier = self.survival.advance_strain(dt);
         if tier != self.reality.delirium() {
             self.reality = self.reality.with_delirium(tier);
         }
 
+        let flare_lights = self
+            .flares
+            .lights(self.player.position, self.time_seconds as f32);
         let frame = FrameParams {
             camera_pos: self.player.position,
             yaw: self.player.yaw,
             pitch: self.player.pitch,
             flashlight: input.flashlight,
-            dynamic_lights: self.flare_lights(),
-            dynamic_light_count: self.flare_light_count(),
+            dynamic_lights: flare_lights.lights,
+            dynamic_light_count: flare_lights.count,
             scene_lights,
             environment: self.environment(),
             supply_sprites: self.collect_supply_sprites(),
@@ -760,118 +595,20 @@ impl Engine {
         self.renderer.draw(&frame, &self.draws);
     }
 
-    /// Ages, caps, and drops flares. Placement prefers a spot slightly ahead
-    /// of the player's feet but never inside solid geometry; the fallback is
-    /// the player's own (guaranteed valid) position.
+    /// Supplies player intent and collision context to the flare lifecycle.
     fn update_flares(&mut self, dt: f32, input: &InputFrame) {
-        for flare in &mut self.flares {
-            flare.age_seconds += dt;
-        }
-        self.flares
-            .retain(|flare| flare.age_seconds < FLARE_LIFETIME_S);
-
+        self.flares.advance(dt);
         if !(input.drop_flare && input.locked) {
             return;
         }
-        let fwd = self.player.forward();
         let eye = self.player.position;
-        let ahead = [eye[0] + fwd[0] * 0.9, eye[1], eye[2] + fwd[2] * 0.9];
-        let spot = if self.world.collides(ahead) {
-            eye
-        } else {
-            ahead
-        };
-        if self.flares.len() >= FLARE_CAP {
-            // Oldest first by construction; no count UI, no modal — the
-            // oldest flare simply retires.
-            self.flares.remove(0);
-        }
-        self.flare_sequence += 1;
-        self.flares.push(Flare {
-            position: [spot[0], FLARE_HEIGHT, spot[2]],
-            age_seconds: 0.0,
-            sequence: self.flare_sequence,
-        });
-    }
-
-    /// A regenerated chunk may lawfully differ (wake remaps beyond the
-    /// eviction ring). A flare standing where new geometry now stands would
-    /// desynchronize render and collision, so the deterministic policy is:
-    /// remaps never move a flare through a wall — a buried flare is
-    /// extinguished the moment the world around it becomes solid.
-    fn extinguish_buried_flares(&mut self) {
-        if self.flares.is_empty() {
-            return;
-        }
-        let world = &self.world;
-        self.flares.retain(|flare| {
-            let probe = [
-                flare.position[0],
-                flare.position[1] + 0.2,
-                flare.position[2],
-            ];
-            !world.boxes().iter().any(|b| Self::point_in_aabb(probe, b))
-        });
-    }
-
-    fn point_in_aabb(p: [f32; 3], b: &crate::application::collision::Aabb) -> bool {
-        p[0] >= b.min[0]
-            && p[0] <= b.max[0]
-            && p[1] >= b.min[1]
-            && p[1] <= b.max[1]
-            && p[2] >= b.min[2]
-            && p[2] <= b.max[2]
-    }
-
-    /// The nearest active flares as per-frame dynamic lights, distance
-    /// culled, with CPU-side flicker and end-of-life fade baked into the
-    /// intensity so renderers stay clockless.
-    fn flare_lights(&self) -> [DynamicLight; MAX_DYNAMIC_LIGHTS] {
-        let mut out = [DynamicLight::default(); MAX_DYNAMIC_LIGHTS];
-        for (slot, flare) in self.nearest_flares().into_iter().enumerate() {
-            let fade = (flare.remaining_seconds() / (FLARE_LIFETIME_S * 0.1)).clamp(0.0, 1.0);
-            let phase = self.time_seconds as f32 * 13.0 + flare.sequence as f32 * 1.7;
-            let flicker = 0.85 + 0.15 * phase.sin() * (phase * 0.37).cos();
-            out[slot] = DynamicLight {
-                position: flare.position,
-                color: [1.0, 0.45, 0.18],
-                radius: FLARE_LIGHT_RADIUS,
-                intensity: 1.6 * fade * flicker,
-            };
-        }
-        out
-    }
-
-    fn flare_light_count(&self) -> u8 {
-        self.nearest_flares().len() as u8
-    }
-
-    fn nearest_flares(&self) -> Vec<&Flare> {
-        let cam = self.player.position;
-        let mut near: Vec<&Flare> = self
-            .flares
-            .iter()
-            .filter(|f| {
-                let dx = f.position[0] - cam[0];
-                let dz = f.position[2] - cam[2];
-                dx * dx + dz * dz < FLARE_CULL_DISTANCE * FLARE_CULL_DISTANCE
-            })
-            .collect();
-        near.sort_by(|a, b| {
-            let d2 = |f: &Flare| {
-                let dx = f.position[0] - cam[0];
-                let dz = f.position[2] - cam[2];
-                dx * dx + dz * dz
-            };
-            d2(a).total_cmp(&d2(b))
-        });
-        near.truncate(MAX_DYNAMIC_LIGHTS);
-        near
+        let forward = self.player.forward();
+        self.flares.drop_from(eye, forward, &self.world);
     }
 
     /// Active flares (world-space runtime state), oldest first.
     pub fn flares(&self) -> &[Flare] {
-        &self.flares
+        self.flares.active()
     }
 
     /// Session pedometer reading in meters.
@@ -973,8 +710,7 @@ impl Engine {
             .store
             .all_supply_items()
             .filter(|item| {
-                item.within_reach(px, pz, PICKUP_REACH)
-                    && !self.reality.supply_consumed(item.id)
+                item.within_reach(px, pz, PICKUP_REACH) && !self.reality.supply_consumed(item.id)
             })
             .copied()
             .collect();
@@ -982,22 +718,11 @@ impl Engine {
         grabbed.dedup_by_key(|item| item.id);
         for item in grabbed {
             // Pickups stock the pockets; drinking and eating are deliberate
-            // acts (`drink_carried`/`eat_carried`). Full pockets leave the
-            // item standing in the world instead of force-feeding the
-            // wanderer — walking past a bottle is never gluttony by itself.
-            match item.kind {
-                SupplyKind::AlmondWater => {
-                    if self.almond_bottles >= CARRY_CAP {
-                        continue;
-                    }
-                    self.almond_bottles += 1;
-                }
-                SupplyKind::Ration => {
-                    if self.rations >= CARRY_CAP {
-                        continue;
-                    }
-                    self.rations += 1;
-                }
+            // acts. Full pockets leave the item standing in the world instead
+            // of force-feeding the wanderer — walking past a bottle is never
+            // gluttony by itself.
+            if !self.survival.try_pickup(item.kind) {
+                continue;
             }
             self.reality = self.reality.with_supply_consumed(item.id);
             // Rebuild the chunk holding the marker under the advanced
@@ -1021,11 +746,7 @@ impl Engine {
             .find(|exit| exit.contains(px, pz))
             .copied();
         if let Some(exit) = transit {
-            let arrival = [
-                exit.arrival.x,
-                self.player.position[1],
-                exit.arrival.z,
-            ];
+            let arrival = [exit.arrival.x, self.player.position[1], exit.arrival.z];
             self.switch_level(exit.target_level, Some(arrival));
         }
     }
@@ -1064,60 +785,11 @@ impl Engine {
         near.into_iter().map(|(_, sprite)| sprite).collect()
     }
 
-    /// Deliberately drinks one carried almond water. Overshooting a full
-    /// reserve is booked as waste — gluttony feeds the excess meter exactly
-    /// like it always has.
-    fn drink_carried(&mut self) {
-        if self.almond_bottles == 0 {
-            return;
-        }
-        self.almond_bottles -= 1;
-        self.register_waste(self.vitals.hydration, ALMOND_WATER_HYDRATION);
-        self.vitals = self.vitals.drank_almond_water();
-    }
-
-    /// Deliberately eats one carried ration.
-    fn eat_carried(&mut self) {
-        if self.rations == 0 {
-            return;
-        }
-        self.rations -= 1;
-        self.register_waste(self.vitals.satiety, RATION_SATIETY);
-        self.vitals = self.vitals.ate_ration();
-    }
-
-    /// Accessibility option (off by default): consumes carried supplies once
-    /// their vital runs low. Even here a little restoration overshoots the
-    /// full mark, and the overshoot is booked as waste — a small, honest
-    /// cost next to the gluttony of drinking at a full reserve.
-    fn auto_consume_supplies(&mut self) {
-        if self.vitals.hydration < AUTO_CONSUME_AT && self.almond_bottles > 0 {
-            self.almond_bottles -= 1;
-            self.register_waste(self.vitals.hydration, ALMOND_WATER_HYDRATION);
-            self.vitals = self.vitals.drank_almond_water();
-        }
-        if self.vitals.satiety < AUTO_CONSUME_AT && self.rations > 0 {
-            self.rations -= 1;
-            self.register_waste(self.vitals.satiety, RATION_SATIETY);
-            self.vitals = self.vitals.ate_ration();
-        }
-    }
-
-    /// Books the unused share of a consumed supply onto the excess meter.
-    fn register_waste(&mut self, reserve_before: f32, restores: f32) {
-        let waste = (reserve_before + restores - 1.0).max(0.0);
-        self.excess = (self.excess + waste * EXCESS_PER_WASTE).clamp(0.0, 1.0);
-    }
-
     /// Death by attrition: the wanderer wakes at the level's arrival point
-    /// with reset vitals and empty pockets. The world — drift, consumed
-    /// supplies, sealed rooms — remembers everything; only the body's
-    /// strain resets (the session pedometer keeps its count).
-    fn succumb(&mut self) {
-        self.deaths += 1;
-        self.vitals = PlayerVitals::default();
-        self.almond_bottles = 0;
-        self.rations = 0;
+    /// after the survival aggregate has reset vitals and pockets. The world —
+    /// drift, consumed supplies, sealed rooms — remembers everything; only
+    /// the body's strain resets (the session pedometer keeps its count).
+    fn respawn_after_attrition(&mut self) {
         self.body.reset_strain();
         let spawn = level_spawn(self.level, self.config.spawn);
         self.player.relocate(spawn);
@@ -1163,7 +835,7 @@ impl Engine {
 
     /// Accessibility option: automatic consumption of carried supplies.
     pub fn set_assisted_consumption(&mut self, enabled: bool) {
-        self.assisted_consumption = enabled;
+        self.survival.set_assisted_consumption(enabled);
     }
 
     /// Squared distance from a point to a drift cell's world rectangle
@@ -1183,21 +855,11 @@ impl Engine {
         (self.visual_policy.radius as f32 + 1.0) * self.config.chunk_size
     }
 
-    /// Dehydration, 0 provisioned .. 1 parched.
-    fn dehydration(&self) -> f32 {
-        (1.0 - self.vitals.hydration).clamp(0.0, 1.0)
-    }
-
-    /// Mismanagement, 0 careful .. 1 ruinous — the world's aggression dial:
-    /// more thirst *or* more waste, more shift, more anomaly.
-    fn mismanagement(&self) -> f32 {
-        self.dehydration().max(self.excess)
-    }
-
     fn drift_far_radius(&self) -> f32 {
         // A mismanaging wanderer loses the hysteresis: the fabric rearranges
         // almost the moment it leaves the streaming footprint.
-        self.drift_near_radius() + 2.0 * FABRIC_DRIFT_CELL * (1.0 - 0.85 * self.mismanagement())
+        self.drift_near_radius()
+            + 2.0 * FABRIC_DRIFT_CELL * (1.0 - 0.85 * self.survival.mismanagement())
     }
 
     /// The Peripheral Shift: "whenever not directly observed, the layout can
@@ -1279,8 +941,7 @@ impl Engine {
                 // darkness — and a half-glimpsed wall that wasn't there is
                 // the intended experience, not a bug.
                 let inside = bounds.contains(cx_w, cz_w);
-                let behind =
-                    (cx_w - px) * forward[0] + (cz_w - pz) * forward[2] < -4.0;
+                let behind = (cx_w - px) * forward[0] + (cz_w - pz) * forward[2] < -4.0;
                 let hidden =
                     Self::drift_cell_dist2((cx, cz), px, pz) > BLACKOUT_HIDE_DISTANCE.powi(2);
                 if inside && behind && hidden {
@@ -1296,7 +957,7 @@ impl Engine {
         // Mismanagement accelerates the stalking dark: at full strain the
         // rear shift fires three times as often.
         self.blackout_shift_cooldown =
-            BLACKOUT_SHIFT_PERIOD_S / (1.0 + 2.0 * self.mismanagement());
+            BLACKOUT_SHIFT_PERIOD_S / (1.0 + 2.0 * self.survival.mismanagement());
         for &(cx, cz) in &shifted {
             self.reality = self.reality.with_fabric_drift_advanced(cx, cz);
         }
@@ -1353,6 +1014,7 @@ impl Engine {
             origin_z,
             level: self.level,
             lod,
+            artifacts: self.artifact_needs,
             reality,
         }
     }
@@ -1550,7 +1212,7 @@ impl Engine {
     /// on pool relayouts (first load, bigger chunks, level switch) or on
     /// back ends without partial-update support.
     fn stream_chunks(&mut self) {
-        let surface_renderer = self.renderer.uses_surface_meshes();
+        let surface_renderer = self.artifact_needs.needs_surface_extraction();
         let desired = self
             .policy
             .desired_origins(self.player.position[0], self.player.position[2]);
@@ -1604,9 +1266,14 @@ impl Engine {
                 })
                 .collect();
             for (key, ox, oz, lod) in forced {
-                let payload = self
-                    .source
-                    .load_with_reality(ox, oz, self.level, lod, &self.reality);
+                let payload = self.source.load_with_artifacts(
+                    ox,
+                    oz,
+                    self.level,
+                    lod,
+                    &self.reality,
+                    self.artifact_needs,
+                );
                 let player = player_aabb(self.player.position);
                 if payload
                     .collision
@@ -1634,12 +1301,13 @@ impl Engine {
                 }
                 let key = chunk_key(ox, oz);
                 if !self.store.contains(key) {
-                    let payload = self.source.load_with_reality(
+                    let payload = self.source.load_with_artifacts(
                         ox,
                         oz,
                         self.level,
                         COARSE_LOD,
                         &self.reality,
+                        self.artifact_needs,
                     );
                     self.store.insert(
                         key,
@@ -1661,9 +1329,14 @@ impl Engine {
                 let Some((ox, oz)) = target else { break };
                 let key = chunk_key(ox, oz);
                 let resident_reality = self.store.get(key).unwrap().reality.clone();
-                let payload =
-                    self.source
-                        .load_with_reality(ox, oz, self.level, 0, &resident_reality);
+                let payload = self.source.load_with_artifacts(
+                    ox,
+                    oz,
+                    self.level,
+                    0,
+                    &resident_reality,
+                    self.artifact_needs,
+                );
                 self.store.insert(
                     key,
                     LoadedChunk::new((ox, oz), 0, resident_reality, payload),
@@ -1680,9 +1353,9 @@ impl Engine {
             return;
         }
 
-        // The default path uploads only changed/replaced meshes. It keeps
-        // the SVO payload in memory for collision and exact debug queries,
-        // but avoids atlas rebasing and per-pixel traversal entirely.
+        // Raster strategies upload only changed/replaced surface artifacts.
+        // Collision stays resident as neutral AABBs; unrequested serialized
+        // SVO nodes never enter the payload or atlas.
         if surface_renderer {
             let surface_updates: Vec<SurfaceChunk<'_>> = loaded
                 .iter()
@@ -1716,7 +1389,7 @@ impl Engine {
                 .sum();
             let boxes: Vec<_> = self.store.all_collision_boxes().copied().collect();
             self.world.rebuild(boxes.iter());
-            self.extinguish_buried_flares();
+            self.flares.extinguish_buried(self.world.boxes());
             return;
         }
 
@@ -1786,7 +1459,7 @@ impl Engine {
 
         let boxes: Vec<_> = self.store.all_collision_boxes().copied().collect();
         self.world.rebuild(boxes.iter());
-        self.extinguish_buried_flares();
+        self.flares.extinguish_buried(self.world.boxes());
     }
 
     pub fn player(&self) -> &Player {
@@ -1934,6 +1607,7 @@ impl Engine {
             (self.config.spawn[0] / self.config.chunk_size).floor() * self.config.chunk_size,
             (self.config.spawn[2] / self.config.chunk_size).floor() * self.config.chunk_size,
         );
+        let survival = self.survival.readout();
         HudStats {
             resident_chunks: self.store.len(),
             fine_chunks: self.store.iter_ordered().filter(|c| c.lod == 0).count(),
@@ -1942,13 +1616,13 @@ impl Engine {
             resolution_scale: self.governor.scale(),
             ready: self.store.contains(spawn_key),
             distance_m: self.distance_m as f32,
-            hydration: self.vitals.hydration,
-            satiety: self.vitals.satiety,
-            condition: self.vitals.condition,
-            almond_bottles: self.almond_bottles,
-            rations: self.rations,
-            ambient_c: self.ambient_c,
-            deaths: self.deaths,
+            hydration: survival.vitals.hydration,
+            satiety: survival.vitals.satiety,
+            condition: survival.vitals.condition,
+            almond_bottles: survival.almond_bottles,
+            rations: survival.rations,
+            ambient_c: survival.ambient_c,
+            deaths: survival.deaths,
             level: self.level,
             body: self.body.readout(),
             route: self.route_anchor(),
@@ -1965,6 +1639,7 @@ impl Engine {
         let mut out = String::with_capacity(2048);
         let readout = self.body.readout();
         let debug = self.body.debug();
+        let survival = self.survival.readout();
 
         let _ = writeln!(out, "§ SUBJECT");
         let _ = writeln!(
@@ -1996,20 +1671,27 @@ impl Engine {
         let _ = writeln!(
             out,
             "recovery quality {:.2}  heat stress {:.2}  ambient {:.1} C",
-            debug.recovery_quality, debug.heat_stress, self.ambient_c,
+            debug.recovery_quality, debug.heat_stress, survival.ambient_c,
         );
         let _ = writeln!(
             out,
             "hydration {:.2}  satiety {:.2}  condition {:.2}  excess {:.2}",
-            self.vitals.hydration, self.vitals.satiety, self.vitals.condition, self.excess,
+            survival.vitals.hydration,
+            survival.vitals.satiety,
+            survival.vitals.condition,
+            survival.excess,
         );
         let _ = writeln!(
             out,
             "carried: water {}  rations {}  | assisted consumption {}  deaths {}",
-            self.almond_bottles,
-            self.rations,
-            if self.assisted_consumption { "on" } else { "off" },
-            self.deaths,
+            survival.almond_bottles,
+            survival.rations,
+            if survival.assisted_consumption {
+                "on"
+            } else {
+                "off"
+            },
+            survival.deaths,
         );
 
         let _ = writeln!(out, "§ ROUTE");
@@ -2116,6 +1798,7 @@ mod tests {
                 voxel_size: 0.2,
                 svo_depth: 6,
                 surface: crate::application::ports::SurfaceMeshPayload::empty(0),
+                lights: vec![],
                 collision: vec![],
                 traversal_gates: vec![],
                 pit_hazards: vec![],
@@ -2230,7 +1913,10 @@ mod tests {
         assert!(text.contains("§ AWARENESS"), "{text}");
         assert!(text.contains("§ FIELD"), "{text}");
         assert!(text.contains("pulse"), "{text}");
-        assert!(text.contains("door"), "resident door must be reported: {text}");
+        assert!(
+            text.contains("door"),
+            "resident door must be reported: {text}"
+        );
     }
 
     #[test]
@@ -2341,6 +2027,7 @@ mod tests {
                 voxel_size: 0.2,
                 svo_depth: 6,
                 surface: crate::application::ports::SurfaceMeshPayload::empty(0),
+                lights: vec![],
                 collision: vec![Aabb::new([origin_x, 0.0, 0.0], [origin_x + 0.2, 3.0, 0.2])],
                 traversal_gates: vec![],
                 pit_hazards: vec![],
@@ -2366,6 +2053,7 @@ mod tests {
                 voxel_size: 0.2,
                 svo_depth: 6,
                 surface: crate::application::ports::SurfaceMeshPayload::empty(0),
+                lights: vec![],
                 collision: vec![Aabb::new([-100.0, 0.0, -100.0], [100.0, 3.0, 100.0])],
                 traversal_gates: vec![],
                 pit_hazards: vec![],
@@ -2425,6 +2113,7 @@ mod tests {
             origin_z,
             level,
             lod,
+            artifacts: RenderArtifactNeeds::RAYMARCH,
             reality: RealitySnapshot::default(),
         }
     }
@@ -2447,6 +2136,13 @@ mod tests {
         assert_eq!(engine.stats().resident_chunks, 0);
         assert!(!engine.stats().ready);
         assert!(!requests.borrow().is_empty());
+        assert!(
+            requests
+                .borrow()
+                .iter()
+                .all(|request| request.artifacts == RenderArtifactNeeds::RAYMARCH),
+            "the renderer's selected artifacts must reach every chunk order"
+        );
 
         // Fulfil whatever is asked until the footprint is fine everywhere.
         for _ in 0..40 {
@@ -2464,6 +2160,27 @@ mod tests {
         let before = requests.borrow().len();
         engine.tick(1.0 / 60.0, &input);
         assert_eq!(requests.borrow().len(), before);
+    }
+
+    #[test]
+    fn surface_renderer_requests_only_indexed_mesh_artifacts() {
+        let source = AsyncFakeSource::default();
+        let requests = source.requests.clone();
+        let mut engine = Engine::new(
+            EngineConfig::default(),
+            Box::new(SurfaceRecordingRenderer::default()),
+            Box::new(source),
+        );
+
+        engine.tick(1.0 / 60.0, &InputFrame::default());
+
+        assert!(!requests.borrow().is_empty());
+        assert!(
+            requests
+                .borrow()
+                .iter()
+                .all(|request| request.artifacts == RenderArtifactNeeds::SURFACE)
+        );
     }
 
     #[test]
@@ -2841,8 +2558,8 @@ mod tests {
         assert_eq!(engine.reality.delirium(), 0, "a fresh wanderer is calm");
 
         // Two bottles drained at a full reserve are pure waste.
-        engine.register_waste(1.0, 0.65);
-        engine.register_waste(1.0, 0.65);
+        engine.survival.register_waste_for_test(1.0, 0.65);
+        engine.survival.register_waste_for_test(1.0, 0.65);
         engine.tick(1.0 / 60.0, &input);
         assert_eq!(
             engine.reality.delirium(),
@@ -2887,10 +2604,7 @@ mod tests {
         engine.player.relocate([500.0, 1.7, 500.0]);
         engine.tick(1.0 / 60.0, &input);
         assert!(
-            engine
-                .reality
-                .fabric_drift_epoch(5.0, 5.0)
-                >= 1,
+            engine.reality.fabric_drift_epoch(5.0, 5.0) >= 1,
             "abandoned territory must rearrange"
         );
         assert_eq!(
@@ -3116,42 +2830,5 @@ mod tests {
             engine.tick(1.0 / 60.0, &input);
         }
         assert_eq!(engine.level(), 0, "noclip fired without a wall");
-    }
-
-    #[test]
-    fn governor_drops_resolution_under_sustained_load() {
-        let mut governor = PerfGovernor::new();
-        for _ in 0..200 {
-            governor.update(50.0); // 20 fps
-        }
-        assert!(governor.scale() < 0.8);
-    }
-
-    #[test]
-    fn governor_raises_resolution_when_holding_60hz_vsync() {
-        let mut governor = PerfGovernor::new();
-        // rAF on a 60Hz display floors at ~16.7ms even with GPU headroom.
-        for _ in 0..600 {
-            governor.update(16.7);
-        }
-        assert_eq!(governor.scale(), 1.0, "must reach native res under vsync");
-    }
-
-    #[test]
-    fn governor_locks_out_raises_after_a_failed_probe() {
-        let mut governor = PerfGovernor::new();
-        for _ in 0..300 {
-            governor.update(16.7); // raises to 1.0 almost immediately
-        }
-        assert_eq!(governor.scale(), 1.0);
-        for _ in 0..600 {
-            governor.update(40.0); // raise fails: overloaded at 1.0
-        }
-        assert!(governor.scale() < 1.0);
-        let settled = governor.scale();
-        for _ in 0..600 {
-            governor.update(16.7); // healthy again, but inside the lockout
-        }
-        assert_eq!(governor.scale(), settled, "raise must stay locked out");
     }
 }

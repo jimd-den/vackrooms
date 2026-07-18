@@ -1993,4 +1993,3 @@ fn test_print_ascii_map() {
     }
     std::fs::write("./ascii_map.txt", map).unwrap();
 }
-

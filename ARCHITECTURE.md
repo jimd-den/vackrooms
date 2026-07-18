@@ -10,94 +10,83 @@ client-side and needs no server).
 
 ## Rendering family
 
-`RendererPort` (`wasm_frontend/src/application/ports.rs`) has four
-implementations, selected at runtime by `create_renderer`
-(`wasm_frontend/src/drivers/browser.rs`) from the `?renderer=` query param:
+`create_renderer` parses `?renderer=` and a typed quality profile, then creates
+one `WebGpuRenderer`. That facade owns the adapter, device, queue, browser
+surface, frame resources, and exactly one composable strategy:
 
-| `?renderer=` | Driver | Approach |
+| `?renderer=` | Strategy | GPU work |
 |---|---|---|
-| *(default)* | `surface_webgl::SurfaceRenderer` | Indexed greedy meshes, WebGL2 fixed-function depth. The SVO is retained per chunk for collision/debug only — no fragment shader walks it. |
-| `splat` | `splat_webgl::SplatRenderer` | Instanced face-splat "microvoxel" path: one GPU instance per visible surface rectangle, lit once in the vertex shader; the retained mesh is drawn only into the shadow map. |
-| `raymarch` | `webgl::WebGl2Renderer` | The hybrid SVO raymarcher described below — a per-fragment octree walk. |
-| `cpu` | `cpu_canvas::CpuCanvasRenderer` | Software rasterizer (`adapters::cpu_splatter`) blitted via `ImageData`; no WebGL context at all. |
+| `surface` *(default)* | indexed surfaces | Pull compact vertices from storage, draw a `u32` index buffer, and reuse both for the hero fixture's depth map. |
+| `splat` | face splats | Pull compact face records and expand each instance to four quad corners in both visible and depth-only hero-shadow passes; no indexed caster mesh is generated. |
+| `raymarch` | SVO raymarcher | Draw one fullscreen triangle and traverse the merged SVO storage-buffer atlas per fragment. |
+| `cpu` | CPU reference / WebGPU present | Run the deterministic software SVO rasterizer, upload its RGBA8 framebuffer, and present it with a fullscreen WebGPU pass. |
 
-`SurfaceRenderer` and `SplatRenderer` fall back (to CPU, or to surfaces)
-if WebGL2 or the requested backend fails to initialize.
+All four strategies use WebGPU for presentation. Initialization failures are
+reported to the loading HUD instead of silently changing algorithms.
 
-Renderer code is organized by lifetime and responsibility rather than by one
-backend-sized class:
+### Renderer module boundaries
 
 | Module | Responsibility |
 |---|---|
-| `drivers/surface_webgl/` | `draw_lit_world_surfaces`, `upload_world_surface_chunks`, and renderer composition |
-| `drivers/splat_webgl/{mod,resources,draw}.rs` | splat composition, instance/shadow resources, staged frame pipeline |
-| `drivers/webgl/` | `draw_voxel_scene`, `upload_voxel_atlas`, and raymarch composition |
-| `adapters/cpu_splatter/` | atlas decode, camera, cone light, ray queries, shading, raster traversal, tests |
-| `adapters/cpu_splatter/settings/` | typed CPU quality presets, one validated scalar model, and explicit flashlight/fixture visibility policies |
-| `drivers/gl/` | context/program setup, matrices, light selection, shadow targets, timers, visibility |
-| `drivers/shaders/render_world_surfaces/` | reconstruct surfaces → sample optional diffuse field → shade visible surface |
-| `drivers/shaders/trace_voxel_scene/` | decode atlas → intersect voxel scene → shade nearest hit |
-| `drivers/shaders/{evaluate_scene_lighting,apply_distance_fog,encode_display_color}.rs` | shared linear-light, Beer–Lambert, and display equations |
+| `drivers/browser.rs` | async composition root, HUD/settings projection, and rAF orchestration |
+| `drivers/browser/input_bindings.rs` | DOM listener lifetimes and translation into the platform-free input adapter |
+| `drivers/webgpu/browser_context.rs` | browser adapter/device/surface acquisition and resize/present lifecycle |
+| `drivers/webgpu/renderer.rs` | `RendererPort` adapter and strategy composition |
+| `drivers/webgpu/config.rs` | target-independent renderer kinds, quality profiles, budgets, optimization switches, and artifact requirements |
+| `drivers/webgpu/frame_resources.rs` | shared frame uniforms and light storage |
+| `drivers/webgpu/gpu_types.rs` | explicit, aligned CPU-to-WGSL records |
+| `drivers/webgpu/pipelines/` | one focused cache/pass implementation per strategy plus shared visibility and `raster_shadow` resource/math contracts |
+| `drivers/webgpu/shaders/` | small WGSL programs selected by `shader.rs` |
+| `adapters/cpu_splatter/` | browser-free reference rasterizer, traversal, shading, and typed CPU settings |
 
-Optional shortcuts are plain data in `application::render_settings::RenderToggles`.
-Each driver snapshots that switchboard once per frame; inner algorithms never
-read browser globals. The same switches are available live in Settings →
-Optimize and as shareable `?rt_<name>=0|1` query parameters.
+This split keeps DOM lifetime, GPU resource lifetime, pass encoding, and
+renderer policy out of a single god object. Adding a strategy means adding a
+pipeline and typed profile, then composing it behind the existing port.
 
-The CPU composition root separately snapshots `CpuRenderSettings`. Its named
-presets change only bounded workload/quality scalars (resolution, distant LOD,
-splat radius, virtual depth, sparse-MIP threshold, range, and fixture-shadow
-policy). They do not mutate `RenderToggles`. The CPU canvas resolution factor
-is applied before both the canvas and software framebuffer are resized, so a
-reduced render always covers the full CSS viewport instead of filling only a
-corner of a larger backing store.
+### Work ownership
 
-CPU fixture visibility is an explicit three-level policy. `off` is the fast
-unoccluded diagnostic, `hero` amortizes one real fixture-center segment, and
-`full` is the radiometric reference: every point endpoint and every one of a
-rectangle's four Gauss endpoints traces a finite SVO segment. CPU MIPs average
-linear albedo and colored bake values; ordinary LOD never collapses a subtree
-containing emission, while the hard work-cap fallback retains aggregate
-emissive coverage/radiance instead of deleting the panel.
+Procedural generation is CPU-authoritative. World graphs, reality snapshots,
+seeded noise, lighting, collision, and SVO construction must not vary with GPU
+model, driver, or scheduling order. Workers may parallelize independent chunk
+requests, but the same request always produces the same artifact bytes.
 
-The `raymarch` backend is a correctness-first SVO ray caster with two explicit
-stepping policies over the same stateless point lookup and hit record:
+The GPU owns renderer-derived work that cannot change world semantics:
 
-1. **Chunk intervals** — robust parallel-safe slabs produce entry/exit
-   intervals. Near-to-far traversal may stop only when every remaining AABB
-   starts beyond the nearest solid hit; padded chunk cubes may overlap.
-2. **Reference traversal (`rt_skip=0`)** — exact finest-cell 3-D DDA. Voxel
-   size and SVO depth come from each payload; neither is inferred from its
-   power-of-two padded world size.
-3. **Empty-leaf traversal (`rt_skip=1`)** — restart from the root for each
-   sample, then jump to the exact exit of a masked octant or empty leaf. No
-   mutable descent stack survives a jump.
-4. **Shading** — sRGB material values are decoded to linear RGB, ceiling
-   panels use a downward one-sided rectangular-emitter integral. The
-   raymarcher intentionally rejects the bake's face-independent leaf value;
-   when `rt_shadows=1`, each of the rectangle integral's four samples traces
-   an SVO visibility segment through every resident chunk. Beer–Lambert fog
-   is composed in linear space before one shared tone-map/sRGB conversion.
+- surface vertices are decoded by vertex pulling, avoiding an expanded CPU
+  vertex copy;
+- splat faces become quad corners in the vertex shader, avoiding CPU-generated
+  presentation vertices;
+- the raster hero shadow reuses Surface indices or expands the Splat face
+  buffer directly, so visibility does not broaden either artifact request;
+- each compact supply-label point becomes a six-vertex, camera-facing
+  billboard in WGSL and shares the raster strategies' depth target;
+- raymarch fragments traverse the compressed SVO directly, avoiding a dense
+  persistent voxel field;
+- the CPU reference path still uses the same WebGPU presentation lifecycle.
 
-The default surface renderer evaluates the same analytic fixture list. Static
-fixtures and runtime flares use separate uniform arrays, so dropping a flare
-cannot evict a ceiling panel. `rt_bake` defaults off and never removes analytic
-lights; on the surface renderer it enables the deliberately approximate,
-quantized diffuse-fill field. Surface visibility is also an explicit raster
-approximation: `rt_shadows=1` provides one shadow map for the highest-priority
-fixture. The raymarcher is the strict all-fixture visibility reference.
+`BuildOctreeUseCase` also prunes any recursive cube whose minimum is already
+outside a source-grid dimension. Such cubes can only collapse to the canonical
+air leaf, so this skips work without changing arena indices or serialized
+bytes. A non-power-of-two fixture compares the exact pruned and exhaustive
+node arenas and every addressable lookup.
 
-There is no global fixture budget in either rewritten GPU path. The complete,
-deduplicated fixture list lives in an RGBA32F texture; a conservative
-finite-support intersection builds contiguous per-surface or per-chunk
-clusters. Clustering changes only which provably zero-contribution lights are
-skipped, not the lighting equation or the set of contributing fixtures.
+### Configurable optimizations
 
-Low-spec strategy: the raymarcher uses one fullscreen pass, the surface path
-uses the hardware depth buffer, neither requests MSAA, SVO data stays in
-nearest-filtered integer textures, and an **adaptive internal-resolution
-governor** (0.5×–1.0× backing store, hysteresis + cooldown) replaces temporal
-checkerboarding.
+`RendererProfile` separates bounded low/high quality budgets from
+`RenderToggles`. The browser snapshots toggles once per frame; inner passes do
+not read DOM globals. Each strategy consumes only switches it implements:
+
+| Strategy | Explicit work controls |
+|---|---|
+| surface | chunk-sphere rejection, optional baked diffuse fill, profile-sized hero shadow map (128²/256² with one/four taps), and adaptive backing resolution |
+| splat | chunk/cell rejection, near-to-far submission, optional baked diffuse fill, far-face budget, and the same profile-sized hero map using face-expanded casters |
+| raymarch | stable versus near-to-far chunk selection, complete-AABB distance rejection before the resident cap, reference traversal versus empty-leaf skipping, one/four-sample finite-SVO direct-light visibility, maximum trace steps, and resident-chunk budget |
+| CPU | hierarchical Z, near-to-far order, projected-size MIPs, deferred hidden-splat shading, ambient occlusion, range, and hard work caps |
+
+Compact storage records, GPU vertex pulling/face expansion, fixed-function
+depth, and the fullscreen-triangle passes are architectural choices rather
+than hidden toggles. Output dithering remains configurable. GPU timestamp
+collection is not implemented and is therefore not advertised as a switch.
 
 ## The dependency rule
 
@@ -107,7 +96,7 @@ socket, or clock.
 ```
 ┌────────────────────────────────────────────────────────────────────┐
 │ FRAMEWORKS & DRIVERS                                               │
-│   wasm_frontend/drivers   WebGL2, DOM events, rAF, HUD, console    │
+│   wasm_frontend/drivers   WebGPU, DOM events, rAF, HUD, console    │
 │   src/main.rs             native HTTP server (std::net only)      │
 │   src/frameworks_drivers  SimpleNoiseProvider, StdTelemetry        │
 │  ┌──────────────────────────────────────────────────────────────┐  │
@@ -137,14 +126,14 @@ socket, or clock.
 | Crate | Role | Targets |
 |---|---|---|
 | `vackrooms` (root) | Entities + use cases + adapters; native dev-server binary | native **and** wasm32 |
-| `wasm_frontend` | Browser client: application/adapters (portable) + drivers (wasm-only) | wasm32 (pure layers test natively) |
+| `wasm_frontend` | Portable application/adapters/WebGPU pipelines plus the wasm browser shell | wasm32 and native headless Vulkan tests |
 | `wasm_raycaster` | Legacy CPU raycaster experiment | kept for reference |
 
-The split inside `wasm_frontend` is enforced mechanically: `web-sys`,
-`js-sys` and `wasm-bindgen` are `[target.'cfg(target_arch = "wasm32")']`
-dependencies, and `drivers/` is `#[cfg(target_arch = "wasm32")]`. A native
-`cargo test` therefore cannot even *see* browser types — the compiler is the
-architecture cop.
+The platform boundary inside `wasm_frontend` is enforced mechanically. `web-sys`,
+`js-sys`, and `wasm-bindgen` are wasm-only dependencies; browser context,
+events, and rAF are `cfg(wasm32)`. Target-independent WebGPU configuration,
+record layouts, shader assembly, and pipelines compile on the host so native
+tests exercise the same code through Vulkan without admitting DOM types.
 
 ### Ports (dependency inversion boundaries)
 
@@ -152,56 +141,56 @@ architecture cop.
 |---|---|---|
 | `NoiseProvider` | `src/use_cases/ports.rs` | `SimpleNoiseProvider` |
 | `TelemetryPort` | `src/use_cases/ports.rs` | `StdTelemetry` (native stdout), `ConsoleTelemetry` (browser console), `NullTelemetry` (tests) |
-| `RendererPort` | `wasm_frontend/src/application/ports.rs` | `SurfaceRenderer` (default), `SplatRenderer`, `WebGl2Renderer` (raymarch), `CpuCanvasRenderer`, recording fakes (tests) |
+| `RendererPort` | `wasm_frontend/src/application/ports.rs` | `WebGpuRenderer` with surface/splat/raymarch/CPU strategies; recording fakes in application tests |
 | `ChunkSourcePort` | `wasm_frontend/src/application/ports.rs` | `LocalChunkSource` (synchronous, in-wasm generation), `WorkerChunkSource` (pooled Web Worker generation, default); an HTTP-fetching implementation would slot in without touching the engine |
 
 ## Data flow: from noise to pixel
 
-The SVO atlas path below feeds the `raymarch` backend directly; the default
-`SurfaceRenderer` and `SplatRenderer` consume the same lit `VoxelGrid` but
-greedy-mesh or face-splat it instead of walking the octree per fragment (the
-SVO they receive is used for collision only).
+The request and world state are authoritative inputs. `RenderArtifactNeeds`
+describes which expensive presentation products a selected strategy consumes;
+collision remains an application requirement, not a renderer preference.
 
 ```
 SimpleNoiseProvider (driver)
       │ NoiseProvider port
       ▼
-GenerateChunkArchitectureUseCase ──► VoxelGrid (dense u8 grid + light grid)
-      │                                   │
-      │                          bake_voxel_lighting (world-unit air paths)
-      ▼                                   ▼
-BuildOctreeUseCase ──────────────► SparseVoxelOctree
-      │                              (arena Vec<SvoNode>, uniform-collapsed)
+GenerateChunkArchitectureUseCase ──► haloed VoxelGrid
+      │                                  │
+      │                         bake_voxel_lighting
+      ▼                                  ▼
+crop authoritative grid ─────────► BuildOctreeUseCase (outside-grid pruning)
+      │                                  │
+      ├─ greedy mesh ────────────────────┼─► surface storage + index buffers
+      ├─ compact face records ───────────┼─► splat storage buffer
+      │                                  ├─► collision AABBs
+      │                                  ▼
+      │                         OctreeGpuSerializer
+      │                                  │ four-u32 nodes, 1024-node rows
+      │                                  ▼
+      │                         merged/rebased SVO atlas
+      │                                  ├─► raymarch storage buffer
+      │                                  └─► CPU reference rasterizer
       ▼
-OctreeGpuSerializer ─────────────► RGBA32UI texel stream, rows of 1024,
-      │                              row-padded per chunk
-      ▼
-application::atlas::build_atlas ─► merged atlas + per-chunk rebased roots
-      │ RendererPort port
-      ▼
-WebGl2Renderer ──────────────────► RGBA32UI texture + uniform chunk table
-      ▼
-fragment shader (drivers/shaders/trace_voxel_scene/) — fullscreen quad,
-robust chunk intervals, DDA or empty-leaf stepping ──► pixels
+analytic light records ────────────────► shared WebGPU frame storage
 ```
 
-Collision geometry is derived **from the same SVO** (solid WALL/RED_WALL
-leaves → world-space AABBs in `local_chunk_source::extract_collision_boxes`),
-so physics and visuals can never drift apart. Uniform subtrees collapsed by
-the SVO become single large collision boxes for free.
+Collision geometry is derived from the same SVO built from the rendered voxel
+source. Uniform solid subtrees become larger collision boxes without a second
+geometry generator.
 
-### SVO node texel encoding (RGBA32UI, one node per texel)
+### SVO node encoding (four `u32` words per node)
 
-| Channel | Internal node (`R == 0`) | Leaf node (`R == 1`) |
+| Lane | Internal node (`x == 0`) | Leaf node (`x == 1`) |
 |---|---|---|
-| R | 0 | 1 |
-| G | `child_base_index` (children contiguous at +0..+7) | `voxel_type` |
-| B | `child_mask` (bit *i* set = child *i* non-empty) | 24-bit `0xRRGGBB` color |
-| A | 0 | scalar light 0–15, face-occlusion bits, and RGB light 0–15/channel |
+| x | 0 | 1 |
+| y | `child_base_index` (children contiguous at +0..+7) | `voxel_type` |
+| z | `child_mask` (bit *i* set = child *i* non-empty) | 24-bit `0xRRGGBB` color |
+| w | 0 | scalar light 0–15, face-occlusion bits, and RGB light 0–15/channel |
 
-The same layout is documented at its source of truth,
-`src/adapters/octree_gpu_serializer.rs`, and decoded in
-`wasm_frontend/src/drivers/shaders/trace_voxel_scene/decode_voxel_atlas.rs`.
+Rows remain padded to 1024 nodes so atlas slots and partial row updates are
+stable. The source of truth is `src/adapters/octree_gpu_serializer.rs`; the
+WebGPU decoder is
+`wasm_frontend/src/drivers/webgpu/shaders/raymarch.wgsl`.
 
 ## Level 0: architecture first
 
@@ -425,7 +414,7 @@ Every LOD of a chunk covers the same world cube (`GeneratorConfig::at_lod`
 halves the SVO depth as it doubles `voxel_scale`), and cell borders/door
 positions derive from world space, so a coarse chunk is a faithful low-res
 proxy of its fine version and payloads are interchangeable to the renderer.
-The atlas texture and collision world are rebuilt only on a resident-set
+The SVO atlas and collision world are rebuilt only on a resident-set
 change — steady-state frames upload nothing (asserted by
 `steady_state_does_not_reupload_atlas`).
 
@@ -440,14 +429,14 @@ Profiles (selected by URL, `?spec=high`):
 profile. `GeneratorConfig::try_with_voxel_size` is the single validator used
 by the browser and every worker: the value must be finite and positive, tile
 the chunk edge at both fine and progressive half-resolution LOD, fit the
-renderer-wide depth-eight SVO contract, and remain
+depth-eight SVO payload contract, and remain
 inside the measured dense-grid budget including the lateral halo. The UI
 offers 0.4, 0.2, 0.1, and 0.05 u. The 10 u profile rejects 0.4 u because its
 25-cell axis cannot be halved exactly; the 20 u profile rejects 0.05 u because
 it would require depth nine. Every chunk payload transports its exact voxel size
-and depth, so neither renderer reverse-engineers them from padded bounds.
+and depth, so no strategy reverse-engineers them from padded bounds.
 
-The shader's chunk table is fixed at 25 entries — exactly the 5×5 high-spec
+The raymarch storage table is bounded at 25 chunks — exactly the 5×5 high-spec
 worst case (`application::atlas::MAX_CHUNKS`).
 
 ## Player simulation
@@ -474,7 +463,8 @@ The browser driver stays a passive presenter of `HudStats`.
 
 ## Testing strategy
 
-Ports make the interesting logic natively testable — no browser, no GPU:
+Ports make the world and application rules natively testable without a
+browser or GPU:
 
 - `cargo test --workspace` covers entities, generation (including the
   macro-graph snapshot, red-room separation, stair-flight, and arch-seam
@@ -483,18 +473,20 @@ Ports make the interesting logic natively testable — no browser, no GPU:
   atlas rebasing, input mapping, and the resolution governor.
 - Renderer/chunk-source **test doubles** verify the engine's contract with
   its ports (upload counts, draw-table sizes) rather than pixels.
-- Playwright GPU references require visible panel emission and lit room
-  geometry, exercise exact raymarched occlusion, and compare every decoded
-  pixel when correctness-preserving traversal/culling optimizations are
-  toggled live over the same resident scene.
+- The `vulkan_renderers` integration suite creates surface-free targets with
+  the production pipeline modules. CI forces wgpu's Vulkan backend through
+  Mesa Lavapipe, enables validation layers, and fails rather than silently
+  skipping when no Vulkan adapter is present. This covers pipeline creation,
+  storage layouts, draw encoding, readback, and deterministic renderer
+  contracts without browser screenshots.
 
 ## Native dev server
 
-`src/main.rs` is a zero-dependency HTTP server used for local development:
-static files with correct MIME types (`application/wasm` is mandatory for
-streaming instantiation), plus the legacy JSON/binary chunk endpoints
-(`/maze`, `/octree`) that the preserved Three.js client (`/legacy`) still
-consumes. The wasm client needs no data endpoints at all.
+`src/main.rs` is a zero-dependency HTTP server used for local development. It
+serves static files with correct MIME types (`application/wasm` is mandatory
+for streaming instantiation) and retains `/maze` and `/octree` as diagnostic
+JSON/binary endpoints. The wasm client needs no data endpoint. The former
+Three.js client, its static asset, and the `/legacy` route are retired.
 
 ## Roadmap (documented non-goals of this iteration)
 
@@ -512,7 +504,6 @@ consumes. The wasm client needs no data endpoints at all.
   the one or two assemblies adjacent to a planned event, driven by the
   existing event lookup).
 - Temporal reprojection / checkerboarding to complement adaptive resolution.
-- Per-chunk AABB *rasterization* (BackSide boxes + `gl_FragDepth` writeback)
-  to replace the fullscreen quad once chunk counts grow beyond 25 (`raymarch`
-  backend only).
+- Per-chunk AABB proxy draws with fragment-depth output to replace the
+  fullscreen raymarch pass if resident chunk counts grow beyond 25.
 - LOD: shallower SVO mip levels for distant chunks.

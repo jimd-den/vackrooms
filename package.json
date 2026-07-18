@@ -1,14 +1,10 @@
 {
-  "name": "vackrooms-visual-tests",
+  "name": "vackrooms-build-tools",
   "version": "1.0.0",
-  "description": "Visual regression tests for Vackrooms",
-  "main": "index.js",
+  "description": "Build helpers for the Vackrooms WebAssembly package",
   "scripts": {
     "build:wasm": "node scripts/build-wasm.mjs",
-    "build:single": "npm run build:wasm && node scripts/build-single-file.mjs",
-    "test:visual": "npm run build:wasm && playwright test"
-  },
-  "devDependencies": {
-    "@playwright/test": "^1.40.0"
+    "check:wasm": "node scripts/check-wasm-fresh.mjs",
+    "build:single": "npm run build:wasm && node scripts/build-single-file.mjs"
   }
 }

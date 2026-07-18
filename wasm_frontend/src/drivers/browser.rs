@@ -5,84 +5,40 @@
 //! concrete adapters/drivers, hands them to `application::engine::Engine`,
 //! and from then on only shuttles plain data across the port boundaries.
 
+mod input_bindings;
+
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use wasm_bindgen::JsCast;
 use wasm_bindgen::prelude::*;
-use web_sys::{
-    Document, HtmlCanvasElement, HtmlElement, KeyboardEvent, MouseEvent, TouchEvent, Window,
-};
+use web_sys::{Document, HtmlCanvasElement, HtmlElement, Window};
 
 use vackrooms::frameworks_drivers::simple_noise::SimpleNoiseProvider;
-use vackrooms::use_cases::generate_chunk::GeneratorConfig;
 
 use crate::adapters::input::InputCollector;
 use crate::adapters::local_chunk_source::LocalChunkSource;
-use crate::adapters::query_config::{generator_setup_from_query, query_flag, query_param};
+use crate::adapters::query_config::{
+    generator_setup_for_quality, quality_profile_from_query, query_param,
+};
 use crate::adapters::section_locator::SectionLocator;
 use crate::application::engine::{Engine, EngineConfig};
 use crate::application::generation_worker_policy::parse_generation_worker_preference;
 use crate::application::ports::{
-    ChunkDraw, FrameParams, RendererPort, SurfaceChunk, SurfaceChunkKey,
+    ChunkDraw, FrameParams, RenderArtifactNeeds, RendererPort, SurfaceChunk, SurfaceChunkKey,
 };
 use crate::drivers::console_telemetry::CONSOLE_TELEMETRY;
-use crate::drivers::cpu_canvas::CpuCanvasRenderer;
-use crate::drivers::splat_webgl::{SplatProfile, SplatRenderer};
-use crate::drivers::surface_webgl::SurfaceRenderer;
-use crate::drivers::webgl::WebGl2Renderer;
+use crate::drivers::webgpu::config::{GpuQualityProfile, RendererKind};
+use crate::drivers::webgpu::renderer::WebGpuRenderer;
+
+use input_bindings::{TouchState, attach_input_listeners, attach_touch_listeners};
 
 /// World seed shared with the native server so both render the same world.
 const WORLD_SEED: u32 = 42;
-/// Radius of the virtual joystick in CSS pixels (full deflection).
-const JOYSTICK_RADIUS: f64 = 60.0;
-/// Touch-look sensitivity relative to raw mouse pixels.
-const TOUCH_LOOK_SCALE: f32 = 2.2;
 /// HUD refresh cadence in frames.
 const HUD_INTERVAL: u32 = 30;
 
-/// The default renderer is indexed greedy surfaces. The old SVO raymarcher
-/// remains available only as `?renderer=raymarch` for visual/reference
-/// debugging; `?renderer=cpu` chooses the software fallback.
-enum DriverRenderer {
-    Surface(SurfaceRenderer),
-    Splat(SplatRenderer),
-    Raymarch(WebGl2Renderer),
-    Cpu(CpuCanvasRenderer),
-}
-
-impl DriverRenderer {
-    fn resize(&mut self, width: u32, height: u32) {
-        match self {
-            DriverRenderer::Surface(r) => r.resize(width, height),
-            DriverRenderer::Splat(r) => r.resize(width, height),
-            DriverRenderer::Raymarch(r) => r.resize(width, height),
-            DriverRenderer::Cpu(r) => r.resize(width, height),
-        }
-    }
-
-    /// Internal-resolution multiplier (further scaled by the adaptive
-    /// governor). The CPU quality model owns its bounded fraction so the
-    /// canvas and software framebuffer always have identical dimensions;
-    /// CSS then presents that complete image over the viewport.
-    fn resolution_factor(&self) -> f64 {
-        match self {
-            DriverRenderer::Surface(_) | DriverRenderer::Splat(_) | DriverRenderer::Raymarch(_) => {
-                1.0
-            }
-            DriverRenderer::Cpu(_) => crate::get_cpu_settings().canvas_resolution_factor(),
-        }
-    }
-
-    fn label(&self) -> &'static str {
-        match self {
-            DriverRenderer::Surface(_) => "GPU surfaces",
-            DriverRenderer::Splat(_) => "GPU face splats",
-            DriverRenderer::Raymarch(_) => "GPU raymarch (debug)",
-            DriverRenderer::Cpu(_) => "CPU splat",
-        }
-    }
-}
+type DriverRenderer = WebGpuRenderer;
 
 /// Complete backing-store scale after the global governor/override and the
 /// selected renderer's own bounded workload factor are composed.
@@ -97,85 +53,16 @@ fn effective_resolution_scale(renderer: &DriverRenderer, governor_scale: f32) ->
     global_scale * renderer.resolution_factor()
 }
 
-impl RendererPort for DriverRenderer {
-    fn uses_surface_meshes(&self) -> bool {
-        matches!(self, DriverRenderer::Surface(_) | DriverRenderer::Splat(_))
-    }
-    fn upload_surfaces(&mut self, chunks: &[SurfaceChunk<'_>]) {
-        match self {
-            DriverRenderer::Surface(r) => r.upload_surfaces(chunks),
-            DriverRenderer::Splat(r) => r.upload_surfaces(chunks),
-            _ => {}
-        }
-    }
-    fn remove_surfaces(&mut self, keys: &[SurfaceChunkKey]) {
-        match self {
-            DriverRenderer::Surface(r) => r.remove_surfaces(keys),
-            DriverRenderer::Splat(r) => r.remove_surfaces(keys),
-            _ => {}
-        }
-    }
-    fn clear_surfaces(&mut self) {
-        match self {
-            DriverRenderer::Surface(r) => r.clear_surfaces(),
-            DriverRenderer::Splat(r) => r.clear_surfaces(),
-            _ => {}
-        }
-    }
-    fn gpu_frame_ms(&self) -> Option<f32> {
-        match self {
-            DriverRenderer::Surface(r) => r.gpu_frame_ms(),
-            DriverRenderer::Splat(r) => r.gpu_frame_ms(),
-            DriverRenderer::Raymarch(r) => r.gpu_frame_ms(),
-            DriverRenderer::Cpu(_) => None,
-        }
-    }
-    fn cpu_telemetry_string(&self) -> Option<String> {
-        match self {
-            DriverRenderer::Cpu(r) => r.cpu_telemetry_string(),
-            DriverRenderer::Surface(r) => r.cpu_telemetry_string(),
-            DriverRenderer::Splat(r) => r.cpu_telemetry_string(),
-            DriverRenderer::Raymarch(r) => r.cpu_telemetry_string(),
-        }
-    }
-    fn upload_atlas(&mut self, texels: &[u32]) {
-        match self {
-            DriverRenderer::Surface(r) => r.upload_atlas(texels),
-            DriverRenderer::Splat(r) => r.upload_atlas(texels),
-            DriverRenderer::Raymarch(r) => r.upload_atlas(texels),
-            DriverRenderer::Cpu(r) => r.upload_atlas(texels),
-        }
-    }
-    fn upload_atlas_rows(&mut self, first_row: u32, texels: &[u32]) -> bool {
-        match self {
-            DriverRenderer::Surface(_) | DriverRenderer::Splat(_) => false,
-            DriverRenderer::Raymarch(r) => r.upload_atlas_rows(first_row, texels),
-            DriverRenderer::Cpu(r) => r.upload_atlas_rows(first_row, texels),
-        }
-    }
-    fn draw(&mut self, frame: &FrameParams, chunks: &[ChunkDraw]) {
-        match self {
-            DriverRenderer::Surface(r) => r.draw(frame, chunks),
-            DriverRenderer::Splat(r) => r.draw(frame, chunks),
-            DriverRenderer::Raymarch(r) => r.draw(frame, chunks),
-            DriverRenderer::Cpu(r) => r.draw(frame, chunks),
-        }
-    }
-    fn upload_label_atlas(&mut self, rgba: &[u8], width: u32, height: u32) {
-        // Only the surface path draws label billboards today; the other
-        // renderers keep the port's no-op default.
-        if let DriverRenderer::Surface(r) = self {
-            r.upload_label_atlas(rgba, width, height);
-        }
-    }
-}
-
 /// Engine owns its renderer behind the port; the driver also needs to call
 /// `resize` on the concrete type. This thin adapter shares one renderer
 /// between both without widening the port.
 struct SharedRenderer(Rc<RefCell<DriverRenderer>>);
 
 impl RendererPort for SharedRenderer {
+    fn artifact_needs(&self) -> RenderArtifactNeeds {
+        self.0.borrow().artifact_needs()
+    }
+
     fn uses_surface_meshes(&self) -> bool {
         self.0.borrow().uses_surface_meshes()
     }
@@ -187,9 +74,6 @@ impl RendererPort for SharedRenderer {
     }
     fn clear_surfaces(&mut self) {
         self.0.borrow_mut().clear_surfaces();
-    }
-    fn gpu_frame_ms(&self) -> Option<f32> {
-        self.0.borrow().gpu_frame_ms()
     }
     fn cpu_telemetry_string(&self) -> Option<String> {
         self.0.borrow().cpu_telemetry_string()
@@ -220,65 +104,23 @@ fn build_label_atlas() -> Option<(Vec<u8>, u32, u32)> {
     Some((atlas, width, row_height * 2))
 }
 
-/// Touch-play session state. On touch devices there is no pointer lock:
-/// tapping the overlay enters "touch play" directly, the left half of the
-/// screen is a virtual joystick (drag from touch-down point), and the right
-/// half is a look surface. On-screen buttons cover flashlight and menu.
-#[derive(Default)]
-struct TouchState {
-    /// True while playing in touch mode.
-    active: bool,
-    move_id: Option<i32>,
-    move_origin: (f64, f64),
-    look_id: Option<i32>,
-    look_last: (f64, f64),
-}
-
 /// Renderer selection: surfaces by default, `?renderer=splat` for the
 /// instanced face-splat path (default candidate once parity/perf is
-/// confirmed), `?renderer=raymarch` for the retained SVO debug path,
-/// `?renderer=cpu` for software fallback.
-fn create_renderer(canvas: &HtmlCanvasElement, query: &str) -> Result<DriverRenderer, JsValue> {
-    let renderer_choice = query_param(query, "renderer");
-    if renderer_choice == Some("cpu") {
-        return Ok(DriverRenderer::Cpu(CpuCanvasRenderer::new(canvas)?));
-    }
-    if renderer_choice == Some("raymarch") {
-        return WebGl2Renderer::new(canvas).map(DriverRenderer::Raymarch);
-    }
-    if renderer_choice == Some("splat") {
-        let profile = if query_param(query, "spec") == Some("high") {
-            SplatProfile::high()
-        } else {
-            SplatProfile::low()
-        };
-        match SplatRenderer::new(canvas, profile) {
-            Ok(gpu) => return Ok(DriverRenderer::Splat(gpu)),
-            Err(err) => {
-                web_sys::console::warn_2(
-                    &JsValue::from_str(
-                        "splat renderer unavailable, falling back to surface meshes:",
-                    ),
-                    &err,
-                );
-            }
-        }
-    }
-    match SurfaceRenderer::new(canvas) {
-        Ok(gpu) => Ok(DriverRenderer::Surface(gpu)),
-        Err(err) => {
-            web_sys::console::warn_2(
-                &JsValue::from_str(
-                    "WebGL2 surface renderer unavailable, falling back to CPU splatting:",
-                ),
-                &err,
-            );
-            Ok(DriverRenderer::Cpu(CpuCanvasRenderer::new(canvas)?))
-        }
-    }
+/// confirmed), `?renderer=raymarch` for the retained SVO debug path, and
+/// `?renderer=cpu` for deterministic software rasterization with WebGPU
+/// presentation.
+async fn create_renderer(
+    canvas: &HtmlCanvasElement,
+    query: &str,
+    quality: GpuQualityProfile,
+) -> Result<DriverRenderer, JsValue> {
+    let kind = query_param(query, "renderer")
+        .and_then(RendererKind::parse)
+        .unwrap_or_default();
+    WebGpuRenderer::new(canvas, kind.profile(quality)).await
 }
 
-pub fn boot() -> Result<(), JsValue> {
+pub async fn boot() -> Result<(), JsValue> {
     let window = web_sys::window().ok_or_else(|| JsValue::from_str("no window"))?;
     let document = window
         .document()
@@ -289,6 +131,21 @@ pub fn boot() -> Result<(), JsValue> {
     let overlay: HtmlElement = element(&document, "overlay")?;
     let status_msg: HtmlElement = element(&document, "status-msg")?;
     let play_msg: HtmlElement = element(&document, "play-msg")?;
+
+    // Preflight: every render path (including the CPU rasterizer's
+    // presentation pass) requires WebGPU, and `canvas.getContext("webgpu")`
+    // failing deep inside surface creation produces an unactionable error.
+    // Checking `navigator.gpu` here turns that into concrete guidance.
+    let has_webgpu = js_sys::Reflect::get(&window.navigator(), &JsValue::from_str("gpu"))
+        .map(|gpu| !gpu.is_undefined() && !gpu.is_null())
+        .unwrap_or(false);
+    if !has_webgpu {
+        let msg = "WebGPU is not available in this browser (navigator.gpu is missing). \
+                   Use Chrome/Edge 113+ or Safari 18+, or in Firefox set \
+                   dom.webgpu.enabled=true in about:config and restart.";
+        status_msg.set_text_content(Some(msg));
+        return Err(JsValue::from_str(msg));
+    }
 
     // ?spec=high -> 20u chunks, 5x5 streaming radius, 0.1u voxels.
     // Default is the low-spec profile: 10u chunks, 3x3 radius, 0.2u voxels.
@@ -302,8 +159,10 @@ pub fn boot() -> Result<(), JsValue> {
     // This resolver is also called inside every worker. Keeping the actual
     // GeneratorConfig behind one adapter prevents a rejected voxel override
     // from producing different worlds on the main and worker threads.
-    let (resolved_seed, generator_config) = generator_setup_from_query(&query, WORLD_SEED);
-    let high_spec = generator_config.chunk_size == GeneratorConfig::high_spec().chunk_size;
+    let quality = quality_profile_from_query(&query);
+    let (resolved_seed, generator_config) =
+        generator_setup_for_quality(&query, WORLD_SEED, quality);
+    let high_spec = quality == GpuQualityProfile::High;
     // Spawn on the main corridor of region (0,0), looking east down its
     // west leg: the first frame is a lit, walled corridor receding into
     // fog — the player knows immediately that this is the Backrooms.
@@ -340,7 +199,9 @@ pub fn boot() -> Result<(), JsValue> {
         }
     };
 
-    let renderer = Rc::new(RefCell::new(create_renderer(&canvas, &query)?));
+    let renderer = Rc::new(RefCell::new(
+        create_renderer(&canvas, &query, quality).await?,
+    ));
     if let Some((label_rgba, label_w, label_h)) = build_label_atlas() {
         renderer
             .borrow_mut()
@@ -407,34 +268,8 @@ pub fn boot() -> Result<(), JsValue> {
     let input = Rc::new(RefCell::new(InputCollector::new()));
     let touch = Rc::new(RefCell::new(TouchState::default()));
 
-    let is_capture = query_flag(&query, "capture");
-    if is_capture {
-        let mut cam_pos = spawn;
-        if let Some(parts) = query_param(&query, "camera").map(|v| v.split(',').collect::<Vec<_>>())
-            && parts.len() == 3
-            && let (Ok(x), Ok(y), Ok(z)) = (
-                parts[0].parse::<f32>(),
-                parts[1].parse::<f32>(),
-                parts[2].parse::<f32>(),
-            )
-        {
-            cam_pos = [x, y, z];
-        }
-        let yaw_val = query_param(&query, "yaw")
-            .and_then(|v| v.parse::<f32>().ok())
-            .unwrap_or(1.5708);
-        let pitch_val = query_param(&query, "pitch")
-            .and_then(|v| v.parse::<f32>().ok())
-            .unwrap_or(-0.05);
-        engine
-            .borrow_mut()
-            .teleport_player(cam_pos, yaw_val, pitch_val);
-    }
-
-    if !is_capture {
-        attach_input_listeners(&document, &canvas, &overlay, &input, &touch)?;
-        attach_touch_listeners(&document, &canvas, &overlay, &input, &touch)?;
-    }
+    attach_input_listeners(&document, &canvas, &overlay, &input, &touch)?;
+    attach_touch_listeners(&document, &canvas, &overlay, &input, &touch)?;
     run_frame_loop(
         window, document, canvas, overlay, status_msg, play_msg, renderer, engine, input, locator,
     )
@@ -482,280 +317,6 @@ fn element<T: JsCast>(document: &Document, id: &str) -> Result<T, JsValue> {
         .ok_or_else(|| JsValue::from_str(&format!("missing #{id} element")))?
         .dyn_into::<T>()
         .map_err(|_| JsValue::from_str(&format!("#{id} has unexpected element type")))
-}
-
-fn attach_input_listeners(
-    document: &Document,
-    canvas: &HtmlCanvasElement,
-    overlay: &HtmlElement,
-    input: &Rc<RefCell<InputCollector>>,
-    touch: &Rc<RefCell<TouchState>>,
-) -> Result<(), JsValue> {
-    // Keyboard: KeyboardEvent.code -> MoveIntent, mapped by the input adapter.
-    for (event, pressed) in [("keydown", true), ("keyup", false)] {
-        let input = input.clone();
-        let closure = Closure::<dyn FnMut(KeyboardEvent)>::new(move |e: KeyboardEvent| {
-            // F3 toggles the anomaly debug overlay (and never reaches the
-            // browser's own F3 find shortcut).
-            if pressed && e.code() == "F3" {
-                e.prevent_default();
-                if !e.repeat() {
-                    let on = crate::ANOMALY_DEBUG.load(std::sync::atomic::Ordering::Relaxed);
-                    crate::ANOMALY_DEBUG.store(!on, std::sync::atomic::Ordering::Relaxed);
-                }
-                return;
-            }
-            if !e.repeat() {
-                input.borrow_mut().key_event(&e.code(), pressed);
-            }
-        });
-        document.add_event_listener_with_callback(event, closure.as_ref().unchecked_ref())?;
-        closure.forget();
-    }
-
-    // Mouse look (deltas are ignored by the adapter unless pointer-locked).
-    {
-        let input = input.clone();
-        let closure = Closure::<dyn FnMut(MouseEvent)>::new(move |e: MouseEvent| {
-            input
-                .borrow_mut()
-                .mouse_delta(e.movement_x() as f32, e.movement_y() as f32);
-        });
-        document.add_event_listener_with_callback("mousemove", closure.as_ref().unchecked_ref())?;
-        closure.forget();
-    }
-
-    // Click-to-play: the overlay requests pointer lock on the render canvas.
-    {
-        let canvas = canvas.clone();
-        let closure = Closure::<dyn FnMut()>::new(move || {
-            canvas.request_pointer_lock();
-        });
-        overlay.add_event_listener_with_callback("click", closure.as_ref().unchecked_ref())?;
-        closure.forget();
-    }
-
-    // Pointer-lock state drives both the input adapter and overlay
-    // visibility — unless a touch session owns them.
-    {
-        let input = input.clone();
-        let touch = touch.clone();
-        let doc_for_closure = document.clone();
-        let overlay = overlay.clone();
-        let closure = Closure::<dyn FnMut()>::new(move || {
-            if touch.borrow().active {
-                return;
-            }
-            let locked = doc_for_closure.pointer_lock_element().is_some();
-            input.borrow_mut().set_locked(locked);
-            let _ = overlay
-                .style()
-                .set_property("display", if locked { "none" } else { "flex" });
-        });
-        document.add_event_listener_with_callback(
-            "pointerlockchange",
-            closure.as_ref().unchecked_ref(),
-        )?;
-        closure.forget();
-    }
-
-    Ok(())
-}
-
-/// Wires the touch controls: overlay tap-to-play, split-screen virtual
-/// joystick + look surface on the canvas, and the on-screen flashlight and
-/// menu buttons (`#btn-flashlight`, `#btn-menu`, inside `#touch-ui`).
-fn attach_touch_listeners(
-    document: &Document,
-    canvas: &HtmlCanvasElement,
-    overlay: &HtmlElement,
-    input: &Rc<RefCell<InputCollector>>,
-    touch: &Rc<RefCell<TouchState>>,
-) -> Result<(), JsValue> {
-    let touch_ui: Option<HtmlElement> = element(document, "touch-ui").ok();
-
-    let set_touch_play = {
-        let input = input.clone();
-        let touch = touch.clone();
-        let overlay = overlay.clone();
-        let touch_ui = touch_ui.clone();
-        Rc::new(move |on: bool| {
-            touch.borrow_mut().active = on;
-            let mut input = input.borrow_mut();
-            input.set_locked(on);
-            if !on {
-                input.set_move_axes(0.0, 0.0);
-            }
-            let _ = overlay
-                .style()
-                .set_property("display", if on { "none" } else { "flex" });
-            if let Some(ui) = &touch_ui {
-                let _ = ui
-                    .style()
-                    .set_property("display", if on { "flex" } else { "none" });
-            }
-        })
-    };
-
-    // Tap the overlay -> enter touch play (the desktop path uses `click` +
-    // pointer lock instead). prevent_default suppresses the synthetic click
-    // that would otherwise also request pointer lock.
-    {
-        let enter = set_touch_play.clone();
-        let closure = Closure::<dyn FnMut(TouchEvent)>::new(move |e: TouchEvent| {
-            e.prevent_default();
-            enter(true);
-        });
-        overlay.add_event_listener_with_callback("touchend", closure.as_ref().unchecked_ref())?;
-        closure.forget();
-    }
-
-    // Canvas touches: left 45% of the screen is the movement joystick,
-    // the rest is the look surface.
-    {
-        let touch = touch.clone();
-        let closure = Closure::<dyn FnMut(TouchEvent)>::new(move |e: TouchEvent| {
-            let mut st = touch.borrow_mut();
-            if !st.active {
-                return;
-            }
-            e.prevent_default();
-            let move_split = web_sys::window()
-                .and_then(|w| w.inner_width().ok())
-                .and_then(|v| v.as_f64())
-                .unwrap_or(800.0)
-                * 0.45;
-            let changed = e.changed_touches();
-            for i in 0..changed.length() {
-                let Some(t) = changed.item(i) else { continue };
-                let (x, y) = (t.client_x() as f64, t.client_y() as f64);
-                if x < move_split && st.move_id.is_none() {
-                    st.move_id = Some(t.identifier());
-                    st.move_origin = (x, y);
-                } else if st.look_id.is_none() {
-                    st.look_id = Some(t.identifier());
-                    st.look_last = (x, y);
-                }
-            }
-        });
-        canvas.add_event_listener_with_callback("touchstart", closure.as_ref().unchecked_ref())?;
-        closure.forget();
-    }
-
-    {
-        let input = input.clone();
-        let touch = touch.clone();
-        let closure = Closure::<dyn FnMut(TouchEvent)>::new(move |e: TouchEvent| {
-            let mut st = touch.borrow_mut();
-            if !st.active {
-                return;
-            }
-            e.prevent_default();
-            let changed = e.changed_touches();
-            for i in 0..changed.length() {
-                let Some(t) = changed.item(i) else { continue };
-                let (x, y) = (t.client_x() as f64, t.client_y() as f64);
-                if st.move_id == Some(t.identifier()) {
-                    let dx = ((x - st.move_origin.0) / JOYSTICK_RADIUS).clamp(-1.0, 1.0);
-                    let dy = ((y - st.move_origin.1) / JOYSTICK_RADIUS).clamp(-1.0, 1.0);
-                    // Screen-space up (negative dy) walks forward.
-                    input.borrow_mut().set_move_axes(dx as f32, -dy as f32);
-                } else if st.look_id == Some(t.identifier()) {
-                    let (lx, ly) = st.look_last;
-                    st.look_last = (x, y);
-                    input.borrow_mut().mouse_delta(
-                        (x - lx) as f32 * TOUCH_LOOK_SCALE,
-                        (y - ly) as f32 * TOUCH_LOOK_SCALE,
-                    );
-                }
-            }
-        });
-        canvas.add_event_listener_with_callback("touchmove", closure.as_ref().unchecked_ref())?;
-        closure.forget();
-    }
-
-    for event in ["touchend", "touchcancel"] {
-        let input = input.clone();
-        let touch = touch.clone();
-        let closure = Closure::<dyn FnMut(TouchEvent)>::new(move |e: TouchEvent| {
-            let mut st = touch.borrow_mut();
-            if !st.active {
-                return;
-            }
-            e.prevent_default();
-            let changed = e.changed_touches();
-            for i in 0..changed.length() {
-                let Some(t) = changed.item(i) else { continue };
-                if st.move_id == Some(t.identifier()) {
-                    st.move_id = None;
-                    input.borrow_mut().set_move_axes(0.0, 0.0);
-                } else if st.look_id == Some(t.identifier()) {
-                    st.look_id = None;
-                }
-            }
-        });
-        canvas.add_event_listener_with_callback(event, closure.as_ref().unchecked_ref())?;
-        closure.forget();
-    }
-
-    // On-screen buttons (optional elements; the page may omit them).
-    if let Ok(btn) = element::<HtmlElement>(document, "btn-flare") {
-        let input = input.clone();
-        let closure = Closure::<dyn FnMut(web_sys::Event)>::new(move |e: web_sys::Event| {
-            e.prevent_default();
-            e.stop_propagation();
-            input.borrow_mut().queue_flare();
-        });
-        btn.add_event_listener_with_callback("touchend", closure.as_ref().unchecked_ref())?;
-        btn.add_event_listener_with_callback("click", closure.as_ref().unchecked_ref())?;
-        closure.forget();
-    }
-    if let Ok(btn) = element::<HtmlElement>(document, "btn-drink") {
-        let input = input.clone();
-        let closure = Closure::<dyn FnMut(web_sys::Event)>::new(move |e: web_sys::Event| {
-            e.prevent_default();
-            e.stop_propagation();
-            input.borrow_mut().queue_drink();
-        });
-        btn.add_event_listener_with_callback("touchend", closure.as_ref().unchecked_ref())?;
-        btn.add_event_listener_with_callback("click", closure.as_ref().unchecked_ref())?;
-        closure.forget();
-    }
-    if let Ok(btn) = element::<HtmlElement>(document, "btn-eat") {
-        let input = input.clone();
-        let closure = Closure::<dyn FnMut(web_sys::Event)>::new(move |e: web_sys::Event| {
-            e.prevent_default();
-            e.stop_propagation();
-            input.borrow_mut().queue_eat();
-        });
-        btn.add_event_listener_with_callback("touchend", closure.as_ref().unchecked_ref())?;
-        btn.add_event_listener_with_callback("click", closure.as_ref().unchecked_ref())?;
-        closure.forget();
-    }
-    if let Ok(btn) = element::<HtmlElement>(document, "btn-flashlight") {
-        let input = input.clone();
-        let closure = Closure::<dyn FnMut(web_sys::Event)>::new(move |e: web_sys::Event| {
-            e.prevent_default();
-            e.stop_propagation();
-            input.borrow_mut().toggle_flashlight();
-        });
-        btn.add_event_listener_with_callback("touchend", closure.as_ref().unchecked_ref())?;
-        btn.add_event_listener_with_callback("click", closure.as_ref().unchecked_ref())?;
-        closure.forget();
-    }
-    if let Ok(btn) = element::<HtmlElement>(document, "btn-menu") {
-        let exit = set_touch_play.clone();
-        let closure = Closure::<dyn FnMut(web_sys::Event)>::new(move |e: web_sys::Event| {
-            e.prevent_default();
-            e.stop_propagation();
-            exit(false);
-        });
-        btn.add_event_listener_with_callback("touchend", closure.as_ref().unchecked_ref())?;
-        btn.add_event_listener_with_callback("click", closure.as_ref().unchecked_ref())?;
-        closure.forget();
-    }
-
-    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -816,15 +377,6 @@ fn run_frame_loop(
     let last_deaths = Rc::new(Cell::new(0u32));
     let death_shown_at = Rc::new(Cell::new(0.0f64));
 
-    let query = window.location().search().unwrap_or_default();
-    let is_capture = query_flag(&query, "capture");
-    // Visual baselines get fifteen settled frames; renderer smoke tests only
-    // need proof that a loaded scene completed a couple of real draws. The
-    // shorter path keeps deliberately unoptimized reference renderers usable
-    // under software WebGL in CI without weakening screenshot baselines.
-    let capture_settle_frames = if query_flag(&query, "smoke") { 2 } else { 15 };
-    let capture_frame_counter = Rc::new(Cell::new(0u32));
-
     let last_time = Rc::new(Cell::new(0.0f64));
     let frame_count = Rc::new(Cell::new(0u32));
     let hud_window_start = Rc::new(Cell::new(0.0f64));
@@ -836,9 +388,7 @@ fn run_frame_loop(
 
     let loop_window = window.clone();
     *raf_handle.borrow_mut() = Some(Closure::new(move |time_ms: f64| {
-        let dt = if is_capture {
-            0.0
-        } else if last_time.get() > 0.0 {
+        let dt = if last_time.get() > 0.0 {
             ((time_ms - last_time.get()) / 1000.0) as f32
         } else {
             1.0 / 60.0
@@ -892,8 +442,7 @@ fn run_frame_loop(
             let elapsed = (time_ms - hud_window_start.get()) / 1000.0;
             hud_window_start.set(time_ms);
             // Engine channels live inside the diagnostic aperture but stay
-            // current even while it is closed: their text doubles as the
-            // deterministic ready/refinement signal for automated tests.
+            // current even while it is closed.
             if elapsed > 0.0 {
                 let fps = (HUD_INTERVAL as f64 / elapsed).round();
                 hud_fps.set_text_content(Some(&fps.to_string()));
@@ -906,15 +455,11 @@ fn run_frame_loop(
             let effective_scale =
                 effective_resolution_scale(&renderer.borrow(), stats.resolution_scale);
             hud_scale.set_text_content(Some(&format!("{:.0}%", effective_scale * 100.0)));
-            let gpu = renderer.borrow().gpu_frame_ms();
             let cpu_telemetry = renderer.borrow().cpu_telemetry_string();
             if let Some(text) = cpu_telemetry {
                 hud_gpu.set_text_content(Some(&text));
             } else {
-                hud_gpu.set_text_content(Some(
-                    &gpu.map(|ms| format!("{ms:.1} ms"))
-                        .unwrap_or_else(|| "n/a".to_string()),
-                ));
+                hud_gpu.set_text_content(Some("WebGPU"));
             }
 
             // Top-right section readout ("LEVEL 0 · MAIN CORRIDOR · ...").
@@ -1025,10 +570,7 @@ fn run_frame_loop(
                                 )));
                             }
                             if let Some(el) = &route_range_el {
-                                el.set_text_content(Some(&format!(
-                                    "RANGE {:.0} m",
-                                    route.range_m
-                                )));
+                                el.set_text_content(Some(&format!("RANGE {:.0} m", route.range_m)));
                             }
                         }
                     }
@@ -1070,45 +612,6 @@ fn run_frame_loop(
                     let _ = toggled
                         .style()
                         .set_property("display", if on { "block" } else { "none" });
-                }
-            }
-        }
-
-        // In capture mode, wait until the camera chunk is loaded, then allow
-        // the requested number of frames to settle before exposing readiness.
-        if is_capture {
-            let engine_ref = engine.borrow();
-            let pos = engine_ref.player().position;
-            let cs = engine_ref.chunk_size();
-            let cam_chunk = crate::application::streaming::chunk_key(
-                (pos[0] / cs).floor() * cs,
-                (pos[2] / cs).floor() * cs,
-            );
-            if frame_count.get() % 30 == 0 {
-                web_sys::console::log_1(
-                    &format!(
-                        "[DEBUG CAPTURE] player pos: {:?}, cs: {}, cam_chunk: {:?}, resident: {}, ready: {}",
-                        pos,
-                        cs,
-                        cam_chunk,
-                        engine_ref.is_chunk_resident(cam_chunk),
-                        engine_ref.stats().ready
-                    )
-                    .into(),
-                );
-            }
-            if engine_ref.is_chunk_resident(cam_chunk) {
-                let frames = capture_frame_counter.get();
-                if frames < capture_settle_frames {
-                    capture_frame_counter.set(frames + 1);
-                } else {
-                    if let Some(w) = web_sys::window() {
-                        let _ = js_sys::Reflect::set(
-                            &w,
-                            &JsValue::from_str("__sceneReady"),
-                            &JsValue::from_bool(true),
-                        );
-                    }
                 }
             }
         }

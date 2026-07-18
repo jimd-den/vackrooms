@@ -1,6 +1,7 @@
 //! CPU microvoxel splatting renderer — a software implementation of
-//! [`crate::application::ports::RendererPort`] for machines with no usable
-//! GPU (or `?renderer=cpu`).
+//! [`crate::application::ports::RendererPort`] selected with `?renderer=cpu`.
+//! World rasterization is deterministic software work; the resulting RGBA
+//! buffer is presented by the shared WebGPU renderer.
 //!
 //! Instead of marching a ray per pixel, the CPU path inverts the loop: it
 //! walks the SVO front-to-back and *splats* nodes onto a z-buffered
@@ -19,9 +20,9 @@
 //! | [`shading`]    | linear radiometry, analytic fixtures, flares, fog    |
 //! | [`rasterizer`] | state facade + purpose-named frame and SVO stages    |
 //!
-//! This module is platform-free (no web-sys): the browser driver only blits
-//! the RGBA buffer (`drivers::cpu_canvas`). All geometry/shading logic is
-//! natively unit-tested in [`tests`].
+//! This module is platform-free (no web-sys): the WebGPU CPU-present strategy
+//! only uploads its RGBA buffer. All geometry/shading logic is natively
+//! unit-tested in [`tests`].
 
 pub mod atlas;
 pub mod camera;

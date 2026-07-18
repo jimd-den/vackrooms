@@ -8,7 +8,7 @@ use vackrooms::use_cases::region_plan::spawn_point;
 use wasm_frontend::adapters::cpu_splatter::rasterizer::SoftwareRasterizer;
 use wasm_frontend::adapters::cpu_splatter::settings::CpuQualityPreset;
 use wasm_frontend::adapters::local_chunk_source::LocalChunkSource;
-use wasm_frontend::application::atlas::{payload_rows, AtlasPool};
+use wasm_frontend::application::atlas::{AtlasPool, payload_rows};
 use wasm_frontend::application::ports::{ChunkDraw, ChunkSourcePort, FrameParams, RendererPort};
 use wasm_frontend::application::streaming::chunk_key;
 
@@ -48,7 +48,7 @@ fn main() {
             voxel_size: payload.voxel_size,
             svo_depth: payload.svo_depth,
         });
-        for light in &payload.surface.lights {
+        for light in &payload.lights {
             unique_lights.entry(light.id).or_insert(*light);
         }
     }

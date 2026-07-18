@@ -24,8 +24,8 @@ pub fn encode_chunk_payload(payload: &ChunkPayload) -> Vec<u8> {
         64 + payload.nodes.len() * 4
             + payload.surface.vertices.len() * 10
             + payload.surface.indices.len() * 4
-            + payload.surface.light_volume.len()
             + payload.surface.faces.instances.len() * 16
+            + payload.lights.len() * 51
             + payload.collision.len() * 24
             + payload.traversal_gates.len() * TraversalGate::WORDS * 4
             + payload.pit_hazards.len() * PitHazard::TRANSPORT_WORDS * 4,
@@ -56,15 +56,18 @@ pub fn encode_chunk_payload(payload: &ChunkPayload) -> Vec<u8> {
     put_aabb(&mut out, &s.bounds);
     out.push(s.lod);
     put_f32(&mut out, s.voxel_scale);
-    for d in s.light_volume_size {
-        put_u32(&mut out, d);
+    // Version-six compatibility slots: legacy WebGL workers placed an RGB
+    // light volume here. WebGPU consumes analytic lights and compact per-face
+    // baked values, so new payloads encode an empty volume while retaining
+    // all later field offsets/order.
+    for _ in 0..3 {
+        put_u32(&mut out, 0);
     }
-    out.push(s.light_volume_padding);
-    put_u32(&mut out, s.light_volume.len() as u32);
-    out.extend_from_slice(&s.light_volume);
+    out.push(0);
+    put_u32(&mut out, 0);
 
-    put_u32(&mut out, s.lights.len() as u32);
-    for l in &s.lights {
+    put_u32(&mut out, payload.lights.len() as u32);
+    for l in &payload.lights {
         out.extend_from_slice(&l.id.to_le_bytes());
         for c in l.position {
             put_f32(&mut out, c);
@@ -174,10 +177,10 @@ pub fn decode_chunk_payload(bytes: &[u8]) -> Option<ChunkPayload> {
     let bounds = r.aabb()?;
     let lod = r.u8()?;
     let voxel_scale = r.f32()?;
-    let light_volume_size = [r.u32()?, r.u32()?, r.u32()?];
-    let light_volume_padding = r.u8()?;
+    let _legacy_light_volume_size = [r.u32()?, r.u32()?, r.u32()?];
+    let _legacy_light_volume_padding = r.u8()?;
     let volume_len = r.len(1)?;
-    let light_volume = r.slice(volume_len)?.to_vec();
+    let _legacy_light_volume = r.slice(volume_len)?;
 
     let light_count = r.len(51)?;
     let mut lights = Vec::with_capacity(light_count);
@@ -275,10 +278,6 @@ pub fn decode_chunk_payload(bytes: &[u8]) -> Option<ChunkPayload> {
             indices,
             bounds,
             lod,
-            light_volume,
-            light_volume_size,
-            light_volume_padding,
-            lights,
             faces: FaceInstanceSet {
                 instances,
                 cells,
@@ -286,6 +285,7 @@ pub fn decode_chunk_payload(bytes: &[u8]) -> Option<ChunkPayload> {
             },
             voxel_scale,
         },
+        lights,
         collision,
         traversal_gates,
         pit_hazards,
@@ -362,7 +362,8 @@ impl<'a> Reader<'a> {
 mod tests {
     use super::*;
     use crate::adapters::local_chunk_source::LocalChunkSource;
-    use crate::application::ports::ChunkSourcePort;
+    use crate::application::ports::{ChunkSourcePort, RenderArtifactNeeds};
+    use vackrooms::domain::entities::anomaly::RealitySnapshot;
     use vackrooms::frameworks_drivers::simple_noise::SimpleNoiseProvider;
     use vackrooms::use_cases::generate_chunk::GeneratorConfig;
 
@@ -378,8 +379,38 @@ mod tests {
             assert_eq!(decoded.nodes, payload.nodes);
             assert_eq!(decoded.world_size, payload.world_size);
             assert_eq!(decoded.surface, payload.surface);
+            assert_eq!(decoded.lights, payload.lights);
             assert_eq!(decoded.collision, payload.collision);
         }
+    }
+
+    #[test]
+    fn selected_artifacts_stay_omitted_across_worker_encoding() {
+        let source =
+            LocalChunkSource::new(SimpleNoiseProvider::new(), 42, GeneratorConfig::low_spec());
+        let reality = RealitySnapshot::default();
+        let surface =
+            source.load_with_artifacts(0.0, 30.0, 0, 1, &reality, RenderArtifactNeeds::SURFACE);
+        let raymarch =
+            source.load_with_artifacts(0.0, 30.0, 0, 1, &reality, RenderArtifactNeeds::RAYMARCH);
+        let all = source.load_with_artifacts(0.0, 30.0, 0, 1, &reality, RenderArtifactNeeds::ALL);
+
+        let surface_bytes = encode_chunk_payload(&surface);
+        let raymarch_bytes = encode_chunk_payload(&raymarch);
+        let all_bytes = encode_chunk_payload(&all);
+        let decoded_surface = decode_chunk_payload(&surface_bytes).expect("surface payload");
+        let decoded_raymarch = decode_chunk_payload(&raymarch_bytes).expect("raymarch payload");
+
+        assert!(decoded_surface.nodes.is_empty());
+        assert!(!decoded_surface.surface.vertices.is_empty());
+        assert!(decoded_surface.surface.faces.instances.is_empty());
+        assert!(decoded_raymarch.surface.vertices.is_empty());
+        assert!(decoded_raymarch.surface.faces.instances.is_empty());
+        assert!(!decoded_raymarch.nodes.is_empty());
+        assert_eq!(decoded_surface.lights, surface.lights);
+        assert_eq!(decoded_raymarch.lights, raymarch.lights);
+        assert!(surface_bytes.len() < all_bytes.len());
+        assert!(raymarch_bytes.len() < all_bytes.len());
     }
 
     #[test]

@@ -4,7 +4,7 @@
 //! runs in a browser. The dependency rule points strictly inward:
 //!
 //! ```text
-//! drivers (web-sys, WebGL2, DOM)        <- wasm32 only
+//! drivers (portable WebGPU + wasm DOM)  <- outer layer
 //!    |
 //! adapters (input mapping, SVO atlas, local chunk source)
 //!    |
@@ -15,16 +15,15 @@
 //!
 //! * `application` and `adapters` are platform-agnostic and unit-tested with
 //!   plain `cargo test` on the host.
-//! * `drivers` is the only module that talks to the browser, and it is only
-//!   compiled for `wasm32`.
+//! * Portable WebGPU pipeline/configuration modules also compile natively for
+//!   headless Vulkan tests; DOM, events, surfaces, and rAF remain wasm-only.
 //! * The `#[wasm_bindgen(start)]` entry point below is the composition root:
 //!   it wires concrete drivers into the application's ports.
 
 pub mod adapters;
 pub mod application;
-pub mod core;
-
 pub mod drivers;
+pub mod reference;
 
 #[cfg(target_arch = "wasm32")]
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
@@ -193,9 +192,8 @@ pub static RENDER_TOGGLE_BITS: AtomicU32 = AtomicU32::new(u32::MAX);
 
 /// Flips one renderer optimization switch by name (`"hiz"`, `"f2b"`,
 /// `"skip"`, `"mips"`, `"beam_occlusion"`, `"shadows"`, `"cells"`,
-/// `"deferred"`, `"ao"`, `"cull"`, `"budget"`, `"dither"`, `"bake"`,
-/// `"timer"`). Unknown names
-/// are ignored.
+/// `"deferred"`, `"ao"`, `"cull"`, `"budget"`, `"dither"`, and `"bake"`).
+/// Unknown names are ignored.
 #[cfg(target_arch = "wasm32")]
 #[wasm_bindgen::prelude::wasm_bindgen]
 pub fn set_render_toggle(name: &str, enabled: bool) {
@@ -238,8 +236,7 @@ pub fn get_cpu_settings() -> crate::adapters::cpu_splatter::CpuRenderSettings {
     let lod_cutoff = f32::from_bits(CPU_LOD_CUTOFF_BITS.load(Ordering::Relaxed));
     let max_splat_radius = f32::from_bits(CPU_MAX_SPLAT_RADIUS_BITS.load(Ordering::Relaxed));
     let max_virtual_depth = CPU_MAX_VIRTUAL_DEPTH.load(Ordering::Relaxed) as u8;
-    let min_mip_occupancy =
-        f32::from_bits(CPU_MIN_MIP_OCCUPANCY_BITS.load(Ordering::Relaxed));
+    let min_mip_occupancy = f32::from_bits(CPU_MIN_MIP_OCCUPANCY_BITS.load(Ordering::Relaxed));
     let max_draw_dist = f32::from_bits(CPU_MAX_DRAW_DISTANCE_BITS.load(Ordering::Relaxed));
     let shadow_mode = CPU_SHADOWS.load(Ordering::Relaxed);
 
@@ -641,12 +638,18 @@ pub fn get_debug_chunk_json(seed: u32, chunk_x: f32, chunk_z: f32, voxel_scale: 
         // the immutable skeleton lane, keyed by instance id in the label.
         for gate in anomaly.traversal_gates() {
             let gb = match gate.axis {
-                vackrooms::domain::entities::anomaly::Axis2::X => {
-                    (gate.plane - 0.1, gate.span_min, gate.plane + 0.1, gate.span_max)
-                }
-                vackrooms::domain::entities::anomaly::Axis2::Z => {
-                    (gate.span_min, gate.plane - 0.1, gate.span_max, gate.plane + 0.1)
-                }
+                vackrooms::domain::entities::anomaly::Axis2::X => (
+                    gate.plane - 0.1,
+                    gate.span_min,
+                    gate.plane + 0.1,
+                    gate.span_max,
+                ),
+                vackrooms::domain::entities::anomaly::Axis2::Z => (
+                    gate.span_min,
+                    gate.plane - 0.1,
+                    gate.span_max,
+                    gate.plane + 0.1,
+                ),
             };
             let glabel = format!(
                 "{} {:08X}",
@@ -1006,17 +1009,35 @@ mod entry {
         if web_sys::window().is_none() {
             return Ok(());
         }
-        crate::drivers::browser::boot()
+        // Adapter/device acquisition is asynchronous in WebGPU. Keep the
+        // wasm start hook synchronous and let the composition root own the
+        // future; failures are surfaced both in the console and loading HUD.
+        wasm_bindgen_futures::spawn_local(async {
+            if let Err(error) = crate::drivers::browser::boot().await {
+                web_sys::console::error_2(&"Failed to start WebGPU engine:".into(), &error);
+                if let Some(document) = web_sys::window().and_then(|window| window.document()) {
+                    if let Some(status) = document.get_element_by_id("status-msg") {
+                        let detail = error
+                            .as_string()
+                            .unwrap_or_else(|| format!("{error:?}"));
+                        status.set_text_content(Some(&format!(
+                            "Failed to start WebGPU engine: {detail}"
+                        )));
+                    }
+                }
+            }
+        });
+        Ok(())
     }
 }
 
 /// Generation-worker entry points. A worker is a second instance of this
 /// same wasm module: `worker_init` builds a chunk source from the *same*
 /// URL query the main thread used (identical world by construction), and
-/// `worker_generate` runs the full chunk pipeline — architectural
-/// generation, voxel diffuse bake, greedy mesh + face instances, SVO build and
-/// serialization, collision extraction — returning one transferable byte
-/// buffer (see `adapters::chunk_codec`).
+/// `worker_generate` runs architectural generation, lighting, the
+/// collision-authority SVO, and only the renderer artifacts named by the
+/// request bitfield. It returns one transferable byte buffer (see
+/// `adapters::chunk_codec`).
 #[cfg(target_arch = "wasm32")]
 mod worker_entry {
     use std::cell::RefCell;
@@ -1026,7 +1047,7 @@ mod worker_entry {
     use crate::adapters::chunk_codec::encode_chunk_payload;
     use crate::adapters::local_chunk_source::LocalChunkSource;
     use crate::adapters::query_config::generator_setup_from_query;
-    use crate::application::ports::ChunkSourcePort;
+    use crate::application::ports::{ChunkSourcePort, RenderArtifactNeeds};
     use vackrooms::domain::entities::anomaly::RealitySnapshot;
     use vackrooms::frameworks_drivers::simple_noise::SimpleNoiseProvider;
 
@@ -1055,8 +1076,11 @@ mod worker_entry {
         origin_z: f32,
         level: u32,
         lod: u8,
+        artifact_bits: u8,
         reality_words: Vec<u32>,
     ) -> Vec<u8> {
+        let artifacts = RenderArtifactNeeds::from_bits(artifact_bits)
+            .expect("worker_generate received invalid artifact bits");
         let reality = RealitySnapshot::from_words(&reality_words)
             .expect("worker_generate received an invalid reality snapshot");
         SOURCE.with(|s| {
@@ -1065,7 +1089,7 @@ mod worker_entry {
                 .as_ref()
                 .expect("worker_generate called before worker_init");
             encode_chunk_payload(
-                &source.load_with_reality(origin_x, origin_z, level, lod, &reality),
+                &source.load_with_artifacts(origin_x, origin_z, level, lod, &reality, artifacts),
             )
         })
     }

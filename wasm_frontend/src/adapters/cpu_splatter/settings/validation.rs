@@ -69,8 +69,9 @@ impl CpuRenderSettings {
         self
     }
 
-    /// CPU canvas size relative to the ordinary GPU canvas. The baseline is
-    /// deliberately one quarter per axis; presets scale from 12.5% to 50%.
+    /// CPU backing-image size relative to the WebGPU presentation surface.
+    /// The baseline is deliberately one quarter per axis; presets scale from
+    /// 12.5% to 50%.
     pub fn canvas_resolution_factor(self) -> f64 {
         (self.validated().internal_scale * 0.25) as f64
     }

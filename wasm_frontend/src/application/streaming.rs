@@ -217,6 +217,7 @@ mod tests {
             voxel_size: 0.2,
             svo_depth: 6,
             surface: crate::application::ports::SurfaceMeshPayload::empty(0),
+            lights: vec![],
             collision: vec![],
             traversal_gates: vec![],
             pit_hazards: vec![],

@@ -30,7 +30,7 @@ jobs:
       # nothing but static files. `wasm-pack` output is checked in for local
       # convenience, but Pages always deploys a fresh build from source.
       - name: Build wasm front end
-        run: wasm-pack build wasm_frontend --target web --release --no-typescript --out-dir ../static/pkg
+        run: npm run build:wasm
 
       - uses: actions/configure-pages@v5
 

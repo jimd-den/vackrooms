@@ -37,10 +37,9 @@ pub struct RenderToggles {
     /// nearer already covers its screen bounds. Off = every node is tested
     /// per-pixel by the fine z-buffer only.
     pub hierarchical_z: bool,
-    /// OPTIMIZATION (CPU + raymarch): near-to-far traversal (chunks sorted
-    /// by distance, octants visited nearest-first). Maximizes early exits
-    /// and z-rejection. Off = input order plus explicit nearest-hit
-    /// comparison; identical image, more traversal/overdraw.
+    /// OPTIMIZATION (CPU + splat + raymarch): near-to-far traversal,
+    /// submission, or resident-chunk selection. Maximizes early exits and
+    /// z-rejection. Off retains each strategy's deterministic reference order.
     pub front_to_back: bool,
     /// OPTIMIZATION (raymarch): jump across the complete empty SVO leaf
     /// containing the current sample. Off = diagnostic finest-voxel DDA;
@@ -68,9 +67,9 @@ pub struct RenderToggles {
     // ------------------------------------------------------------------
     // GPU paths (surface / splat / raymarch)
     // ------------------------------------------------------------------
-    /// Direct-light visibility. The raymarcher casts exact SVO segments to
-    /// every emitter quadrature sample; raster paths use their shadow-map
-    /// approximation. Off is a faster explicitly unoccluded diagnostic.
+    /// Direct-light visibility. Raster strategies use a hero-fixture depth
+    /// map; raymarch traces finite SVO segments to analytic emitter samples.
+    /// Off keeps otherwise-identical unoccluded direct lighting.
     pub shadow_pass: bool,
     /// OPTIMIZATION (splat): per-cell instance-range culling. Face instances
     /// are grouped into spatial cells; invisible cells are skipped and
@@ -81,22 +80,18 @@ pub struct RenderToggles {
     /// profile's face budget is exhausted. Off = draw every visible face;
     /// useful as the correctness/reference path when diagnosing pop-out.
     pub face_budget: bool,
-    /// OPTIMIZATION (CPU + raster GPU): chunk-level visibility culling
-    /// (distance + behind-camera tests). Off = every resident chunk is
-    /// submitted.
+    /// OPTIMIZATION (CPU + GPU): range rejection for every strategy, plus
+    /// conservative camera visibility for raster paths. Raymarch filters
+    /// complete chunk bounds before its resident-set cap. Off keeps all
+    /// resident chunks eligible.
     pub distance_cull: bool,
     /// Dither/grain/banding-noise post effects (GPU). A visual feature more
     /// than a speedup; toggle to isolate its contribution to the image.
     pub dither: bool,
-    /// Optional quantized diffuse-fill field for the surface renderer.
-    /// Analytic fixtures remain authoritative because the path-distance bake
-    /// is not mathematically equivalent to an area-light integral. The
-    /// raymarcher deliberately rejects the field's face-independent SVO
-    /// encoding and stays on the strict analytic-light image.
+    /// Optional quantized diffuse fill in the CPU, indexed-surface, and splat
+    /// strategies. Analytic fixtures remain authoritative; raymarch stays on
+    /// analytic lighting because its stored bake is face-independent.
     pub baked_lighting: bool,
-    /// `EXT_disjoint_timer_query_webgl2` GPU frame timing for the HUD. Off =
-    /// no queries issued (some drivers stall on them).
-    pub gpu_timer: bool,
 }
 
 impl Default for RenderToggles {
@@ -115,13 +110,34 @@ impl Default for RenderToggles {
             distance_cull: true,
             dither: true,
             baked_lighting: false,
-            gpu_timer: true,
+        }
+    }
+}
+
+impl RenderToggles {
+    /// Baseline used when a renderer profile admits only a named subset of
+    /// the global switchboard.
+    pub const fn disabled() -> Self {
+        Self {
+            hierarchical_z: false,
+            front_to_back: false,
+            empty_space_skip: false,
+            mip_lod: false,
+            flashlight_occlusion: false,
+            deferred_shading: false,
+            ambient_occlusion: false,
+            shadow_pass: false,
+            cell_culling: false,
+            face_budget: false,
+            distance_cull: false,
+            dither: false,
+            baked_lighting: false,
         }
     }
 }
 
 /// Canonical query-name/bit ordering used by parsing and bitfield round trips.
-const TOGGLE_BITS: [(&str, u32); 14] = [
+const TOGGLE_BITS: [(&str, u32); 13] = [
     ("hiz", 1 << 0),
     ("f2b", 1 << 1),
     ("mips", 1 << 2),
@@ -131,11 +147,10 @@ const TOGGLE_BITS: [(&str, u32); 14] = [
     ("budget", 1 << 6),
     ("cull", 1 << 7),
     ("dither", 1 << 8),
-    ("timer", 1 << 9),
-    ("skip", 1 << 10),
-    ("bake", 1 << 11),
-    ("deferred", 1 << 12),
-    ("ao", 1 << 13),
+    ("skip", 1 << 9),
+    ("bake", 1 << 10),
+    ("deferred", 1 << 11),
+    ("ao", 1 << 12),
 ];
 
 impl RenderToggles {
@@ -154,7 +169,6 @@ impl RenderToggles {
             "cull" => &mut self.distance_cull,
             "dither" => &mut self.dither,
             "bake" => &mut self.baked_lighting,
-            "timer" => &mut self.gpu_timer,
             _ => return None,
         })
     }
@@ -231,8 +245,9 @@ mod tests {
         assert!(t.hierarchical_z && t.front_to_back && t.empty_space_skip && t.mip_lod);
         assert!(t.flashlight_occlusion && t.deferred_shading && t.ambient_occlusion);
         assert!(t.shadow_pass && t.cell_culling && t.face_budget);
-        assert!(t.distance_cull && t.dither && t.gpu_timer);
+        assert!(t.distance_cull && t.dither);
         assert!(!t.baked_lighting);
+        assert_eq!(RenderToggles::disabled().to_bits(), 0);
     }
 
     #[test]

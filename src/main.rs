@@ -147,7 +147,7 @@ fn handle_client(mut stream: TcpStream) {
             response.extend_from_slice(&binary);
             let _ = stream.write_all(&response);
         } else if request_line.starts_with("GET ") {
-            // Static file service for the wasm front end (and the legacy page).
+            // Static file service for the WebGPU front end.
             let parts: Vec<&str> = request_line.split_whitespace().collect();
             let url = parts.get(1).unwrap_or(&"/");
             let path = url.split('?').next().unwrap_or("/");
@@ -165,7 +165,6 @@ fn handle_client(mut stream: TcpStream) {
 fn serve_static(stream: &mut TcpStream, url_path: &str) {
     let relative = match url_path {
         "/" | "/index.html" => "index.html",
-        "/legacy" => "legacy_threejs.html",
         other => other.trim_start_matches('/'),
     };
 

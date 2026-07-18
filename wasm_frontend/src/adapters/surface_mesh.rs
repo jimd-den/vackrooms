@@ -1,5 +1,5 @@
 //! Converts the core greedy-quad output into the browser renderer's compact
-//! indexed mesh payload. Geometry stays chunk-local and fixed-point so WebGL
+//! indexed mesh payload. Geometry stays chunk-local and fixed-point so GPU
 //! uploads are small and camera precision does not degrade far from origin.
 
 use vackrooms::adapters::voxel_mapper::{FaceDirection, MergedQuad, VoxelMapper, VoxelType};
@@ -11,9 +11,10 @@ use vackrooms::domain::entities::voxel_grid::{
     VOXEL_WATER, VoxelGrid,
 };
 
-use crate::adapters::collect_emissive_lights::collect_emissive_lights;
 use crate::application::collision::Aabb;
-use crate::application::ports::{POSITION_FIXED_SCALE, PackedVertex, SurfaceMeshPayload};
+use crate::application::ports::{
+    POSITION_FIXED_SCALE, PackedVertex, RenderArtifactNeeds, SurfaceMeshPayload,
+};
 
 /// Builds a seam-safe surface payload from a grid that includes a one-voxel
 /// X/Z halo. The mapper consults that halo before emitting boundary faces.
@@ -22,7 +23,25 @@ pub fn build_surface_mesh(
     voxel_scale: f32,
     lod: u8,
     lateral_padding: usize,
-    halo_world_origin: [f32; 3],
+) -> SurfaceMeshPayload {
+    build_surface_artifacts(
+        halo_grid,
+        voxel_scale,
+        lod,
+        lateral_padding,
+        RenderArtifactNeeds::SURFACE,
+    )
+}
+
+/// Builds only the raster representation selected by the renderer. Greedy
+/// quads are shared by both outputs, but indexed vertices and face instances
+/// are materialized independently so neither strategy pays for the other.
+pub fn build_surface_artifacts(
+    halo_grid: &VoxelGrid,
+    voxel_scale: f32,
+    lod: u8,
+    lateral_padding: usize,
+    artifacts: RenderArtifactNeeds,
 ) -> SurfaceMeshPayload {
     let mapper = VoxelMapper::new(voxel_scale);
     let quads = mapper.map_voxel_grid_with_padding(halo_grid, lateral_padding);
@@ -36,40 +55,30 @@ pub fn build_surface_mesh(
             depth as f32 * voxel_scale,
         ],
     );
-    let lights =
-        collect_emissive_lights(halo_grid, voxel_scale, halo_world_origin, lateral_padding);
-
     let mut mesh = SurfaceMeshPayload {
-        vertices: Vec::with_capacity(quads.len() * 4),
-        indices: Vec::with_capacity(quads.len() * 6),
+        vertices: Vec::with_capacity(if artifacts.indexed_surface_mesh() {
+            quads.len() * 4
+        } else {
+            0
+        }),
+        indices: Vec::with_capacity(if artifacts.indexed_surface_mesh() {
+            quads.len() * 6
+        } else {
+            0
+        }),
         bounds,
         lod,
-        light_volume: Vec::with_capacity(
-            halo_grid.width() * halo_grid.height() * halo_grid.depth() * 3,
-        ),
-        light_volume_size: [
-            halo_grid.width() as u32,
-            halo_grid.height() as u32,
-            halo_grid.depth() as u32,
-        ],
-        light_volume_padding: lateral_padding.min(u8::MAX as usize) as u8,
-        lights,
-        faces: crate::adapters::face_instances::build_face_instances(&quads, voxel_scale),
+        faces: if artifacts.face_splats() {
+            crate::adapters::face_instances::build_face_instances(&quads, voxel_scale)
+        } else {
+            crate::application::ports::FaceInstanceSet::empty()
+        },
         voxel_scale,
     };
-    for z in 0..halo_grid.depth() {
-        for y in 0..halo_grid.height() {
-            for x in 0..halo_grid.width() {
-                let [r, g, b] = halo_grid.get_light_rgb(x, y, z);
-                // The grid light is 0-15, WebGL expects 0-255 for gl.UNSIGNED_BYTE RGB textures.
-                mesh.light_volume.push(r * 17);
-                mesh.light_volume.push(g * 17);
-                mesh.light_volume.push(b * 17);
-            }
+    if artifacts.indexed_surface_mesh() {
+        for quad in &quads {
+            append_quad(&mut mesh, quad, voxel_scale);
         }
-    }
-    for quad in &quads {
-        append_quad(&mut mesh, quad, voxel_scale);
     }
     mesh
 }
@@ -197,22 +206,20 @@ mod tests {
     fn isolated_voxel_becomes_indexed_closed_surface() {
         let mut grid = VoxelGrid::new(3, 2, 3);
         grid.set(1, 0, 1, VOXEL_WALL);
-        let mesh = build_surface_mesh(&grid, 1.0, 0, 1, [0.0; 3]);
+        let mesh = build_surface_mesh(&grid, 1.0, 0, 1);
         assert_eq!(mesh.vertices.len(), 24);
         assert_eq!(mesh.indices.len(), 36);
+        assert!(mesh.faces.instances.is_empty());
     }
 
     #[test]
-    fn baked_volume_retains_the_air_halo_needed_by_boundary_faces() {
+    fn splat_artifacts_do_not_materialize_the_indexed_mesh() {
         let mut grid = VoxelGrid::new(4, 2, 4);
         grid.set(1, 0, 1, VOXEL_WALL);
-        grid.set_light_rgb(0, 0, 1, [7, 5, 3]);
+        let artifacts = build_surface_artifacts(&grid, 1.0, 0, 1, RenderArtifactNeeds::SPLAT);
 
-        let mesh = build_surface_mesh(&grid, 1.0, 0, 1, [-1.0, 0.0, -1.0]);
-
-        assert_eq!(mesh.light_volume_padding, 1);
-        assert_eq!(mesh.light_volume_size, [4, 2, 4]);
-        let texel = ((grid.height() * grid.width()) + 0) * 3;
-        assert_eq!(&mesh.light_volume[texel..texel + 3], &[119, 85, 51]);
+        assert!(artifacts.vertices.is_empty());
+        assert!(artifacts.indices.is_empty());
+        assert!(!artifacts.faces.instances.is_empty());
     }
 }

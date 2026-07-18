@@ -93,6 +93,7 @@ impl GenerationWorkerRequests {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::application::ports::RenderArtifactNeeds;
     use vackrooms::domain::entities::anomaly::RealitySnapshot;
 
     fn request(id: u32, x: f32) -> ChunkRequest {
@@ -102,6 +103,7 @@ mod tests {
             origin_z: -4.0,
             level: 0,
             lod: 1,
+            artifacts: RenderArtifactNeeds::RAYMARCH,
             reality: RealitySnapshot::default(),
         }
     }
@@ -165,5 +167,18 @@ mod tests {
 
         assert!(requests.fail_exact(0, &wrong_identity).is_none());
         assert_eq!(requests.fail_exact(0, &current), Some(current));
+    }
+
+    #[test]
+    fn renderer_artifacts_are_part_of_worker_request_identity() {
+        let mut requests = GenerationWorkerRequests::new(1);
+        let current = request(6, 0.0);
+        requests.assign(0, current.clone());
+
+        let mut wrong_artifacts = current.clone();
+        wrong_artifacts.artifacts = RenderArtifactNeeds::SURFACE;
+
+        assert!(!requests.finish_exact(0, &wrong_artifacts));
+        assert!(requests.finish_exact(0, &current));
     }
 }

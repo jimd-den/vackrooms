@@ -1,5 +1,5 @@
 //! Pinhole camera for the splatter, matching the GPU shaders' yaw/pitch
-//! basis exactly (same formulas as `drivers::webgl`'s per-frame uniforms),
+//! basis exactly (the same formulas feed the shared WebGPU frame uniforms),
 //! so switching renderers never changes the framing.
 
 use crate::application::ports::{DynamicLight, FrameParams, MAX_DYNAMIC_LIGHTS};

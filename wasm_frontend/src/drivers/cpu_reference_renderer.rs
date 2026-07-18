@@ -1,8 +1,7 @@
 use crate::adapters::cpu_splatter::rasterizer::SoftwareRasterizer;
 use crate::application::ports::RendererPort;
-use crate::core::ports::reference_renderer::{
-    ReferenceRenderSettings, ReferenceRendererPort, RenderSceneSnapshot, RenderedImage,
-};
+use crate::reference::renderer::{ReferenceRenderSettings, ReferenceRendererPort, RenderedImage};
+use crate::reference::scene::RenderSceneSnapshot;
 
 /// Stateless composition driver for the production CPU splatter. A fresh
 /// rasterizer per render makes repeated reference calls independent of frame
@@ -25,10 +24,7 @@ impl ReferenceRendererPort for CpuReferenceRenderer {
             SoftwareRasterizer::new(settings.width as usize, settings.height as usize);
         rasterizer.settings = settings.effective_cpu_settings();
         rasterizer.upload_atlas(&scene.atlas);
-        rasterizer.draw(
-            &settings.frame_params(&scene.scene_lights),
-            &scene.chunks,
-        );
+        rasterizer.draw(&settings.frame_params(&scene.scene_lights), &scene.chunks);
 
         RenderedImage {
             width: settings.width,

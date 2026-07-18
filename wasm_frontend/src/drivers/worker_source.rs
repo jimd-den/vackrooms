@@ -2,13 +2,14 @@
 //!
 //! Each worker (`static/worker.js`) is a second instance of this same wasm
 //! module running on its own OS thread. The main thread posts small
-//! `{gen, requestId, ox, oz, level, lod, reality}` messages round-robin; workers run the full
-//! chunk pipeline (generation, voxel diffuse bake, greedy mesh + face instances,
-//! SVO build/serialize, collision) and transfer one encoded byte buffer
-//! back (`adapters::chunk_codec`). No WebGL object ever leaves the main
-//! thread. Healthy pools keep generation off the frame loop; if every worker
-//! fatally fails, the driver uses its same-thread source as a correctness
-//! fallback instead of leaving the world permanently pending.
+//! `{gen, requestId, ox, oz, level, lod, artifacts, reality}` messages
+//! round-robin. Workers always generate, bake, build the collision SVO, and
+//! extract collision; the artifact bitfield requests only the active
+//! renderer's mesh, face, or serialized-node products. One encoded byte
+//! buffer returns through `adapters::chunk_codec`; GPU resources remain owned
+//! by the main-thread render driver. Healthy pools keep generation off the
+//! frame loop. If every worker fatally fails, the driver uses its same-thread
+//! source as a correctness fallback instead of leaving the world pending.
 //!
 //! Stale-result rejection lives in the engine (`install_completed`), keyed
 //! by the echoed request. This driver owns transport failure detection and
@@ -24,7 +25,9 @@ use web_sys::{MessageEvent, Worker, WorkerOptions, WorkerType};
 use crate::adapters::chunk_codec::decode_chunk_payload;
 use crate::adapters::local_chunk_source::LocalChunkSource;
 use crate::application::generation_worker_policy::MAX_GENERATION_WORKERS;
-use crate::application::ports::{ChunkPayload, ChunkRequest, ChunkSourcePort, CompletedChunk};
+use crate::application::ports::{
+    ChunkPayload, ChunkRequest, ChunkSourcePort, CompletedChunk, RenderArtifactNeeds,
+};
 use crate::drivers::generation_worker_requests::GenerationWorkerRequests;
 use vackrooms::domain::entities::anomaly::RealitySnapshot;
 use vackrooms::frameworks_drivers::simple_noise::SimpleNoiseProvider;
@@ -174,6 +177,19 @@ impl ChunkSourcePort for WorkerChunkSource {
             .load_with_reality(origin_x, origin_z, level, lod, reality)
     }
 
+    fn load_with_artifacts(
+        &self,
+        origin_x: f32,
+        origin_z: f32,
+        level: u32,
+        lod: u8,
+        reality: &RealitySnapshot,
+        artifacts: RenderArtifactNeeds,
+    ) -> ChunkPayload {
+        self.fallback
+            .load_with_artifacts(origin_x, origin_z, level, lod, reality, artifacts)
+    }
+
     fn is_async(&self) -> bool {
         true
     }
@@ -191,12 +207,13 @@ impl ChunkSourcePort for WorkerChunkSource {
                 );
                 self.reported_emergency_fallback = true;
             }
-            let payload = self.fallback.load_with_reality(
+            let payload = self.fallback.load_with_artifacts(
                 request.origin_x,
                 request.origin_z,
                 request.level,
                 request.lod,
                 &request.reality,
+                request.artifacts,
             );
             self.completed
                 .borrow_mut()
@@ -214,6 +231,7 @@ impl ChunkSourcePort for WorkerChunkSource {
         set("oz", (request.origin_z as f64).into());
         set("level", (request.level as f64).into());
         set("lod", (request.lod as f64).into());
+        set("artifacts", (request.artifacts.bits() as f64).into());
         let reality_words = request.reality.to_words();
         let reality = js_sys::Uint32Array::from(reality_words.as_slice());
         set("reality", reality.into());
@@ -283,6 +301,9 @@ fn parse_request(data: &JsValue) -> Option<ChunkRequest> {
         origin_z: finite_f32(field("oz")?)?,
         level: exact_u32(field("level")?)?,
         lod: u8::try_from(exact_u32(field("lod")?)?).ok()?,
+        artifacts: RenderArtifactNeeds::from_bits(
+            u8::try_from(exact_u32(field("artifacts")?)?).ok()?,
+        )?,
         reality: {
             let encoded = field("reality")?;
             let words = encoded.dyn_into::<js_sys::Uint32Array>().ok()?.to_vec();

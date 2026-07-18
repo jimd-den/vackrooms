@@ -2,8 +2,9 @@
 //!
 //! This is the pre-planning era of the engine: a chunk-local Growing Tree
 //! maze with BSP-ish rooms, microbiome zones, and flyweight room stamps. It
-//! is kept for the `/legacy` client and as a reference for what the planned
-//! Level 0 replaced. New work belongs in the planning pipeline
+//! remains available as the explicit level-1 generator and as a reference for
+//! what the planned Level 0 replaced. The retired Three.js client no longer
+//! consumes it. New work belongs in the planning pipeline
 //! (`world_topology` -> `region_plan` -> `level_zero`); nothing in this
 //! module is consulted by Level 0 or the grassland level.
 

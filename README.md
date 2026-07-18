@@ -1,21 +1,20 @@
 # Vackrooms
 
-A voxel-only rendering engine in Rust, structured with documented Clean
-Architecture and compiled to WebAssembly. Procedural "backrooms" world
-generation, finite-range voxel irradiance, sparse voxel octree (SVO) construction, chunk
-streaming and sliding player collision all run inside one wasm
-module — built to hold up on low-spec hardware. Rendering is pluggable:
-a greedy-meshed WebGL2 rasterizer by default, with an instanced face-splat
-path, a retained SVO raymarcher, and a CPU-only software fallback all
-selectable at runtime (see [Renderer backends](#renderer-backends)).
+A voxel-only engine in Rust, organized with Clean Architecture and compiled
+to WebAssembly. Procedural world planning, finite-range voxel irradiance,
+sparse voxel octree (SVO) construction, chunk streaming, and sliding player
+collision remain deterministic CPU work. One WebGPU facade presents four
+runtime-selectable strategies: indexed surfaces, compact face splats, SVO
+raymarching, and a CPU reference image uploaded through WebGPU.
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for the full design (layer map, ports,
-data flow, texel encodings, streaming and rendering pipeline).
+data flow, SVO node encoding, streaming, and rendering pipelines).
 
 ## How it works
 
-Each chunk goes through the same pipeline, on the main thread or in a
-generation worker:
+Each chunk starts with the same authoritative pipeline, on the main thread or
+in a generation worker. The selected renderer controls which derived upload
+artifacts are retained:
 
 1. **Procedural generation** (`src/use_cases/generate_chunk.rs` +
    `*_level.rs`) — a `LevelGenerator` fills a `VoxelGrid` deterministically
@@ -25,18 +24,27 @@ generation worker:
 2. **Lighting preparation** — exposed emissive faces seed an air-only,
    finite-range RGB diffuse field; solids receive it but never propagate it.
    Runtime panels are separately derived from exposed emissive undersides and
-   remain analytic area lights in both GPU renderers.
-3. **SVO build + serialize** — the lit grid is packed into a sparse voxel
-   octree and serialized into the GPU texel encoding the renderer expects
-   (`src/adapters/octree_gpu_serializer.rs`).
+   remain analytic area lights in every renderer strategy.
+3. **SVO build + optional serialization** — the lit grid is packed into a
+   sparse voxel octree for collision and traversal. Recursive cubes wholly
+   beyond a non-power-of-two grid are pruned directly to the canonical air
+   leaf. Raymarch and CPU strategies serialize nodes as a row-padded,
+   four-`u32` stream; raymarch uploads it to GPU storage while the CPU
+   reference decodes the same words (`src/adapters/octree_gpu_serializer.rs`).
 4. **Streaming** (`wasm_frontend/src/application/streaming.rs`) — chunks
    around the player are requested, LOD'd by distance, and evicted as the
    player moves; a coarse-first pass keeps distant chunks cheap.
 5. **Collision** — player movement is axis-separated (X and Z tested and
    moved independently against a `CollisionWorld`), so hitting a wall
    diagonally slides along it instead of stopping dead.
-6. **Render** — one of four interchangeable `RendererPort` implementations
-   draws the resident chunks (see below).
+6. **Render** — one `WebGpuRenderer` port adapter delegates resident chunks to
+   one of four composable strategies (see below).
+
+Generation is deliberately CPU-authoritative: architectural graph decisions,
+reality epochs, and seeded noise must produce the same chunk regardless of
+GPU or worker scheduling. The GPU instead performs renderer-derived work that
+does not redefine the world: vertex pulling, face-to-quad expansion,
+depth-tested supply-label billboard expansion, and per-pixel SVO traversal.
 
 A standing gameplay quirk: leaning into a wall for a few seconds has a
 chance to "noclip" the player between level 0 (backrooms) and level 34
@@ -47,15 +55,16 @@ chance to "noclip" the player between level 0 (backrooms) and level 34
 
 Chosen with `?renderer=` (see [Usage](#usage)):
 
-| Value | Backend | Notes |
+| Value | WebGPU strategy | Notes |
 |---|---|---|
-| *(default)* | `SurfaceRenderer` | Indexed greedy meshes, WebGL2 fixed-function depth. The SVO is kept for collision/debug only — no fragment shader walks it. |
-| `splat` | `SplatRenderer` | Instanced face-splat "microvoxel" path: one instance per visible surface rectangle, lit once in the vertex shader. |
-| `raymarch` | `WebGl2Renderer` | The retained hybrid SVO raymarcher: per-fragment octree walk against an RGBA32UI node-atlas texture. |
-| `cpu` | `CpuCanvasRenderer` | Software rasterizer blitted via `ImageData`; no WebGL context at all. |
+| `surface` *(default)* | indexed surfaces | Greedy-mesh indices plus compact vertices. WGSL pulls and decodes vertices from a storage buffer; hardware depth resolves visibility. |
+| `splat` | face splats | Compact face records live in a storage buffer. The vertex stage expands each record into four corners; CPU draw submission applies the configured cell and face budgets. |
+| `raymarch` | SVO raymarcher | A fullscreen triangle drives fragment-stage traversal of the merged SVO storage-buffer atlas. |
+| `cpu` | CPU reference / WebGPU present | The deterministic software SVO rasterizer writes RGBA8; WebGPU uploads that framebuffer to a texture and presents it. |
 
-`SurfaceRenderer` and `SplatRenderer` fall back automatically (to CPU, or to
-surfaces) if WebGL2 or the requested backend is unavailable.
+All four choices require WebGPU for presentation. Adapter or device creation
+failure is reported in the loading HUD; the engine does not silently switch
+rendering algorithms.
 
 ## Build & run
 
@@ -66,7 +75,7 @@ webpack build stage in this repository.
 
 ```sh
 # 1. Build the wasm front end into static/pkg/
-wasm-pack build wasm_frontend --target web --release --no-typescript --out-dir ../static/pkg
+npm run build:wasm
 
 # 2. Run the dev server
 cargo run
@@ -82,23 +91,24 @@ Click to capture the mouse; WASD to move, ESC to release.
   streaming, 0.2 u voxels, adaptive resolution)
 - `http://localhost:3000/?spec=high` — high-spec profile (5×5 chunks,
   0.1 u voxels)
-- `http://localhost:3000/legacy` — the preserved original Three.js/JS client,
-  which fetches chunks from the server's `/maze` and `/octree` endpoints
-  instead of generating them in the browser
+
+The former `/legacy` Three.js client and route have been retired. The native
+server still exposes `/maze` and `/octree` as diagnostic data endpoints; the
+wasm client does not depend on them.
 
 Worlds are shareable by URL — every query parameter below is optional and
 combinable:
 
 | Parameter | Values | Effect |
 |---|---|---|
-| `spec` | `high` | Switches to the high-spec profile (finer voxels, wider streaming radius). Default is low-spec. |
+| `spec` | `low`, `high` | Shared generation/rendering quality decision (case-insensitive). Default is low. |
 | `voxel_size` | `0.4`, `0.2`, `0.1`, `0.05` | Overrides scene voxel size after seam, progressive-LOD, SVO-depth, and dense-memory validation. `0.4` is high-profile-only; `0.05` is standard-profile-only. |
 | `seed` | number or text | World seed. Non-numeric text is hashed (FNV-1a) so words work too. |
 | `pillars` | `0`–`4` | Structural column density multiplier (`0` = none). Default `1`. |
 | `walls` | `0`–`4` | Office wall density multiplier (`0` = open plan). Default `1`. |
 | `atria` | `0`–`4` | How much of the world vaults into tall atria. Default `1`. |
 | `lights` | `0`–`4` | Ceiling light panel density. Default `1`. |
-| `renderer` | `splat`, `raymarch`, `cpu` | Picks a non-default renderer backend (see above). |
+| `renderer` | `surface`, `splat`, `raymarch`, `cpu` | Selects one of the four WebGPU strategies (see above). |
 | `cpu_preset` | `performance`, `balanced`, `quality`, `maximum`, `custom` | Typed CPU workload profile. Presets render at 12.5%–50% backing resolution per axis and present the complete image over the full page; `balanced` is the default. |
 | `cpu_scale` | `0.25`–`2` | Custom CPU backing scale relative to the 25%-viewport baseline; CSS presentation always remains full-page. |
 | `cpu_lod_px` | `0.25`–`2` | Custom projected-radius MIP cutoff; lower preserves finer distant geometry. |
@@ -111,19 +121,18 @@ combinable:
 | `level` | `0`, `34` | Debug: boots straight into a level (34 = the grassland) instead of waiting on a noclip roll. |
 | `force_anomaly` | `pillars`, `blackout`, `pits`, `archway`, `redroom` | Debug: guarantees one anomaly of that family near spawn, bypassing organic frequency and the spawn keep-out. |
 | `rt_hiz` | `0`, `1` | CPU hierarchical-Z rejection. |
-| `rt_f2b` | `0`, `1` | CPU/raymarch near-to-far traversal. |
+| `rt_f2b` | `0`, `1` | CPU traversal plus splat/raymarch near-to-far chunk selection. Off preserves each strategy's deterministic reference order. |
 | `rt_skip` | `0`, `1` | Raymarch empty-SVO-leaf skipping; `0` selects finest-cell diagnostic DDA. |
 | `rt_mips` | `0`, `1` | CPU projected-size MIP/LOD collapse. |
 | `rt_beam_occlusion` | `0`, `1` | CPU cone-light occlusion rays. |
 | `rt_deferred` | `0`, `1` | CPU exact fine-depth rejection before hidden-splat shading. Off shades first and depth-tests later; pixels are identical. |
 | `rt_ao` | `0`, `1` | CPU sibling-count ambient-occlusion approximation. Off selects unit ambient visibility for the reference path. |
-| `rt_shadows` | `0`, `1` | GPU direct-light visibility: per-emitter-sample SVO segments in raymarch; a highest-priority-fixture shadow map on surface/splat. |
-| `rt_cells` | `0`, `1` | GPU splat cell-range culling. |
-| `rt_budget` | `0`, `1` | GPU splat far-chunk face budget. |
-| `rt_cull` | `0`, `1` | CPU and raster-GPU chunk visibility culling. |
-| `rt_dither` | `0`, `1` | GPU dither/grain effects. |
-| `rt_bake` | `0`, `1` | Optional approximate surface-renderer voxel diffuse fill. Analytic panel lights remain enabled; default `0`. |
-| `rt_timer` | `0`, `1` | Asynchronous GPU timing queries. |
+| `rt_shadows` | `0`, `1` | Direct-light visibility. Surface/Splat use a hero-fixture depth map (128² hard comparison on low, 256² four-tap PCF on high); raymarch traces finite SVO segments to each point-light endpoint and one/four rectangle samples. |
+| `rt_cells` | `0`, `1` | CPU-side splat cell-range rejection before direct draw submission. |
+| `rt_budget` | `0`, `1` | Splat far-chunk face budget. |
+| `rt_cull` | `0`, `1` | CPU and all WebGPU strategies reject chunks beyond the configured range; raster strategies also apply conservative camera visibility. Raymarch filters complete chunk bounds before its resident-set cap. |
+| `rt_dither` | `0`, `1` | Shared WebGPU output dither. |
+| `rt_bake` | `0`, `1` | Optional quantized diffuse fill for CPU, surface, and splat; raymarch remains analytic. |
 
 The top-right HUD names the section you are in (level, zone, region), and
 **F3** (or Settings → Debug) toggles the anomaly debug overlay: reality
@@ -149,9 +158,8 @@ the browser, so it needs nothing but static files and runs unmodified from a
 Pages project URL (`https://<user>.github.io/<repo>/`) — the worker pool
 resolves `worker.js` relative to the page, not from the domain root.
 
-The `/legacy` client and the `/maze`/`/octree` endpoints depend on
-`src/main.rs`'s native HTTP server and cannot run on Pages; only the wasm
-engine is served there.
+The optional `/maze` and `/octree` diagnostics belong to `src/main.rs` and
+are absent on Pages; the wasm engine needs neither endpoint.
 
 One-time setup: in the repo's Settings → Pages, set Source to "GitHub
 Actions".
@@ -160,22 +168,36 @@ Actions".
 
 ```sh
 cargo test --workspace
-npm run test:visual
+cargo check -p wasm_frontend --target wasm32-unknown-unknown
+npm run check:wasm
+
+# Linux: deterministic headless GPU contracts through Vulkan/Lavapipe.
+VK_DRIVER_FILES="$(find /usr/share/vulkan/icd.d -name 'lvp_icd*.json' -print -quit)" \
+  WGPU_VALIDATION=1 \
+  cargo test -p wasm_frontend --features vulkan-tests \
+    --test vulkan_renderers -- --test-threads=1
 ```
 
 The application layers are browser-free by construction, so player physics,
 collision, streaming, atlas assembly and input mapping are all covered by
-native unit tests. The visual command first rebuilds `static/pkg` with
-`wasm-pack`, then boots every renderer in Chromium and runs the approved
-surface screenshot regression; it cannot pass against a stale WASM bundle.
+native unit tests. The Vulkan suite uses a surface-free render target, forces
+the Vulkan backend, and fails if no Vulkan adapter is available; CI pins it to
+Mesa's deterministic Lavapipe software driver and enables Vulkan validation
+layers. The exact Lavapipe ICD filename varies by distribution; CI discovers
+it under `/usr/share/vulkan/icd.d/` before running the suite.
+
+`npm run build:wasm` also writes a source fingerprint into `static/pkg/`.
+`npm run check:wasm` verifies that the checked-in wasm-bindgen glue matches
+the current Rust and worker ABI, catching stale worker-call signatures without
+bringing a browser automation dependency back into the project.
 
 ## Workspace layout
 
 | Path | What it is |
 |---|---|
 | `src/` | `vackrooms` core: entities, use cases, adapters + native dev server |
-| `wasm_frontend/` | Browser client: application / adapters / drivers (wasm-only) |
-| `static/` | Thin HTML shell, wasm bundle output (`pkg/`), legacy client |
+| `wasm_frontend/` | Portable application/adapters/WebGPU pipelines plus the wasm browser shell |
+| `static/` | Thin HTML shell and wasm bundle output (`pkg/`) |
 | `wasm_raycaster/` | Legacy CPU raycaster experiment (reference only) |
 
 ## Modifying the engine
@@ -188,10 +210,11 @@ than reaching into a concrete type:
   `grassland_level.rs`, register a level id, and give it a native unit test
   (generation must be deterministic and seamless at chunk borders — see the
   contract documented on the trait).
-- **New renderer backend** — implement `RendererPort`
-  (`wasm_frontend/src/application/ports.rs`) under `wasm_frontend/src/drivers/`
-  and wire a `?renderer=` value into `create_renderer` in
-  `wasm_frontend/src/drivers/browser.rs`.
+- **New renderer strategy** — add a focused pipeline under
+  `wasm_frontend/src/drivers/webgpu/pipelines/`, give it typed configuration
+  and artifact requirements in `webgpu/config.rs`, then compose it inside the
+  single `WebGpuRenderer` port adapter. Browser surface ownership stays out of
+  the pipeline.
 - **New chunk source** (e.g. a different streaming/caching strategy) —
   implement `ChunkSourcePort` (`wasm_frontend/src/application/ports.rs`); see
   `LocalChunkSource` and `WorkerChunkSource` for the synchronous and

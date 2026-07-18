@@ -7,17 +7,17 @@
 use vackrooms::domain::entities::voxel_grid::{
     EMISSIVE_MATERIALS, VOXEL_AIR, VOXEL_CEILING, VOXEL_LIGHT,
 };
-use wasm_frontend::adapters::cpu_splatter::settings::{CpuRenderSettings, CpuShadowMode};
 use wasm_frontend::adapters::cpu_splatter::atlas::decode_node;
+use wasm_frontend::adapters::cpu_splatter::settings::{CpuRenderSettings, CpuShadowMode};
 use wasm_frontend::adapters::cpu_splatter::surface_geometry::SurfaceFace;
 use wasm_frontend::application::ports::Environment;
 use wasm_frontend::application::render_settings::RenderToggles;
-use wasm_frontend::core::domain::room::{CameraSpec, RoomFixture, RoomScene};
-use wasm_frontend::core::ports::reference_renderer::{ReferenceRenderSettings, RenderedImage};
-use wasm_frontend::core::usecases::build_render_scene::build_render_scene;
-use wasm_frontend::core::usecases::render_reference::render_reference;
 use wasm_frontend::drivers::cpu_reference_renderer::CpuReferenceRenderer;
 use wasm_frontend::drivers::raymarch_reference_renderer::RaymarchReferenceRenderer;
+use wasm_frontend::reference::{
+    CameraSpec, ReferenceRenderSettings, RenderedImage, RoomFixture, RoomScene, build_render_scene,
+    render_reference,
+};
 
 const WIDTH: u32 = 96;
 const HEIGHT: u32 = 64;
@@ -67,7 +67,6 @@ fn reference_settings(fixture: &impl RoomFixture) -> ReferenceRenderSettings {
             distance_cull: false,
             dither: false,
             baked_lighting: true,
-            gpu_timer: false,
         },
         cpu: CpuRenderSettings {
             max_splat_radius_px: 4.0,
@@ -81,7 +80,7 @@ fn reference_settings(fixture: &impl RoomFixture) -> ReferenceRenderSettings {
 #[test]
 fn indoor_misses_use_the_same_fog_radiance_in_both_cpu_references() {
     use wasm_frontend::application::rendering::encode_display_color;
-    use wasm_frontend::core::ports::reference_renderer::RenderSceneSnapshot;
+    use wasm_frontend::reference::RenderSceneSnapshot;
 
     let fixture = SingleCeilingFixture;
     let mut settings = reference_settings(&fixture);
@@ -100,7 +99,12 @@ fn indoor_misses_use_the_same_fog_radiance_in_both_cpu_references() {
         render_reference(&empty, &settings, CpuReferenceRenderer::new()),
         render_reference(&empty, &settings, RaymarchReferenceRenderer::new()),
     ] {
-        assert!(image.rgba.chunks_exact(4).all(|pixel| pixel[..3] == expected));
+        assert!(
+            image
+                .rgba
+                .chunks_exact(4)
+                .all(|pixel| pixel[..3] == expected)
+        );
     }
 }
 
@@ -199,8 +203,8 @@ fn assert_lit_room(renderer: &str, image: &RenderedImage) {
         }
         let x = index % image.width as usize;
         let y = index / image.width as usize;
-        let luminance = ((u16::from(pixel[0]) + u16::from(pixel[1]) + u16::from(pixel[2])) / 3)
-            as u8;
+        let luminance =
+            ((u16::from(pixel[0]) + u16::from(pixel[1]) + u16::from(pixel[2])) / 3) as u8;
         if luminance > brightest.0 {
             brightest = (luminance, index, [pixel[0], pixel[1], pixel[2]]);
         }

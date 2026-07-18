@@ -1,6 +1,6 @@
 use crate::domain::entities::sparse_voxel_octree::{SparseVoxelOctree, SvoNode};
 
-/// Represents SVO flattened data formatted for direct WebGL2 texture upload.
+/// Represents row-padded SVO data ready for renderer storage upload.
 #[derive(Debug, Clone)]
 pub struct OctreeGpuData {
     pub texture_width: u32,
@@ -8,10 +8,10 @@ pub struct OctreeGpuData {
     pub texel_data: Vec<u32>,
 }
 
-/// GPU Adapter to flatten the Sparse Voxel Octree into a GPU-compatible texture format.
+/// GPU adapter that flattens the sparse voxel octree into four words per node.
 ///
-/// DOCUMENTED ENCODING SCHEME (RGBA32UI texture format):
-/// Each SVO node occupies exactly one texel (4 x 32-bit unsigned integers: R, G, B, A).
+/// DOCUMENTED ENCODING SCHEME (four `u32` lanes, historically RGBA32UI):
+/// Each SVO node occupies exactly four 32-bit unsigned integers: R, G, B, A.
 ///
 /// CHANNEL LAYOUT:
 /// - **R (x):** Node Type Flag
@@ -41,10 +41,11 @@ pub struct OctreeGpuData {
 pub struct OctreeGpuSerializer;
 
 impl OctreeGpuSerializer {
-    /// Serializes SVO nodes into texture-ready data, padding the last row to maintain grid alignment.
+    /// Serializes SVO nodes for upload, padding the last 1024-node row so
+    /// incremental atlas updates retain stable row alignment.
     pub fn serialize_to_gpu_data(octree: &SparseVoxelOctree) -> OctreeGpuData {
         let num_nodes = octree.nodes.len();
-        let texture_width = 1024; // Standard GPU texture row size
+        let texture_width = 1024; // Stable node-row width for partial uploads.
         let total_texels = ((num_nodes + texture_width - 1) / texture_width) * texture_width;
 
         let mut texel_data = Vec::with_capacity(total_texels * 4);
@@ -82,7 +83,7 @@ impl OctreeGpuSerializer {
             }
         }
 
-        // Pad the last row with empty leaves to prevent out-of-bound shader fetches
+        // Pad the final row with canonical air so slot updates stay row-aligned.
         let padded_nodes_count = total_texels - num_nodes;
         for _ in 0..padded_nodes_count {
             texel_data.push(1); // Leaf

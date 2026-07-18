@@ -6,9 +6,8 @@ use crate::adapters::cpu_splatter::shading::{
 };
 use crate::application::ports::{ChunkDraw, Environment, LightSource};
 use crate::application::rendering::encode_display_color;
-use crate::core::ports::reference_renderer::{
-    ReferenceRenderSettings, ReferenceRendererPort, RenderSceneSnapshot, RenderedImage,
-};
+use crate::reference::renderer::{ReferenceRenderSettings, ReferenceRendererPort, RenderedImage};
+use crate::reference::scene::RenderSceneSnapshot;
 
 pub struct RaymarchReferenceRenderer;
 

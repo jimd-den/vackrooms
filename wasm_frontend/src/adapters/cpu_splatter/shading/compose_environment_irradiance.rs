@@ -2,20 +2,18 @@
 //! Neither term owns direct-light, flashlight, emission, or atmosphere math.
 
 use crate::application::ports::Environment;
-use crate::application::rendering::LinearRgb;
+use crate::application::rendering::{
+    CACHED_DIFFUSE_FILL_GAIN, INDOOR_AMBIENT_IRRADIANCE, LinearRgb, OUTDOOR_AMBIENT_IRRADIANCE,
+};
 
 use super::super::settings::CpuRenderSettings;
 use super::SplatSurface;
 
-const CACHED_FILL_GAIN: f32 = 0.12;
-const INDOOR_AMBIENT: LinearRgb = [0.045, 0.040, 0.024];
-const OUTDOOR_AMBIENT: LinearRgb = [0.32, 0.38, 0.48];
-
 pub(super) fn ambient_irradiance(environment: &Environment) -> LinearRgb {
     let base = if environment.outdoor {
-        OUTDOOR_AMBIENT
+        OUTDOOR_AMBIENT_IRRADIANCE
     } else {
-        INDOOR_AMBIENT
+        INDOOR_AMBIENT_IRRADIANCE
     };
     base.map(|channel| channel * environment.ambient_scale.max(0.0))
 }
@@ -36,5 +34,5 @@ pub(super) fn cached_fill_irradiance(
     }
     surface
         .baked_irradiance
-        .map(|channel| (channel / 15.0).clamp(0.0, 1.0) * CACHED_FILL_GAIN)
+        .map(|channel| (channel / 15.0).clamp(0.0, 1.0) * CACHED_DIFFUSE_FILL_GAIN)
 }

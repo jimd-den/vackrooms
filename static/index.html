@@ -6,7 +6,7 @@
     <title>Vackrooms — WASM Voxel Engine</title>
     <!--
         Thin presentation shell. All engine logic — procedural generation,
-        SVO construction, lighting, streaming, physics, WebGL2 raymarching,
+        SVO construction, lighting, streaming, physics, WebGPU rendering,
         touch/mouse/keyboard input — lives in the Rust wasm module loaded at
         the bottom of this file. The JavaScript here only bootstraps the
         module and binds the settings menu to the engine's exported setters.
@@ -15,8 +15,7 @@
                       ?voxel_size=0.1     -> override scene voxel size (validated)
                       ?renderer=splat     -> instanced GPU face splats
                       ?renderer=raymarch  -> fullscreen SVO raymarcher (debug)
-                      ?renderer=cpu       -> CPU microvoxel splatting (no GPU/WebGL;
-                                             also the automatic WebGL2 fallback)
+                      ?renderer=cpu       -> CPU microvoxel splatting, presented by WebGPU
                       (default)           -> low-spec profile, GPU surface meshes
                       ?seed=… ?pillars= ?walls= ?atria= ?lights=
                       ?workers=auto|0|1|2|3|4 -> chunk-generation concurrency
@@ -672,7 +671,7 @@ chunks <b id="hud-chunks">0</b>   svo nodes <b id="hud-nodes">0</b>   scale <b i
                     <option value="surface">GPU surfaces (default)</option>
                     <option value="splat">GPU face splats (microvoxel)</option>
                     <option value="raymarch">GPU SVO raymarcher (debug)</option>
-                    <option value="cpu">CPU splatter (no GPU needed)</option>
+                    <option value="cpu">CPU splatter / WebGPU present</option>
                 </select>
             </div>
             <div class="setting-row">
@@ -732,12 +731,16 @@ chunks <b id="hud-chunks">0</b>   svo nodes <b id="hud-nodes">0</b>   scale <b i
             <div class="settings-group">
                 <h3>Shared traversal</h3>
                 <div class="setting-row inline-switch">
-                    <label for="setting-rt-f2b">Front-to-back ordering</label>
+                    <label for="setting-rt-f2b">CPU / splat / ray front-to-back</label>
                     <input type="checkbox" id="setting-rt-f2b" checked>
                 </div>
                 <div class="setting-row inline-switch">
                     <label for="setting-rt-cull">Conservative chunk culling</label>
                     <input type="checkbox" id="setting-rt-cull" checked>
+                </div>
+                <div class="setting-row inline-switch">
+                    <label for="setting-rt-bake">CPU / raster approximate diffuse fill</label>
+                    <input type="checkbox" id="setting-rt-bake">
                 </div>
             </div>
             <div class="settings-group">
@@ -751,7 +754,7 @@ chunks <b id="hud-chunks">0</b>   svo nodes <b id="hud-nodes">0</b>   scale <b i
                     <input type="checkbox" id="setting-rt-shadows" checked>
                 </div>
                 <div class="setting-row inline-switch">
-                    <label for="setting-rt-cells">Splat cell culling</label>
+                    <label for="setting-rt-cells">Splat CPU cell-range culling</label>
                     <input type="checkbox" id="setting-rt-cells" checked>
                 </div>
                 <div class="setting-row inline-switch">
@@ -761,14 +764,6 @@ chunks <b id="hud-chunks">0</b>   svo nodes <b id="hud-nodes">0</b>   scale <b i
                 <div class="setting-row inline-switch">
                     <label for="setting-rt-dither">Dither and surface grain</label>
                     <input type="checkbox" id="setting-rt-dither" checked>
-                </div>
-                <div class="setting-row inline-switch">
-                    <label for="setting-rt-bake">Surface: approximate voxel diffuse fill</label>
-                    <input type="checkbox" id="setting-rt-bake">
-                </div>
-                <div class="setting-row inline-switch">
-                    <label for="setting-rt-timer">Asynchronous GPU timer</label>
-                    <input type="checkbox" id="setting-rt-timer" checked>
                 </div>
             </div>
         </div>
@@ -823,7 +818,7 @@ chunks <b id="hud-chunks">0</b>   svo nodes <b id="hud-nodes">0</b>   scale <b i
 
         <!-- CPU Renderer Tab -->
         <div id="tab-cpu" class="tab-content" style="display: none;">
-            <p class="hint">The CPU canvas always fills the page. Resolution percentages control its backing pixels per axis; every traversal optimization and flashlight visibility ray remains independently switchable under Optimize.</p>
+            <p class="hint">The CPU-generated image always fills the page through WebGPU presentation. Resolution percentages control its backing pixels per axis; every traversal optimization and flashlight visibility ray remains independently switchable under Optimize.</p>
             <div class="setting-row">
                 <label for="setting-cpu-preset">CPU quality preset</label>
                 <select id="setting-cpu-preset">
@@ -939,7 +934,6 @@ chunks <b id="hud-chunks">0</b>   svo nodes <b id="hud-nodes">0</b>   scale <b i
             cull: true,
             dither: true,
             bake: false,
-            timer: true,
         };
         const CPU_PRESETS = Object.freeze({
             performance: Object.freeze({ id: 0, scale: 0.5, lod: 1.5, splatRadius: 14.0, virtualDepth: 4, mipOccupancy: 0.35, distance: 72, shadows: 'off' }),
@@ -1117,7 +1111,9 @@ chunks <b id="hud-chunks">0</b>   svo nodes <b id="hud-nodes">0</b>   scale <b i
         refreshCpuControls();
 
         // URL parameters overrides (link sharing)
-        $('setting-quality').value = urlParams.get('spec') === 'high' ? 'high' : 'low';
+        $('setting-quality').value = (urlParams.get('spec') || '').toLowerCase() === 'high'
+            ? 'high'
+            : 'low';
         const supportedVoxelSizes = ['0.4', '0.2', '0.1', '0.05'];
         const requestedVoxelSize = Number(urlParams.get('voxel_size'));
         const selectedVoxelSize = supportedVoxelSizes.find(
@@ -1156,7 +1152,7 @@ chunks <b id="hud-chunks">0</b>   svo nodes <b id="hud-nodes">0</b>   scale <b i
             rations: 'rations',
             leveldoors: 'level_doors',
         });
-        const urlRenderer = urlParams.get('renderer');
+        const urlRenderer = (urlParams.get('renderer') || '').toLowerCase();
         $('setting-renderer').value = RENDERERS.includes(urlRenderer) ? urlRenderer : 'surface';
         const FORCED_ANOMALIES = ['pillars', 'blackout', 'pits', 'archway', 'redroom'];
         const urlForced = urlParams.get('force_anomaly');
