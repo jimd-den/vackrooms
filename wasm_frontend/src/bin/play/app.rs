@@ -27,6 +27,8 @@ use vackrooms::use_cases::generate_chunk::GeneratorConfig;
 use vackrooms::use_cases::region_plan::spawn_point;
 use wasm_frontend::adapters::cpu_splatter::CpuRenderSettings;
 use wasm_frontend::adapters::local_chunk_source::LocalChunkSource;
+use wasm_frontend::adapters::section_locator::SectionLocator;
+use wasm_frontend::application::body::PulseSignal;
 use wasm_frontend::application::engine::{Engine, EngineConfig, InputFrame};
 use wasm_frontend::application::player::MoveIntent;
 use wasm_frontend::application::ports::{
@@ -136,9 +138,15 @@ struct State {
     renderer: SharedNativeRenderer,
     engine: Engine,
     input: InputState,
+    locator: SectionLocator,
+    toggles: RenderToggles,
+    seed: u32,
     last_frame: Instant,
     hud_window_start: Instant,
     hud_frames: u32,
+    fps: f32,
+    section: String,
+    show_config: bool,
 }
 
 #[derive(Default)]
@@ -235,9 +243,15 @@ impl ApplicationHandler for App {
             renderer,
             engine,
             input: InputState::default(),
+            locator: SectionLocator::new(self.options.seed, generator),
+            toggles: self.options.toggles,
+            seed: self.options.seed,
             last_frame: Instant::now(),
             hud_window_start: Instant::now(),
             hud_frames: 0,
+            fps: 0.0,
+            section: String::new(),
+            show_config: false,
         });
     }
 
@@ -292,6 +306,28 @@ impl ApplicationHandler for App {
                     PhysicalKey::Code(KeyCode::KeyT) if pressed => {
                         state.input.eat = true;
                     }
+                    PhysicalKey::Code(KeyCode::F1) if pressed => {
+                        state.show_config = !state.show_config;
+                    }
+                    // Live effect-pass switches (the terminal's F1 panel
+                    // documents them). These are per-frame parameters, so
+                    // flipping them needs no pipeline rebuild.
+                    PhysicalKey::Code(KeyCode::F5) if pressed => {
+                        state.toggles.shadow_pass = !state.toggles.shadow_pass;
+                        state.renderer.set_toggles(state.toggles);
+                    }
+                    PhysicalKey::Code(KeyCode::F6) if pressed => {
+                        state.toggles.ambient_occlusion = !state.toggles.ambient_occlusion;
+                        state.renderer.set_toggles(state.toggles);
+                    }
+                    PhysicalKey::Code(KeyCode::F7) if pressed => {
+                        state.toggles.deferred_shading = !state.toggles.deferred_shading;
+                        state.renderer.set_toggles(state.toggles);
+                    }
+                    PhysicalKey::Code(KeyCode::F8) if pressed => {
+                        state.toggles.flashlight_occlusion = !state.toggles.flashlight_occlusion;
+                        state.renderer.set_toggles(state.toggles);
+                    }
                     PhysicalKey::Code(KeyCode::Escape) if pressed => {
                         let _ = state.window.set_cursor_grab(CursorGrabMode::None);
                         state.window.set_cursor_visible(true);
@@ -304,9 +340,24 @@ impl ApplicationHandler for App {
                 let now = Instant::now();
                 let dt = (now - state.last_frame).as_secs_f32().min(0.1);
                 state.last_frame = now;
-                // Last frame's stats feed this frame's HUD: the engine draws
-                // (and presents) inside tick, so the snapshot must be staged
-                // before it runs. One frame of HUD latency is invisible.
+
+                // Slow channels (fps, section locator) refresh once a second.
+                state.hud_frames += 1;
+                let elapsed = now - state.hud_window_start;
+                if elapsed.as_secs_f32() >= 1.0 {
+                    state.fps = state.hud_frames as f32 / elapsed.as_secs_f32();
+                    state.hud_frames = 0;
+                    state.hud_window_start = now;
+                    let (level, pos) = {
+                        let player = state.engine.player();
+                        (state.engine.level(), player.position)
+                    };
+                    state.section = state.locator.describe(level, pos[0], pos[2]);
+                }
+
+                // Last frame's stats feed this frame's terminal: the engine
+                // draws (and presents) inside tick, so the snapshot must be
+                // staged before it runs. One frame of latency is invisible.
                 let stats = state.engine.stats();
                 state.renderer.set_hud(HudSnapshot {
                     hydration: stats.hydration,
@@ -316,30 +367,22 @@ impl ApplicationHandler for App {
                     rations: stats.rations,
                     ready: stats.ready,
                     flashlight: state.input.flashlight,
+                    fps: state.fps,
+                    fine_chunks: stats.fine_chunks,
+                    resident_chunks: stats.resident_chunks,
+                    atlas_nodes: stats.atlas_nodes,
+                    bpm: stats.body.bpm,
+                    signal: stats.body.signal,
+                    section: state.section.clone(),
+                    distance_m: stats.distance_m,
+                    ambient_c: stats.ambient_c,
+                    deaths: stats.deaths,
+                    seed: state.seed,
+                    show_config: state.show_config,
+                    toggles: state.toggles,
                 });
                 let frame_input = state.input.take_frame();
                 state.engine.tick(dt, &frame_input);
-
-                // Minimal HUD in the title bar, once a second.
-                state.hud_frames += 1;
-                let elapsed = now - state.hud_window_start;
-                if elapsed.as_secs_f32() >= 1.0 {
-                    let fps = state.hud_frames as f32 / elapsed.as_secs_f32();
-                    state.hud_frames = 0;
-                    state.hud_window_start = now;
-                    let stats = state.engine.stats();
-                    state.window.set_title(&format!(
-                        "Vackrooms — {:.0} fps | chunks {}/{} | hyd {:.0}% sat {:.0}% | {:.0}°C | {}水 {}食",
-                        fps,
-                        stats.fine_chunks,
-                        stats.resident_chunks,
-                        stats.hydration * 100.0,
-                        stats.satiety * 100.0,
-                        stats.ambient_c,
-                        stats.almond_bottles,
-                        stats.rations,
-                    ));
-                }
                 state.window.request_redraw();
             }
             _ => {}
@@ -371,8 +414,8 @@ enum Strategy {
     Cpu(CpuPresentPipeline),
 }
 
-/// Presenter-side HUD state, staged once per frame by the event loop.
-#[derive(Default, Clone, Copy)]
+/// Presenter-side terminal state, staged once per frame by the event loop.
+#[derive(Clone)]
 struct HudSnapshot {
     hydration: f32,
     satiety: f32,
@@ -381,6 +424,46 @@ struct HudSnapshot {
     rations: u32,
     ready: bool,
     flashlight: bool,
+    fps: f32,
+    fine_chunks: usize,
+    resident_chunks: usize,
+    atlas_nodes: usize,
+    bpm: f32,
+    signal: PulseSignal,
+    section: String,
+    distance_m: f32,
+    ambient_c: f32,
+    deaths: u32,
+    seed: u32,
+    show_config: bool,
+    toggles: RenderToggles,
+}
+
+impl Default for HudSnapshot {
+    fn default() -> Self {
+        Self {
+            hydration: 0.0,
+            satiety: 0.0,
+            condition: 0.0,
+            almond_bottles: 0,
+            rations: 0,
+            ready: false,
+            flashlight: false,
+            fps: 0.0,
+            fine_chunks: 0,
+            resident_chunks: 0,
+            atlas_nodes: 0,
+            bpm: 0.0,
+            signal: PulseSignal::Quiet,
+            section: String::new(),
+            distance_m: 0.0,
+            ambient_c: 0.0,
+            deaths: 0,
+            seed: 0,
+            show_config: false,
+            toggles: RenderToggles::default(),
+        }
+    }
 }
 
 struct NativeRenderer {
@@ -395,7 +478,7 @@ struct NativeRenderer {
     profile: RendererProfile,
     toggles: RenderToggles,
     depth_view: wgpu::TextureView,
-    hud: HudOverlay,
+    terminal: crate::terminal::FieldTerminal,
     hud_snapshot: HudSnapshot,
 }
 
@@ -502,7 +585,7 @@ impl NativeRenderer {
         };
         let supply_labels = SupplyLabelPipeline::new(&device, format, frame_resources.layout());
         let depth_view = create_depth_view(&device, config.width, config.height);
-        let hud = HudOverlay::new(&device, format);
+        let terminal = crate::terminal::FieldTerminal::new(&device, &queue, format);
         Self {
             _instance: instance,
             surface,
@@ -515,7 +598,7 @@ impl NativeRenderer {
             profile,
             toggles,
             depth_view,
-            hud,
+            terminal,
             hud_snapshot: HudSnapshot::default(),
         }
     }
@@ -621,235 +704,20 @@ impl NativeRenderer {
                 frame,
             );
         }
-        self.hud.draw(
-            &self.queue,
-            &mut encoder,
-            &view,
+        let renderer_label = self.profile.renderer().label();
+        draw_field_terminal(
+            &mut self.terminal,
             &self.hud_snapshot,
+            renderer_label,
             self.config.width,
             self.config.height,
         );
+        self.terminal.draw(&self.queue, &mut encoder, &view);
         self.queue.submit([encoder.finish()]);
         self.queue.present(surface_texture);
     }
 }
 
-// ---------------------------------------------------------------------------
-// HUD overlay: the native stand-in for the browser's DOM field terminal.
-// Flat alpha-blended quads — vitals bars, supply pips, flashlight tick,
-// crosshair, and a dimming plate while the spawn chunk streams in.
-// ---------------------------------------------------------------------------
-
-const HUD_SHADER: &str = r#"
-struct VsOut {
-    @builtin(position) position: vec4<f32>,
-    @location(0) color: vec4<f32>,
-};
-
-@vertex
-fn hud_vertex(@location(0) pos: vec2<f32>, @location(1) color: vec4<f32>) -> VsOut {
-    var out: VsOut;
-    out.position = vec4<f32>(pos, 0.0, 1.0);
-    out.color = color;
-    return out;
-}
-
-@fragment
-fn hud_fragment(in: VsOut) -> @location(0) vec4<f32> {
-    return in.color;
-}
-"#;
-
-#[repr(C)]
-#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
-struct HudVertex {
-    pos: [f32; 2],
-    color: [f32; 4],
-}
-
-/// Enough for the loading plate, bars, pips, and crosshair, with headroom.
-const HUD_VERTEX_CAPACITY: usize = 1024;
-
-struct HudOverlay {
-    pipeline: wgpu::RenderPipeline,
-    vertices: wgpu::Buffer,
-}
-
-impl HudOverlay {
-    fn new(device: &wgpu::Device, target_format: wgpu::TextureFormat) -> Self {
-        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("native.hud.shader"),
-            source: wgpu::ShaderSource::Wgsl(HUD_SHADER.into()),
-        });
-        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("native.hud.pipeline-layout"),
-            bind_group_layouts: &[],
-            immediate_size: 0,
-        });
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("native.hud.pipeline"),
-            layout: Some(&pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some("hud_vertex"),
-                compilation_options: Default::default(),
-                buffers: &[Some(wgpu::VertexBufferLayout {
-                    array_stride: size_of::<HudVertex>() as u64,
-                    step_mode: wgpu::VertexStepMode::Vertex,
-                    attributes: &wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x4],
-                })],
-            },
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                cull_mode: None,
-                ..Default::default()
-            },
-            depth_stencil: None,
-            multisample: Default::default(),
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("hud_fragment"),
-                compilation_options: Default::default(),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: target_format,
-                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-            }),
-            multiview_mask: None,
-            cache: None,
-        });
-        let vertices = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("native.hud.vertices"),
-            size: (HUD_VERTEX_CAPACITY * size_of::<HudVertex>()) as u64,
-            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        Self { pipeline, vertices }
-    }
-
-    fn draw(
-        &mut self,
-        queue: &wgpu::Queue,
-        encoder: &mut wgpu::CommandEncoder,
-        target: &wgpu::TextureView,
-        snapshot: &HudSnapshot,
-        width: u32,
-        height: u32,
-    ) {
-        let vertices = build_hud_vertices(snapshot, width, height);
-        if vertices.is_empty() {
-            return;
-        }
-        queue.write_buffer(&self.vertices, 0, bytemuck::cast_slice(&vertices));
-        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-            label: Some("native.hud.pass"),
-            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                view: target,
-                depth_slice: None,
-                resolve_target: None,
-                ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Load,
-                    store: wgpu::StoreOp::Store,
-                },
-            })],
-            depth_stencil_attachment: None,
-            ..Default::default()
-        });
-        pass.set_pipeline(&self.pipeline);
-        pass.set_vertex_buffer(0, self.vertices.slice(..));
-        pass.draw(0..vertices.len() as u32, 0..1);
-    }
-}
-
-/// Field-terminal palette on straight alpha. The scene shaders already
-/// encode display color, so these are plain display-space values.
-const HUD_BACKPLATE: [f32; 4] = [0.02, 0.04, 0.02, 0.62];
-const HUD_HYDRATION: [f32; 4] = [0.42, 0.86, 0.94, 0.9];
-const HUD_SATIETY: [f32; 4] = [0.89, 0.75, 0.35, 0.9];
-const HUD_CONDITION: [f32; 4] = [0.91, 0.42, 0.34, 0.9];
-const HUD_PIP_WATER: [f32; 4] = [0.62, 0.86, 0.98, 0.95];
-const HUD_PIP_RATION: [f32; 4] = [0.93, 0.80, 0.45, 0.95];
-const HUD_FLASHLIGHT: [f32; 4] = [0.98, 0.95, 0.75, 0.95];
-const HUD_CROSSHAIR: [f32; 4] = [0.9, 0.9, 0.85, 0.55];
-const HUD_LOADING_PLATE: [f32; 4] = [0.0, 0.0, 0.0, 0.55];
-
-fn build_hud_vertices(snapshot: &HudSnapshot, width: u32, height: u32) -> Vec<HudVertex> {
-    let mut vertices = Vec::with_capacity(HUD_VERTEX_CAPACITY);
-    let width = width.max(1) as f32;
-    let height = height.max(1) as f32;
-    // Pixel-space rect -> NDC quad (two triangles).
-    let mut rect = |x: f32, y: f32, w: f32, h: f32, color: [f32; 4]| {
-        let x0 = x / width * 2.0 - 1.0;
-        let x1 = (x + w) / width * 2.0 - 1.0;
-        let y0 = 1.0 - y / height * 2.0;
-        let y1 = 1.0 - (y + h) / height * 2.0;
-        for pos in [
-            [x0, y0],
-            [x0, y1],
-            [x1, y1],
-            [x0, y0],
-            [x1, y1],
-            [x1, y0],
-        ] {
-            vertices.push(HudVertex { pos, color });
-        }
-    };
-
-    if !snapshot.ready {
-        rect(0.0, 0.0, width, height, HUD_LOADING_PLATE);
-        return vertices;
-    }
-
-    // Vitals: three bars, bottom-left, brightest problem nearest the eye.
-    let bar_w = 180.0;
-    let bar_h = 10.0;
-    let margin = 18.0;
-    let gap = 6.0;
-    let bars = [
-        (snapshot.condition, HUD_CONDITION),
-        (snapshot.satiety, HUD_SATIETY),
-        (snapshot.hydration, HUD_HYDRATION),
-    ];
-    for (index, (value, color)) in bars.iter().enumerate() {
-        let y = height - margin - bar_h - index as f32 * (bar_h + gap);
-        rect(margin - 2.0, y - 2.0, bar_w + 4.0, bar_h + 4.0, HUD_BACKPLATE);
-        rect(margin, y, bar_w * value.clamp(0.0, 1.0), bar_h, *color);
-    }
-
-    // Carried supplies as discrete pips above the bars, water then rations.
-    let pip = 8.0;
-    let pip_gap = 4.0;
-    let pip_row_y = height - margin - 3.0 * (bar_h + gap) - pip - 4.0;
-    for index in 0..snapshot.almond_bottles.min(12) {
-        rect(
-            margin + index as f32 * (pip + pip_gap),
-            pip_row_y,
-            pip,
-            pip,
-            HUD_PIP_WATER,
-        );
-    }
-    for index in 0..snapshot.rations.min(12) {
-        rect(
-            margin + index as f32 * (pip + pip_gap),
-            pip_row_y - pip - pip_gap,
-            pip,
-            pip,
-            HUD_PIP_RATION,
-        );
-    }
-
-    // Flashlight tick, bottom-right.
-    if snapshot.flashlight {
-        rect(width - margin - 26.0, height - margin - 10.0, 26.0, 10.0, HUD_FLASHLIGHT);
-    }
-
-    // Crosshair dot.
-    rect(width * 0.5 - 2.0, height * 0.5 - 2.0, 4.0, 4.0, HUD_CROSSHAIR);
-
-    vertices
-}
 
 fn create_depth_view(device: &wgpu::Device, width: u32, height: u32) -> wgpu::TextureView {
     device
@@ -887,6 +755,181 @@ impl SharedNativeRenderer {
 
     fn set_hud(&self, snapshot: HudSnapshot) {
         self.0.borrow_mut().hud_snapshot = snapshot;
+    }
+
+    /// Live effect-pass switches from the F5–F8 keys; per-frame parameters,
+    /// no pipeline rebuild involved.
+    fn set_toggles(&self, toggles: RenderToggles) {
+        self.0.borrow_mut().toggles = toggles;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Field-terminal layout: the same channels as static/index.html, composed
+// from the shared palette in `terminal`. All coordinates are window pixels.
+// ---------------------------------------------------------------------------
+
+fn draw_field_terminal(
+    terminal: &mut crate::terminal::FieldTerminal,
+    snapshot: &HudSnapshot,
+    renderer_label: &str,
+    width: u32,
+    height: u32,
+) {
+    use crate::terminal::{
+        CRITICAL, HAZARD, INK, LOADING_PLATE, PANEL, QUIET, ROUTE, SYSTEM,
+    };
+    terminal.begin(width, height);
+    let w = width.max(1) as f32;
+    let h = height.max(1) as f32;
+    let px = 16.0;
+    let margin = 18.0;
+
+    if !snapshot.ready {
+        terminal.rect(0.0, 0.0, w, h, LOADING_PLATE);
+        let line = "GENERATING WORLD IN WEBASSEMBLY'S ABSENCE...";
+        let lw = terminal.measure(line, 24.0);
+        terminal.text(line, (w - lw) * 0.5, h * 0.5, 24.0, INK);
+        let seed_line = format!("SEED {}", snapshot.seed);
+        let sw = terminal.measure(&seed_line, px);
+        terminal.text(&seed_line, (w - sw) * 0.5, h * 0.5 + 28.0, px, QUIET);
+        return;
+    }
+
+    // Top-left: renderer / frame channels, key in quiet, value in ink.
+    let mut y = margin + px;
+    let pen = terminal.text("renderer ", margin, y, px, QUIET);
+    let pen = terminal.text(renderer_label, pen, y, px, INK);
+    let pen = terminal.text("   fps ", pen, y, px, QUIET);
+    let pen = terminal.text(&format!("{:.0}", snapshot.fps), pen, y, px, INK);
+    let pen = terminal.text("   frame ", pen, y, px, QUIET);
+    terminal.text("Vulkan", pen, y, px, INK);
+    y += terminal.line_height(px);
+    let pen = terminal.text("chunks ", margin, y, px, QUIET);
+    let pen = terminal.text(
+        &format!("{}/{}", snapshot.fine_chunks, snapshot.resident_chunks),
+        pen,
+        y,
+        px,
+        INK,
+    );
+    let pen = terminal.text("   nodes ", pen, y, px, QUIET);
+    let pen = terminal.text(&format!("{}", snapshot.atlas_nodes), pen, y, px, INK);
+    let pen = terminal.text("   dist ", pen, y, px, QUIET);
+    let pen = terminal.text(&format!("{:.0} m", snapshot.distance_m), pen, y, px, INK);
+    let pen = terminal.text("   amb ", pen, y, px, QUIET);
+    terminal.text(&format!("{:.0} C", snapshot.ambient_c), pen, y, px, INK);
+
+    // Top-right: section locator, right-aligned (the web terminal's
+    // top-right channel).
+    if !snapshot.section.is_empty() {
+        let sw = terminal.measure(&snapshot.section, px);
+        terminal.text(&snapshot.section, w - margin - sw, margin + px, px, QUIET);
+    }
+
+    // Bottom-left: body trace, vitals bars, supply pips.
+    let bar_w = 220.0;
+    let bar_h = 12.0;
+    let gap = 7.0;
+    let bars_top = h - margin - 3.0 * (bar_h + gap) + gap;
+    let signal_color = match snapshot.signal {
+        PulseSignal::Quiet => QUIET,
+        PulseSignal::Active => INK,
+        PulseSignal::Strained => ROUTE,
+        PulseSignal::Critical => HAZARD,
+    };
+    if snapshot.signal != PulseSignal::Quiet {
+        terminal.text(
+            &format!("{:.0} bpm", snapshot.bpm),
+            margin,
+            bars_top - 14.0,
+            px,
+            signal_color,
+        );
+    }
+    let bars = [
+        (snapshot.hydration, SYSTEM, "H2O"),
+        (snapshot.satiety, ROUTE, "RAT"),
+        (snapshot.condition, HAZARD, "BOD"),
+    ];
+    for (index, (value, color, tag)) in bars.iter().enumerate() {
+        let by = bars_top + index as f32 * (bar_h + gap);
+        terminal.text(tag, margin, by + bar_h - 1.0, 16.0, QUIET);
+        let bx = margin + 46.0;
+        terminal.rect(bx - 2.0, by - 2.0, bar_w + 4.0, bar_h + 4.0, PANEL);
+        terminal.rect(bx, by, bar_w * value.clamp(0.0, 1.0), bar_h, *color);
+    }
+    // Discrete supply ticks above the bars, water then rations, like
+    // #supply-rack.
+    let pip = 9.0;
+    let pip_gap = 5.0;
+    let pip_y = bars_top - 34.0;
+    for index in 0..snapshot.almond_bottles.min(12) {
+        terminal.rect(
+            margin + 46.0 + index as f32 * (pip + pip_gap),
+            pip_y,
+            pip,
+            pip,
+            SYSTEM,
+        );
+    }
+    for index in 0..snapshot.rations.min(12) {
+        terminal.rect(
+            margin + 46.0 + index as f32 * (pip + pip_gap),
+            pip_y - pip - pip_gap,
+            pip,
+            pip,
+            ROUTE,
+        );
+    }
+
+    // Bottom-right: torch state and the config-panel hint.
+    let mut right_y = h - margin;
+    let hint = "F1 CONFIG";
+    let hw = terminal.measure(hint, px);
+    terminal.text(hint, w - margin - hw, right_y, px, QUIET);
+    right_y -= terminal.line_height(px);
+    if snapshot.flashlight {
+        let torch = "TORCH ON";
+        let tw = terminal.measure(torch, px);
+        terminal.text(torch, w - margin - tw, right_y, px, ROUTE);
+    }
+    if snapshot.deaths > 0 {
+        let text = format!("SUCCUMBED x{}", snapshot.deaths);
+        let tw = terminal.measure(&text, px);
+        terminal.text(&text, w - margin - tw, right_y - terminal.line_height(px), px, HAZARD);
+    }
+
+    // Center mark: single restrained fixation point (see #reticle).
+    terminal.rect(w * 0.5 - 2.0, h * 0.5 - 2.0, 4.0, 4.0, [0.9, 0.9, 0.85, 0.55]);
+
+    // F1: configuration panel — the native stand-in for the settings menu,
+    // documenting the flags and live switches.
+    if snapshot.show_config {
+        let pw = 560.0_f32.min(w - 2.0 * margin);
+        let ph = 330.0_f32.min(h - 2.0 * margin);
+        let px0 = (w - pw) * 0.5;
+        let py0 = (h - ph) * 0.5;
+        terminal.rect(px0, py0, pw, ph, [0.027, 0.039, 0.031, 0.92]);
+        let mut ly = py0 + 34.0;
+        let lx = px0 + 24.0;
+        terminal.text("CONFIGURATION - FIELD TERMINAL", lx, ly, px, CRITICAL);
+        ly += terminal.line_height(px) * 1.5;
+        let on_off = |on: bool| if on { "ON" } else { "OFF" };
+        let rows: Vec<(String, [f32; 4])> = vec![
+            (format!("RENDERER   {renderer_label}   (--renderer=surface|splat|raymarch|cpu)"), INK),
+            (format!("SEED       {}   (--seed=N reproduces this world)", snapshot.seed), INK),
+            (format!("F5 SHADOWS          {}", on_off(snapshot.toggles.shadow_pass)), SYSTEM),
+            (format!("F6 AMBIENT OCCL.    {}", on_off(snapshot.toggles.ambient_occlusion)), SYSTEM),
+            (format!("F7 DEFERRED SHADING {}", on_off(snapshot.toggles.deferred_shading)), SYSTEM),
+            (format!("F8 TORCH OCCLUSION  {}", on_off(snapshot.toggles.flashlight_occlusion)), SYSTEM),
+            ("WASD MOVE   MOUSE LOOK   F TORCH   G FLARE".to_owned(), QUIET),
+            ("R DRINK     T EAT        ESC RELEASE MOUSE".to_owned(), QUIET),
+        ];
+        for (row, color) in rows {
+            terminal.text(&row, lx, ly, px, color);
+            ly += terminal.line_height(px) * 1.15;
+        }
     }
 }
 

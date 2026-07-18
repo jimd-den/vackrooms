@@ -40,6 +40,8 @@ vackrooms = { path = ".." }
 wgpu = { version = "30.0", default-features = false, features = ["std", "vulkan", "wgsl"] }
 winit = "0.30"
 pollster = "1.0"
+# Rasterizes the vendored Bytesized face into the native HUD glyph atlas.
+fontdue = "0.9"
 
 # Browser bindings are wasm-only so `cargo test` on the host runs the pure
 # application/adapters layers without pulling in web-sys.
