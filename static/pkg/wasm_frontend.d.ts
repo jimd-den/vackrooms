@@ -123,10 +123,6 @@ export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembl
 
 export interface InitOutput {
     readonly memory: WebAssembly.Memory;
-    readonly start: () => void;
-    readonly worker_generate: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number];
-    readonly worker_init: (a: number, b: number, c: number) => void;
-    readonly set_fov: (a: number) => void;
     readonly get_blueprint_svg: (a: number, b: number, c: number, d: number, e: number) => [number, number];
     readonly get_chunk_blueprint_svg: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number];
     readonly get_chunk_voxel_blueprint_svg: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number];
@@ -150,6 +146,10 @@ export interface InitOutput {
     readonly set_cpu_max_draw_distance: (a: number) => void;
     readonly set_render_scale: (a: number) => void;
     readonly set_cpu_shadows: (a: number) => void;
+    readonly set_fov: (a: number) => void;
+    readonly start: () => void;
+    readonly worker_generate: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number];
+    readonly worker_init: (a: number, b: number, c: number) => void;
     readonly wasm_bindgen__convert__closures_____invoke__hcf2dc0847d43bad1: (a: number, b: number, c: number) => void;
     readonly wasm_bindgen__convert__closures_____invoke__h2e918718a0f885a1: (a: number, b: number, c: any) => [number, number];
     readonly wasm_bindgen__convert__closures_____invoke__h23b23d164aa1ea98: (a: number, b: number, c: any) => [number, number];

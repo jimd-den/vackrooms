@@ -1,0 +1,24 @@
+<!doctype html>
+<title>webgpu minimal probe</title>
+<canvas id="c" width="64" height="64"></canvas>
+<script type="module">
+  const log = (...a) => console.log('[probe]', ...a);
+  try {
+    log('navigator.gpu:', !!navigator.gpu);
+    if (!navigator.gpu) throw new Error('no navigator.gpu');
+    const adapter = await navigator.gpu.requestAdapter();
+    log('adapter:', adapter ? 'ok' : 'null');
+    if (!adapter) throw new Error('null adapter');
+    const device = await adapter.requestDevice();
+    log('device: ok');
+    const ctx = document.getElementById('c').getContext('webgpu');
+    log('getContext(webgpu):', ctx ? 'ok' : 'null');
+    if (!ctx) throw new Error('null context');
+    const format = navigator.gpu.getPreferredCanvasFormat();
+    log('preferred format:', format);
+    ctx.configure({ device, format, alphaMode: 'opaque' });
+    log('configure: ok — showcase-style init SUCCEEDED');
+  } catch (e) {
+    log('FAILED:', e.message);
+  }
+</script>

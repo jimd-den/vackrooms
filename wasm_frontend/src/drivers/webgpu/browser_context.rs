@@ -29,21 +29,42 @@ impl BrowserGpuContext {
         let surface = instance
             .create_surface(wgpu::SurfaceTarget::Canvas(canvas.clone()))
             .map_err(js_error)?;
-        let adapter = instance
-            .request_adapter(&wgpu::RequestAdapterOptions {
-                power_preference: wgpu::PowerPreference::HighPerformance,
-                compatible_surface: Some(&surface),
-                force_fallback_adapter: false,
-                apply_limit_buckets: true,
-            })
-            .await
-            .map_err(js_error)?;
+        // Adapter ladder, mirroring the portable pattern the WebGPU samples
+        // use: default options first (mobile browsers can return null for a
+        // high-performance request that a plain one satisfies), then the
+        // software fallback adapter rather than no engine at all.
+        let default_options = wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::None,
+            compatible_surface: Some(&surface),
+            force_fallback_adapter: false,
+            apply_limit_buckets: true,
+        };
+        let adapter = match instance.request_adapter(&default_options).await {
+            Ok(adapter) => adapter,
+            Err(primary_error) => instance
+                .request_adapter(&wgpu::RequestAdapterOptions {
+                    force_fallback_adapter: true,
+                    ..default_options
+                })
+                .await
+                .map_err(|fallback_error| {
+                    js_error(format!(
+                        "no WebGPU adapter: {primary_error}; fallback adapter: {fallback_error}"
+                    ))
+                })?,
+        };
         let adapter_info = adapter.get_info();
+        // Never request more than the adapter reports: desktop-default
+        // limits make `requestDevice` reject outright on mobile GPUs. Any
+        // pipeline that truly needs more than the clamped budget fails with
+        // a specific validation error instead.
+        let required_limits =
+            wgpu::Limits::default().or_worse_values_from(&adapter.limits());
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
                 label: Some("vackrooms-webgpu-device"),
                 required_features: wgpu::Features::empty(),
-                required_limits: wgpu::Limits::default(),
+                required_limits,
                 experimental_features: wgpu::ExperimentalFeatures::disabled(),
                 memory_hints: wgpu::MemoryHints::MemoryUsage,
                 trace: wgpu::Trace::Off,
