@@ -89,3 +89,5 @@ web-sys = { version = "0.3", features = [
 
 [dev-dependencies]
 pollster = "1.0"
+# Parallel pixel loops for the path-traced reference example.
+rayon = "1.10"
