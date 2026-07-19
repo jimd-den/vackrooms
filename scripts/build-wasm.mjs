@@ -48,6 +48,11 @@ try {
 
   await writeFile(join(staging, '.source-sha256'), `${await wasmSourceHash(root)}\n`);
 
+  // wasm-pack emits a `.gitignore` containing `*`, meant for pkg dirs that
+  // are build output. This repo deliberately tracks static/pkg (including
+  // the freshness stamp CI verifies), so that file must not survive.
+  await rm(join(staging, '.gitignore'), { force: true });
+
   for (const entry of await readdir(staging, { withFileTypes: true })) {
     await cp(join(staging, entry.name), join(replacement, entry.name), {
       force: true,
