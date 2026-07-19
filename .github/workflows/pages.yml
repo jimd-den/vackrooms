@@ -32,6 +32,13 @@ jobs:
       - name: Build wasm front end
         run: npm run build:wasm
 
+      # The whole app packed into one self-contained page, published as
+      # /vackrooms.html next to the multi-file site (which stays the root).
+      - name: Bundle single-file build
+        run: |
+          node scripts/build-single-file.mjs
+          cp dist/vackrooms.html static/vackrooms.html
+
       - uses: actions/configure-pages@v5
 
       - uses: actions/upload-pages-artifact@v3
