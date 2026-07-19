@@ -49,8 +49,12 @@
                multiples so the grid stays crisp. Fallbacks keep the
                terminal legible when the font is unreachable offline. */
             --mono: "Bytesized", "Consolas", "Menlo", "DejaVu Sans Mono", monospace;
+            /* Dense reading surfaces (the settings menu) use a normal
+               monospace, not the pixel face. */
+            --ui: "Consolas", "Menlo", "DejaVu Sans Mono", monospace;
             --fs: clamp(16px, 0.9vw + 12px, 24px);
             --fs-small: clamp(16px, 0.7vw + 11px, 20px);
+            --fs-ui: clamp(13px, 0.4vw + 11px, 15px);
         }
         html, body {
             margin: 0;
@@ -379,6 +383,11 @@
         #settings-btn:hover { border-color: var(--ink); color: var(--critical); }
 
         /* ---- Settings: maintenance parameters --------------------------- */
+        #settings-menu,
+        #settings-menu * {
+            font-family: var(--ui);
+            font-size: var(--fs-ui);
+        }
         #settings-menu {
             display: none;
             position: absolute;
