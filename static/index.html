@@ -36,8 +36,8 @@
            signal relevant. No scanlines, no phosphor, no glow by default.
            ------------------------------------------------------------------ */
         :root {
-            --ink: #d5dbd0;        /* neutral readable signal */
-            --quiet: #7f8b82;      /* dormant structure */
+            --ink: #ffffff;        /* primary readable signal: plain white */
+            --quiet: #b4b4b4;      /* dormant structure: neutral grey */
             --route: #d7bd70;      /* viable route / architectural direction */
             --system: #7caeaa;     /* stable technical signal */
             --hazard: #d45a4c;     /* danger only */
@@ -78,8 +78,8 @@
             image-rendering: pixelated;
             touch-action: none;
         }
-        /* Legibility over dark scenes without panel backings. */
-        .etch { text-shadow: 0 1px 2px rgba(0, 0, 0, 0.9), 0 0 1px rgba(0, 0, 0, 0.9); }
+        /* Plain text over the scene: no shadows, no etching. */
+        .etch { text-shadow: none; }
 
         /* Partial corner brackets instead of complete boxes. */
         .bracket { position: relative; }

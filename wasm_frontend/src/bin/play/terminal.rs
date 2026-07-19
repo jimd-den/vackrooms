@@ -10,8 +10,8 @@
 use std::collections::HashMap;
 
 // ---- Palette: static/index.html :root tokens, RGBA on straight alpha. ----
-pub const INK: [f32; 4] = [0.835, 0.859, 0.816, 1.0];
-pub const QUIET: [f32; 4] = [0.498, 0.545, 0.510, 1.0];
+pub const INK: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
+pub const QUIET: [f32; 4] = [0.706, 0.706, 0.706, 1.0];
 pub const ROUTE: [f32; 4] = [0.843, 0.741, 0.439, 1.0];
 pub const SYSTEM: [f32; 4] = [0.486, 0.682, 0.667, 1.0];
 pub const HAZARD: [f32; 4] = [0.831, 0.353, 0.298, 1.0];
