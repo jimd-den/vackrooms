@@ -1082,6 +1082,22 @@ chunks <b id="hud-chunks">0</b>   svo nodes <b id="hud-nodes">0</b>   scale <b i
                 `${window.location.pathname}${query ? `?${query}` : ''}${window.location.hash}`,
             );
         }
+        // Every start explores a fresh world — including plain reloads. The
+        // rolled seed must still be stamped into the URL before `init()` so
+        // the Rust composition root and every generation worker agree on one
+        // world; `auto_seed=1` marks it as rolled, so the next load rerolls
+        // instead of revisiting. An explicit ?seed= (typed or from a copied
+        // link, which never includes auto_seed) stays an exact reproduction.
+        if (!urlParams.has('seed') || urlParams.get('auto_seed') === '1') {
+            const rolled = crypto.getRandomValues(new Uint32Array(1))[0];
+            urlParams.set('seed', String(rolled));
+            urlParams.set('auto_seed', '1');
+            history.replaceState(
+                null,
+                '',
+                `${window.location.pathname}?${urlParams.toString()}${window.location.hash}`,
+            );
+        }
         const parseToggle = (value, fallback) => {
             if (['0', 'false', 'off'].includes(value)) return false;
             if (['1', 'true', 'on'].includes(value)) return true;
