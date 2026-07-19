@@ -388,17 +388,21 @@
             font-family: var(--ui);
             font-size: var(--fs-ui);
         }
+        /* Full-screen configuration surface on every device. Content sits
+           in a centered readable column; padding respects notches and home
+           indicators on phones. */
         #settings-menu {
             display: none;
-            position: absolute;
-            top: 50%;
-            left: 50%;
-            transform: translate(-50%, -50%);
+            position: fixed;
+            inset: 0;
             background: var(--panel-solid);
-            border: 1px solid var(--hairline);
-            padding: 18px 22px;
-            width: min(460px, calc(100vw - 32px));
-            max-height: min(90vh, 660px);
+            border: none;
+            box-sizing: border-box;
+            padding:
+                calc(20px + env(safe-area-inset-top, 0px))
+                calc(24px + env(safe-area-inset-right, 0px))
+                calc(24px + env(safe-area-inset-bottom, 0px))
+                calc(24px + env(safe-area-inset-left, 0px));
             overflow-y: auto;
             z-index: 20;
             color: var(--ink);
@@ -406,8 +410,13 @@
             cursor: default;
             touch-action: pan-y;   /* the menu itself may scroll */
         }
+        #settings-menu > * {
+            max-width: 760px;
+            margin-left: auto;
+            margin-right: auto;
+        }
         #settings-menu h2 {
-            margin: 0 0 12px;
+            margin: 0 auto 12px;
             color: var(--ink);
             font-size: var(--fs-small);
             font-weight: normal;
