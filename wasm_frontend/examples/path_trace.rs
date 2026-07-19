@@ -14,8 +14,9 @@
 //! SEED=7 SPP=512 SIZE=960x540 cargo run -p wasm_frontend --example path_trace --release
 //! ```
 //!
-//! Env knobs: `SEED` (default random — a new scene every run), `SIZE`
-//! (`WxH`, default 640x360), `SPP` (samples per pixel, default 128),
+//! Env knobs: `SEED` (default random — a new scene every run), `RADIUS`
+//! (chunk rings around spawn: 1 → 3x3 chunks, 2 → 5x5, …; default 1),
+//! `SIZE` (`WxH`, default 640x360), `SPP` (samples per pixel, default 128),
 //! `BOUNCES` (default 6), `EXPOSURE` (default 1.4). Output lands in
 //! `target/path-traces/seed-<seed>.png`.
 
@@ -46,6 +47,7 @@ fn main() {
         .and_then(|value| value.parse().ok())
         .unwrap_or_else(random_seed);
     let (width, height) = parse_size();
+    let radius: i32 = env_number("RADIUS", 1).clamp(0, 8) as i32;
     let spp: u32 = env_number("SPP", 128);
     let bounces: u32 = env_number("BOUNCES", 6);
     let exposure: f32 = std::env::var("EXPOSURE")
@@ -53,16 +55,19 @@ fn main() {
         .and_then(|value| value.parse().ok())
         .unwrap_or(1.4);
 
-    let scene = load_scene(seed);
+    let scene = load_scene(seed, radius);
     eprintln!(
-        "scene: seed {seed}, {} chunks, {} atlas words | {width}x{height}, {spp} spp, {bounces} bounces",
+        "scene: seed {seed}, {} chunks (radius {radius}), {} lights, {} atlas words | {width}x{height}, {spp} spp, {bounces} bounces",
         scene.chunks.len(),
+        scene.lights.len(),
         scene.atlas.len(),
     );
 
     let start = Instant::now();
     let camera = Camera::at_spawn(seed, width, height);
     let mut pixels = vec![0u8; (width * height * 3) as usize];
+    let rows_done = std::sync::atomic::AtomicUsize::new(0);
+    let report_every = (height as usize / 50).max(1);
     pixels
         .par_chunks_mut((width * 3) as usize)
         .enumerate()
@@ -85,8 +90,21 @@ fn main() {
                     out[column * 3 + axis] = (mapped.clamp(0.0, 1.0).powf(1.0 / 2.2) * 255.0) as u8;
                 }
             }
+            // Row-level progress on one rewritten terminal line: percent,
+            // rows, elapsed, and a remaining-time estimate.
+            let done = rows_done.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+            if done % report_every == 0 || done == height as usize {
+                let elapsed = start.elapsed().as_secs_f32();
+                let fraction = done as f32 / height as f32;
+                let remaining = elapsed / fraction - elapsed;
+                eprint!(
+                    "\rtracing {:>3.0}%  ({done}/{} rows, {elapsed:.0}s elapsed, ~{remaining:.0}s left)   ",
+                    fraction * 100.0,
+                    height,
+                );
+            }
         });
-    eprintln!("traced in {:.1}s", start.elapsed().as_secs_f32());
+    eprintln!("\ntraced in {:.1}s", start.elapsed().as_secs_f32());
 
     let out_dir = PathBuf::from("target/path-traces");
     fs::create_dir_all(&out_dir).expect("create output directory");
@@ -111,7 +129,7 @@ struct Scene {
     voxel_size: f32,
 }
 
-fn load_scene(seed: u32) -> Scene {
+fn load_scene(seed: u32, radius: i32) -> Scene {
     let config = GeneratorConfig::low_spec();
     let spawn = spawn_point(seed);
     let origin_x = (spawn.x / config.chunk_size).floor() * config.chunk_size;
@@ -119,8 +137,8 @@ fn load_scene(seed: u32) -> Scene {
     let source = LocalChunkSource::new(SimpleNoiseProvider::new(), seed, config);
 
     let mut payloads = Vec::new();
-    for dz in -1..=1 {
-        for dx in -1..=1 {
+    for dz in -radius..=radius {
+        for dx in -radius..=radius {
             let x = origin_x + dx as f32 * config.chunk_size;
             let z = origin_z + dz as f32 * config.chunk_size;
             payloads.push((x, z, source.load(x, z, 0, 0)));
