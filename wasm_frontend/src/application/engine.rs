@@ -9,6 +9,7 @@
 use std::collections::{HashMap, HashSet};
 
 mod noclip;
+mod peripheral_shift;
 mod presenter;
 mod route;
 
@@ -18,7 +19,7 @@ use crate::application::atlas::{AtlasPool, MAX_CHUNKS, payload_rows};
 use crate::application::body::{Body, BodyContext, BodyReadout};
 use crate::application::collision::{CollisionWorld, player_aabb};
 use crate::application::flares::FlareField;
-use crate::application::navigation::{RouteTarget, range_m};
+use crate::application::navigation::RouteTarget;
 use crate::application::player::{MoveIntent, Player};
 use crate::application::ports::{
     ChunkDraw, ChunkRequest, ChunkSourcePort, CompletedChunk, Environment, FrameParams,
@@ -30,10 +31,7 @@ use crate::application::streaming::{
 };
 use crate::application::survival_inventory::{ConsumptionIntent, SurvivalInventory};
 use crate::application::thermal;
-use vackrooms::domain::entities::anomaly::{
-    AnomalyKind, FABRIC_DRIFT_CELL, RealitySnapshot, TraversalGateKind, WorldBounds,
-    fabric_drift_cell_of,
-};
+use vackrooms::domain::entities::anomaly::{AnomalyKind, RealitySnapshot, TraversalGateKind};
 use vackrooms::domain::entities::player_vitals::PlayerVitals;
 use vackrooms::domain::entities::supplies::SupplyKind;
 
@@ -379,13 +377,7 @@ impl Engine {
         self.push_seconds = 0.0;
         // Flares are world objects of the level they were lit in.
         self.flares.clear();
-        // Leaving the level unobserves everything at once: every tracked
-        // drift cell rearranges, so phasing out and back never returns the
-        // wanderer to the hallways they left.
-        let watched: Vec<(i64, i64)> = self.drift_near.drain().collect();
-        for (cx, cz) in watched {
-            self.reality = self.reality.with_fabric_drift_advanced(cx, cz);
-        }
+        self.abandon_all_watched_drift_cells();
         if let Some(arrival) = arrival {
             self.player.relocate(arrival);
         }
@@ -754,163 +746,6 @@ impl Engine {
     /// Accessibility option: automatic consumption of carried supplies.
     pub fn set_assisted_consumption(&mut self, enabled: bool) {
         self.survival.set_assisted_consumption(enabled);
-    }
-
-    /// Squared distance from a point to a drift cell's world rectangle
-    /// (0 inside the cell).
-    fn drift_cell_dist2(cell: (i64, i64), px: f32, pz: f32) -> f32 {
-        let x0 = cell.0 as f32 * FABRIC_DRIFT_CELL;
-        let z0 = cell.1 as f32 * FABRIC_DRIFT_CELL;
-        let dx = (x0 - px).max(px - (x0 + FABRIC_DRIFT_CELL)).max(0.0);
-        let dz = (z0 - pz).max(pz - (z0 + FABRIC_DRIFT_CELL)).max(0.0);
-        dx * dx + dz * dz
-    }
-
-    /// Every drift cell any resident chunk could touch counts as observed.
-    /// The far radius adds hysteresis of a couple of cells, so a cell only
-    /// drifts once the player has genuinely abandoned it.
-    fn drift_near_radius(&self) -> f32 {
-        (self.visual_policy.radius as f32 + 1.0) * self.config.chunk_size
-    }
-
-    fn drift_far_radius(&self) -> f32 {
-        // A mismanaging wanderer loses the hysteresis: the fabric rearranges
-        // almost the moment it leaves the streaming footprint.
-        self.drift_near_radius()
-            + 2.0 * FABRIC_DRIFT_CELL * (1.0 - 0.85 * self.survival.mismanagement())
-    }
-
-    /// The Peripheral Shift: "whenever not directly observed, the layout can
-    /// warp, stretch, or rearrange itself."
-    ///
-    /// Tier 1 — abandoned territory. Cells the player walks near are marked;
-    /// when one falls beyond the far radius every chunk of it has long been
-    /// evicted, its drift epoch advances, and whatever streams back in later
-    /// is a lawfully different warren (corridors, assemblies, and anomalies
-    /// never move — navigation survives; hallway memory does not).
-    ///
-    /// Tier 2 — inside a blackout the shift stalks the player in real time:
-    /// on a slow cadence, cells that lie entirely behind the player's facing,
-    /// beyond what any light could reveal, and fully inside the blackout's
-    /// bounds advance immediately and their resident chunks rebuild. The
-    /// darkness hides the swap; turning around is never a way back.
-    fn update_peripheral_shift(&mut self, dt: f32) {
-        if self.level != LEVEL_BACKROOMS {
-            return;
-        }
-        let (px, pz) = (self.player.position[0], self.player.position[2]);
-
-        // -- tier 1: mark near cells, drift abandoned ones -------------------
-        let near = self.drift_near_radius();
-        let min_cx = fabric_drift_cell_of(px - near);
-        let max_cx = fabric_drift_cell_of(px + near);
-        let min_cz = fabric_drift_cell_of(pz - near);
-        let max_cz = fabric_drift_cell_of(pz + near);
-        for cz in min_cz..=max_cz {
-            for cx in min_cx..=max_cx {
-                if Self::drift_cell_dist2((cx, cz), px, pz) <= near * near {
-                    self.drift_near.insert((cx, cz));
-                }
-            }
-        }
-        let far2 = self.drift_far_radius() * self.drift_far_radius();
-        let abandoned: Vec<(i64, i64)> = self
-            .drift_near
-            .iter()
-            .copied()
-            .filter(|&cell| Self::drift_cell_dist2(cell, px, pz) > far2)
-            .collect();
-        for cell in abandoned {
-            self.drift_near.remove(&cell);
-            self.reality = self.reality.with_fabric_drift_advanced(cell.0, cell.1);
-        }
-
-        // -- tier 2: the blackout rearranges behind the player ---------------
-        self.blackout_shift_cooldown = (self.blackout_shift_cooldown - dt).max(0.0);
-        let blackout_bounds = self
-            .store
-            .all_traversal_gates()
-            .find(|gate| {
-                gate.anomaly_kind == AnomalyKind::BlackoutExpanse
-                    && gate.affected_bounds.contains(px, pz)
-            })
-            .map(|gate| gate.affected_bounds);
-        let Some(bounds) = blackout_bounds else {
-            self.blackout_shift_debug.0 = false;
-            return;
-        };
-        self.blackout_shift_debug.0 = true;
-        if self.blackout_shift_cooldown > 0.0 {
-            return;
-        }
-        let forward = self.player.forward();
-        // The rear shift reaches past the streaming footprint on purpose:
-        // cells it advances beyond residency simply rebuild on approach,
-        // exactly like tier-1 drift.
-        let reach = self.drift_near_radius().max(3.0 * FABRIC_DRIFT_CELL);
-        let mut shifted = Vec::new();
-        for cz in fabric_drift_cell_of(pz - reach)..=fabric_drift_cell_of(pz + reach) {
-            for cx in fabric_drift_cell_of(px - reach)..=fabric_drift_cell_of(px + reach) {
-                let cx_w = (cx as f32 + 0.5) * FABRIC_DRIFT_CELL;
-                let cz_w = (cz as f32 + 0.5) * FABRIC_DRIFT_CELL;
-                // Center-based checks on purpose: a 40 u cell near the
-                // blackout's edge or the player's flank still shifts. The
-                // sliver a check this loose can expose sits in blackout
-                // darkness — and a half-glimpsed wall that wasn't there is
-                // the intended experience, not a bug.
-                let inside = bounds.contains(cx_w, cz_w);
-                let behind = (cx_w - px) * forward[0] + (cz_w - pz) * forward[2] < -4.0;
-                let hidden =
-                    Self::drift_cell_dist2((cx, cz), px, pz) > BLACKOUT_HIDE_DISTANCE.powi(2);
-                if inside && behind && hidden {
-                    shifted.push((cx, cz));
-                }
-            }
-        }
-        self.blackout_shift_debug = (true, shifted.len(), self.blackout_shift_debug.2);
-        if shifted.is_empty() {
-            return;
-        }
-        self.blackout_shift_debug.2 += shifted.len();
-        // Mismanagement accelerates the stalking dark: at full strain the
-        // rear shift fires three times as often.
-        self.blackout_shift_cooldown =
-            BLACKOUT_SHIFT_PERIOD_S / (1.0 + 2.0 * self.survival.mismanagement());
-        for &(cx, cz) in &shifted {
-            self.reality = self.reality.with_fabric_drift_advanced(cx, cz);
-        }
-        // Rebuild the resident chunks of the shifted cells in place. The
-        // install path's player-overlap check keeps the swap safe, and the
-        // request carries the advanced reality by construction.
-        let cell_bounds: Vec<WorldBounds> = shifted
-            .iter()
-            .map(|&(cx, cz)| {
-                WorldBounds::new(
-                    cx as f32 * FABRIC_DRIFT_CELL,
-                    cz as f32 * FABRIC_DRIFT_CELL,
-                    (cx + 1) as f32 * FABRIC_DRIFT_CELL,
-                    (cz + 1) as f32 * FABRIC_DRIFT_CELL,
-                )
-            })
-            .collect();
-        let cs = self.config.chunk_size;
-        let targets: Vec<ChunkKey> = self
-            .store
-            .iter_ordered()
-            .filter(|chunk| {
-                let rect = WorldBounds::new(
-                    chunk.origin.0,
-                    chunk.origin.1,
-                    chunk.origin.0 + cs,
-                    chunk.origin.1 + cs,
-                );
-                cell_bounds.iter().any(|cell| cell.intersects(rect))
-            })
-            .map(|chunk| chunk_key(chunk.origin.0, chunk.origin.1))
-            .collect();
-        for key in targets {
-            self.force_rebuild(key);
-        }
     }
 
     fn make_request_for(
@@ -1418,6 +1253,7 @@ impl Engine {
 mod tests {
     use super::*;
     use crate::application::collision::Aabb;
+    use crate::application::navigation::range_m;
     use crate::application::ports::ChunkPayload;
     use std::cell::RefCell;
     use std::rc::Rc;
