@@ -556,6 +556,19 @@ mod tests {
         assert!(source.contains("chunk.indices.y < nearest_source_index"));
     }
 
+    /// The primary-ray loop must never trace a candidate chunk past the
+    /// closest hit already found for this pixel — provably safe (a farther
+    /// hit in that chunk could not win the nearest-hit comparison anyway),
+    /// and the same clip-to-known-distance pattern `finite_segment_visible`
+    /// already trusts for shadow rays against a light's own distance.
+    #[test]
+    fn primary_rays_clip_the_search_interval_to_the_closest_hit_so_far() {
+        let source = include_str!("../shaders/raymarch.wgsl");
+        let fragment = &source[source.find("@fragment").expect("fragment entry")..];
+        assert!(fragment.contains("min(interval.exit, nearest.distance)"));
+        assert!(fragment.contains("let hit = trace_chunk(local_origin, direction, chunk, clipped_interval)"));
+    }
+
     #[test]
     fn shader_secondary_rays_are_finite_exact_and_lazily_evaluated() {
         let source = include_str!("../shaders/raymarch.wgsl");

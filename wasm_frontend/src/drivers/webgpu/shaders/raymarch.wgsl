@@ -628,7 +628,18 @@ fn raymarch_fragment(@builtin(position) pixel: vec4<f32>) -> @location(0) vec4<f
             vec3<f32>(chunk.origin_world_size.w)
         );
         if !interval.hit || interval.entry > nearest.distance { continue; }
-        let hit = trace_chunk(local_origin, direction, chunk, interval);
+        // Never search past the closest candidate already found: a hit in
+        // this chunk beyond nearest.distance could not win the comparison
+        // below regardless, so there is nothing to gain by tracing that far.
+        // Mirrors finite_segment_visible's shadow-ray clip to a light's own
+        // distance (line ~490) — same reasoning, applied to primary rays.
+        let clipped_interval = BoxHit(
+            interval.hit,
+            interval.entry,
+            min(interval.exit, nearest.distance),
+            interval.normal
+        );
+        let hit = trace_chunk(local_origin, direction, chunk, clipped_interval);
         let stable_tie = hit.distance == nearest.distance
             && chunk.indices.y < nearest_source_index;
         if hit.hit && (hit.distance < nearest.distance || stable_tie) {
