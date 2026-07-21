@@ -321,3 +321,66 @@ fn corruption_appears_somewhere() {
     assert!(abandoned > 0, "no abandoned expansions in 36 regions");
     assert!(duplicated > 0, "no duplicated suites in 36 regions");
 }
+
+/// `derive_genome`'s fields must not be independent rolls: a designer who
+/// chose a deep-beam structural system (specifically to achieve a wide
+/// clear span) should show that beam grid in the ceiling, and a designer
+/// who chose core-and-shell (no interior columns at all, nothing to
+/// coffer) should not. If the two conditional distributions of
+/// `ceiling_language` were the same, `structural_system` would be
+/// statistically irrelevant to it — exactly the independent-hash-roll bug
+/// this phase removes.
+#[test]
+fn ceiling_language_is_not_independent_of_structural_system() {
+    use crate::domain::entities::architecture::{CeilingLanguage, StructuralSystem};
+
+    let noise = TestNoise;
+    let mut deep_span_flat = 0u32;
+    let mut deep_span_total = 0u32;
+    let mut core_shell_flat = 0u32;
+    let mut core_shell_total = 0u32;
+    for rx in -40i64..40 {
+        for rz in -40i64..40 {
+            for salt in 0i64..3 {
+                let genome = derive_genome(42, rx, rz, salt, &noise);
+                match genome.structural_system {
+                    StructuralSystem::DeepSpansWithBeams => {
+                        deep_span_total += 1;
+                        if genome.ceiling_language == CeilingLanguage::FlatTiles {
+                            deep_span_flat += 1;
+                        }
+                    }
+                    StructuralSystem::CoreAndShell => {
+                        core_shell_total += 1;
+                        if genome.ceiling_language == CeilingLanguage::FlatTiles {
+                            core_shell_flat += 1;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+    assert!(
+        deep_span_total > 100 && core_shell_total > 100,
+        "sample too small: {deep_span_total} deep-span, {core_shell_total} core-and-shell genomes"
+    );
+    let deep_span_flat_rate = deep_span_flat as f32 / deep_span_total as f32;
+    let core_shell_flat_rate = core_shell_flat as f32 / core_shell_total as f32;
+    assert!(
+        deep_span_flat_rate < 0.30,
+        "a deep-beam designer chose flat tiles {deep_span_flat_rate:.2} of the time — \
+         ceiling language is not tracking the structural system"
+    );
+    assert!(
+        core_shell_flat_rate > 0.50,
+        "a core-and-shell designer (no beams to show) chose flat tiles only \
+         {core_shell_flat_rate:.2} of the time"
+    );
+    assert!(
+        core_shell_flat_rate - deep_span_flat_rate > 0.30,
+        "flat-tile rate barely differs between structural systems \
+         ({deep_span_flat_rate:.2} vs {core_shell_flat_rate:.2}) — \
+         this would not reject independence"
+    );
+}

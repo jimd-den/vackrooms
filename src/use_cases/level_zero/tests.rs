@@ -2040,3 +2040,59 @@ fn test_print_ascii_map() {
     }
     std::fs::write("./ascii_map.txt", map).unwrap();
 }
+
+/// The four structural systems must produce genuinely different column
+/// layouts, not the same `(bay, bay)` grid relabeled. `CoreAndShell` exists
+/// to give a big clear span (`BackroomsLevel::on_column` refuses every
+/// column for it — see below); `OffsetGrid` staggers alternate rows by half
+/// a bay; both must differ from `RegularGrid`'s plain grid even when every
+/// other input (bay size, phase, column side) is identical.
+#[test]
+fn structural_systems_place_columns_differently() {
+    use crate::domain::entities::architecture::{StructuralSystem, StructuralSystemInstance};
+
+    let base = |system: StructuralSystem| StructuralSystemInstance {
+        system,
+        bay_x: 5.0,
+        bay_z: 5.0,
+        phase: (0.0, 0.0),
+        column_side: 0.6,
+    };
+    let sample = |system: StructuralSystem| -> Vec<(i32, i32)> {
+        let instance = base(system);
+        let mut hits = Vec::new();
+        for row in 0..6 {
+            for col in 0..6 {
+                let (wx, wz) = (col as f32 * 1.7, row as f32 * 1.7);
+                if BackroomsLevel::on_column(&instance, wx, wz) {
+                    hits.push((col, row));
+                }
+            }
+        }
+        hits
+    };
+
+    let regular = sample(StructuralSystem::RegularGrid);
+    let offset = sample(StructuralSystem::OffsetGrid);
+    let core_and_shell = sample(StructuralSystem::CoreAndShell);
+    let deep_spans = sample(StructuralSystem::DeepSpansWithBeams);
+
+    assert!(
+        !regular.is_empty(),
+        "a regular grid over this sample area must place at least one column"
+    );
+    assert!(
+        core_and_shell.is_empty(),
+        "core-and-shell must have zero interior columns, found {core_and_shell:?}"
+    );
+    assert_ne!(
+        regular, offset,
+        "offset grid produced the same column positions as a regular grid"
+    );
+    assert_eq!(
+        regular, deep_spans,
+        "deep-spans-with-beams should place columns identically to a regular \
+         grid at equal bay_x/bay_z (its bay elongation is decided upstream in \
+         structure_for, not by on_column)"
+    );
+}
