@@ -727,12 +727,16 @@ chunks <b id="hud-chunks">0</b>   svo nodes <b id="hud-nodes">0</b>   scale <b i
             <div class="setting-row">
                 <label for="setting-generation-workers">Chunk generation workers <span class="value">reload</span></label>
                 <select id="setting-generation-workers">
-                    <option value="auto">Auto — reserve main thread, max 4</option>
+                    <option value="auto">Auto — use every hardware thread but one</option>
                     <option value="0">0 — synchronous fallback</option>
                     <option value="1">1 generation worker</option>
                     <option value="2">2 generation workers</option>
-                    <option value="3">3 generation workers</option>
                     <option value="4">4 generation workers</option>
+                    <option value="8">8 generation workers</option>
+                    <option value="12">12 generation workers</option>
+                    <option value="16">16 generation workers</option>
+                    <option value="24">24 generation workers</option>
+                    <option value="32">32 generation workers</option>
                 </select>
             </div>
             <p class="hint">Workers generate and stream world chunks. They do not parallelize the CPU splat renderer; explicit counts are clamped to available hardware.</p>
@@ -995,12 +999,17 @@ chunks <b id="hud-chunks">0</b>   svo nodes <b id="hud-nodes">0</b>   scale <b i
             quality: Object.freeze({ id: 2, scale: 1.5, lod: 0.65, splatRadius: 4.0, virtualDepth: 6, mipOccupancy: 0.12, distance: 128, shadows: 'hero' }),
             maximum: Object.freeze({ id: 3, scale: 2.0, lod: 0.35, splatRadius: 2.0, virtualDepth: 8, mipOccupancy: 0.05, distance: 160, shadows: 'full' }),
         });
+        // Mirrors the Rust-side safety ceiling (MAX_GENERATION_WORKERS in
+        // wasm_frontend/src/application/generation_worker_policy.rs) — not
+        // a target. The engine itself clamps further to whatever hardware
+        // actually reports, so this only guards malformed input.
+        const MAX_GENERATION_WORKERS = 32;
         const normalizeGenerationWorkers = (value) => {
             const text = String(value ?? 'auto');
             if (text === 'auto' || text === '0') return text;
             const requested = Number(text);
             return Number.isInteger(requested) && requested > 0
-                ? String(Math.min(4, requested))
+                ? String(Math.min(MAX_GENERATION_WORKERS, requested))
                 : 'auto';
         };
         const clampFinite = (value, min, max, fallback) => {
