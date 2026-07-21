@@ -91,3 +91,12 @@ web-sys = { version = "0.3", features = [
 pollster = "1.0"
 # Parallel pixel loops for the path-traced reference example.
 rayon = "1.10"
+criterion = "0.8"
+
+[[bench]]
+name = "generation"
+harness = false
+
+[[bench]]
+name = "rendering"
+harness = false
