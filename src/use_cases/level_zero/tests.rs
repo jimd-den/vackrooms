@@ -6,12 +6,59 @@ use crate::domain::entities::anomaly::{
 use crate::domain::entities::architecture::SpaceProgram;
 use crate::domain::entities::voxel_grid::{VOXEL_AIR, VOXEL_STICKY_CARPET, VOXEL_WALL, VoxelGrid};
 use crate::entities::models::Position;
-use crate::frameworks_drivers::simple_noise::SimpleNoiseProvider;
 use crate::use_cases::anomalies::geometry::sample_anomaly;
 use crate::use_cases::generate_chunk::{GeneratorConfig, LevelTuning};
 use crate::use_cases::level_generator::LevelGenerator;
+use crate::use_cases::ports::NoiseProvider;
 use crate::use_cases::red_rooms::geometry::sample_red_room;
 use crate::use_cases::region_plan::{PLAN_WALL_T, REGION_SIZE, region_index};
+
+struct TestNoise;
+
+impl TestNoise {
+    fn hash2d(seed: u32, x: i32, y: i32) -> f32 {
+        let mut h = seed
+            .wrapping_add(x as u32 ^ 0x9E3779B9)
+            .wrapping_add(y as u32 ^ 0x85EBCA6B);
+        h ^= h >> 16;
+        h = h.wrapping_mul(0x85EBCA6B);
+        h ^= h >> 13;
+        h = h.wrapping_mul(0xC2B2AE35);
+        h ^= h >> 16;
+        ((h as f32) / (std::u32::MAX as f32)) * 2.0 - 1.0
+    }
+
+    fn lerp(a: f32, b: f32, t: f32) -> f32 {
+        a + t * (b - a)
+    }
+
+    fn smoothstep(t: f32) -> f32 {
+        t * t * (3.0 - 2.0 * t)
+    }
+}
+
+impl NoiseProvider for TestNoise {
+    fn evaluate_2d(&self, seed: u32, position: Position) -> f32 {
+        let freq = 0.05;
+        let x = position.x * freq;
+        let y = position.z * freq;
+        let x0 = x.floor() as i32;
+        let x1 = x0 + 1;
+        let y0 = y.floor() as i32;
+        let y1 = y0 + 1;
+        let tx = x - (x0 as f32);
+        let ty = y - (y0 as f32);
+        let u = Self::smoothstep(tx);
+        let v = Self::smoothstep(ty);
+        let v00 = Self::hash2d(seed, x0, y0);
+        let v10 = Self::hash2d(seed, x1, y0);
+        let v01 = Self::hash2d(seed, x0, y1);
+        let v11 = Self::hash2d(seed, x1, y1);
+        let nx0 = Self::lerp(v00, v10, u);
+        let nx1 = Self::lerp(v01, v11, u);
+        Self::lerp(nx0, nx1, v)
+    }
+}
 
 
 fn generate(ox: f32, oz: f32) -> VoxelGrid {
@@ -19,7 +66,7 @@ fn generate(ox: f32, oz: f32) -> VoxelGrid {
         Position::new(ox, oz),
         42,
         GeneratorConfig::low_spec(),
-        &SimpleNoiseProvider::new(),
+        &TestNoise,
     )
 }
 
@@ -84,7 +131,7 @@ fn walkable_plane_is_connected() {
 /// column or chunk B's first.
 #[test]
 fn chunks_tile_seamlessly() {
-    let noise = SimpleNoiseProvider::new();
+    let noise = TestNoise;
     let config = GeneratorConfig::low_spec();
     let a = generate(0.0, 0.0);
     let b = generate(10.0, 0.0);
@@ -139,7 +186,7 @@ fn recursive_level_zero_is_independent_of_output_partition() {
         0,
         0xCAFE,
     )]);
-    let noise = SimpleNoiseProvider::new();
+    let noise = TestNoise;
     let small_config = GeneratorConfig::low_spec();
     let mut large_config = small_config;
     large_config.chunk_size = 20.0;
@@ -205,7 +252,7 @@ fn recursive_level_zero_is_independent_of_output_partition() {
 /// in the voxelized chunks they cross.
 #[test]
 fn corridors_from_the_plan_are_carved_open() {
-    let noise = SimpleNoiseProvider::new();
+    let noise = TestNoise;
     let config = GeneratorConfig::low_spec();
     let plans =
         BackroomsLevel::region_plans_for(Position::new(0.0, 0.0), 80.0, 42, &config, &noise);
@@ -241,7 +288,7 @@ fn corridors_from_the_plan_are_carved_open() {
 
 #[test]
 fn circulation_uses_the_raised_ceiling_hierarchy() {
-    let noise = SimpleNoiseProvider::new();
+    let noise = TestNoise;
     let config = GeneratorConfig::low_spec();
     let mut secondary_checked = false;
     for rx in -3i64..=3 {
@@ -292,7 +339,7 @@ fn circulation_uses_the_raised_ceiling_hierarchy() {
 /// (with a lintel when the designer's threshold language wants one).
 #[test]
 fn assemblies_have_walls_and_open_entrances() {
-    let noise = SimpleNoiseProvider::new();
+    let noise = TestNoise;
     let mut config = GeneratorConfig::low_spec();
     config.anomalies.frequency = 0.0;
     let tuning = LevelTuning::default();
@@ -352,7 +399,7 @@ fn assemblies_have_walls_and_open_entrances() {
 /// its fixtures are lit.
 #[test]
 fn abandoned_expansions_are_unlit() {
-    let noise = SimpleNoiseProvider::new();
+    let noise = TestNoise;
     let config = GeneratorConfig::low_spec();
     let tuning = LevelTuning::default();
     let mut found = false;
@@ -408,7 +455,7 @@ fn abandoned_expansions_are_unlit() {
 fn stairwells_sample_as_rising_flights() {
     use crate::use_cases::vertical_circulation::link_wants_geometry;
     use crate::use_cases::world_topology::vertical_link_for_region;
-    let noise = SimpleNoiseProvider::new();
+    let noise = TestNoise;
     let config = GeneratorConfig::low_spec();
     let tuning = LevelTuning::default();
 
@@ -483,7 +530,7 @@ fn stairwells_sample_as_rising_flights() {
 /// and vaulted territory to prevent Level 0 from reading as a low maze.
 #[test]
 fn ceilings_are_vast_and_varied() {
-    let noise = SimpleNoiseProvider::new();
+    let noise = TestNoise;
     let mut counts = [0usize; 4];
     let mut lowest = f32::MAX;
     let mut tallest = 0.0f32;
@@ -538,7 +585,7 @@ fn ceilings_are_vast_and_varied() {
 /// Framed doorways still exist, but only as a rare architectural anomaly.
 #[test]
 fn rare_doorways_still_have_lintels() {
-    let noise = SimpleNoiseProvider::new();
+    let noise = TestNoise;
     let mut config = GeneratorConfig::low_spec();
     config.anomalies.frequency = 0.0;
     let tuning = LevelTuning::default();
@@ -578,7 +625,7 @@ fn rare_doorways_still_have_lintels() {
 /// walls empties the world of solids; cranking them fills it back up.
 #[test]
 fn tuning_knobs_control_density() {
-    let noise = SimpleNoiseProvider::new();
+    let noise = TestNoise;
     // Aggregate over chunks in different fabric regimes (walled rooms
     // and open expanses) so both knobs have something to steer.
     let count_solids = |tuning: LevelTuning| -> usize {
@@ -642,7 +689,7 @@ fn tuning_knobs_control_density() {
 /// removes it entirely.
 #[test]
 fn spawn_door_exports_a_level_exit_and_knob_zero_removes_it() {
-    let noise = SimpleNoiseProvider::new();
+    let noise = TestNoise;
     let config = GeneratorConfig::low_spec();
     // Chunk (170, -120)..(180, -110) contains the authored door (172, -116).
     let chunk = Position::new(170.0, -120.0);
@@ -669,7 +716,7 @@ fn spawn_door_exports_a_level_exit_and_knob_zero_removes_it() {
 /// of a chunk in place, so they must be faithful proxies).
 #[test]
 fn lods_of_the_same_chunk_correspond() {
-    let noise = SimpleNoiseProvider::new();
+    let noise = TestNoise;
     let fine = BackroomsLevel.generate(
         Position::new(10.0, 10.0),
         42,
@@ -721,7 +768,7 @@ fn lods_of_the_same_chunk_correspond() {
 /// readable opening sequence — solid edge walls on both sides.
 #[test]
 fn spawn_is_a_readable_walled_corridor() {
-    let noise = SimpleNoiseProvider::new();
+    let noise = TestNoise;
     let config = GeneratorConfig::low_spec();
     let tuning = LevelTuning::default();
     let sp = crate::use_cases::region_plan::spawn_point(42);
@@ -773,7 +820,7 @@ fn spawn_is_a_readable_walled_corridor() {
 /// by induction — no chunk ever needs to see its neighbors to prove it.
 #[test]
 fn every_fabric_cell_opens_west_or_north() {
-    let noise = SimpleNoiseProvider::new();
+    let noise = TestNoise;
     let config = GeneratorConfig::low_spec();
     let tuning = LevelTuning::default();
     let mut cells_checked = 0usize;
@@ -861,7 +908,7 @@ fn every_fabric_cell_opens_west_or_north() {
 #[test]
 fn red_rooms_are_lit_red_but_never_built_red() {
     use crate::domain::entities::voxel_grid::{VOXEL_RED_LIGHT, VOXEL_RED_WALL};
-    let noise = SimpleNoiseProvider::new();
+    let noise = TestNoise;
     let config = GeneratorConfig::low_spec();
     let tuning = LevelTuning::default();
 
@@ -924,7 +971,7 @@ fn find_macro_anomaly(kind: AnomalyKind) -> (GeneratorConfig, AnomalyInstance) {
     config.anomalies.pillar_expanses = (kind == AnomalyKind::PillarExpanse) as u8 as f32;
     config.anomalies.blackouts = (kind == AnomalyKind::BlackoutExpanse) as u8 as f32;
     config.anomalies.pit_lattices = (kind == AnomalyKind::PitLattice) as u8 as f32;
-    let noise = SimpleNoiseProvider::new();
+    let noise = TestNoise;
     for rz in 3i64..24 {
         for rx in 3i64..24 {
             let plans = BackroomsLevel::region_plans_for(
@@ -963,7 +1010,7 @@ fn pillar_epoch_changes_only_committed_wake_and_preserves_bearing_lane() {
         0,
     )]);
     let empty = RealitySnapshot::empty();
-    let noise = SimpleNoiseProvider::new();
+    let noise = TestNoise;
     let mut changed = 0usize;
     let mut unchanged_forward = 0usize;
     let mut lz = -instance.footprint.half_z + 1.0;
@@ -996,7 +1043,7 @@ fn pillar_epoch_changes_only_committed_wake_and_preserves_bearing_lane() {
 #[test]
 fn blackout_has_a_recoverable_glimmer_lane_and_compressed_dark_core() {
     let (config, instance) = find_macro_anomaly(AnomalyKind::BlackoutExpanse);
-    let noise = SimpleNoiseProvider::new();
+    let noise = TestNoise;
     let lane = instance.world_coords(0.0, 0.0);
     let lane_plan = sample_anomaly(
         &instance,
@@ -1030,7 +1077,7 @@ fn pit_lattice_omits_real_floor_and_exports_relocation_hazards() {
     let h = hazards[0];
     let plan = sample_anomaly(
         &instance,
-        &SimpleNoiseProvider::new(),
+        &TestNoise,
         42,
         &config,
         &RealitySnapshot::empty(),
@@ -1046,7 +1093,7 @@ fn pit_lattice_omits_real_floor_and_exports_relocation_hazards() {
         Position::new(ox, oz),
         42,
         config,
-        &SimpleNoiseProvider::new(),
+        &TestNoise,
         &RealitySnapshot::empty(),
     );
     assert!(grid.pit_hazards.iter().any(|x| x.id == h.id));
@@ -1055,7 +1102,7 @@ fn pit_lattice_omits_real_floor_and_exports_relocation_hazards() {
 #[test]
 fn red_threshold_closes_the_remembered_entrance_into_a_loop() {
     use crate::domain::entities::anomaly::AxisDirection;
-    let noise = SimpleNoiseProvider::new();
+    let noise = TestNoise;
     let mut config = GeneratorConfig::low_spec();
     config.anomalies.pillar_expanses = 0.0;
     config.anomalies.blackouts = 0.0;
@@ -1193,7 +1240,7 @@ fn archway_rooms_are_stable_pale_anchors() {
     config.anomalies.pillar_expanses = 0.0;
     config.anomalies.blackouts = 0.0;
     config.anomalies.pit_lattices = 0.0;
-    let noise = SimpleNoiseProvider::new();
+    let noise = TestNoise;
     let mut found = None;
     'search: for rz in 3i64..24 {
         for rx in 3i64..24 {
@@ -1266,7 +1313,7 @@ fn archways_are_walkable_and_no_two_arcades_match() {
     config.anomalies.pillar_expanses = 0.0;
     config.anomalies.blackouts = 0.0;
     config.anomalies.pit_lattices = 0.0;
-    let noise = SimpleNoiseProvider::new();
+    let noise = TestNoise;
     let empty = RealitySnapshot::empty();
 
     let mut instances = Vec::new();
@@ -1365,7 +1412,7 @@ fn archways_are_walkable_and_no_two_arcades_match() {
 fn pillar_expanse_is_dry_and_its_bearing_lane_is_lit_in_rhythm() {
     use crate::domain::entities::voxel_grid::VOXEL_DRY_CARPET;
     let (config, instance) = find_macro_anomaly(AnomalyKind::PillarExpanse);
-    let noise = SimpleNoiseProvider::new();
+    let noise = TestNoise;
     let empty = RealitySnapshot::empty();
     let interior = instance.world_coords(1.0, 1.0);
     let plan = sample_anomaly(
@@ -1402,7 +1449,7 @@ fn pillar_expanse_is_dry_and_its_bearing_lane_is_lit_in_rhythm() {
 fn blackout_cues_are_glimmers_and_floors_pool_fluid() {
     use crate::domain::entities::voxel_grid::{VOXEL_FLUID, VOXEL_GLIMMER};
     let (config, instance) = find_macro_anomaly(AnomalyKind::BlackoutExpanse);
-    let noise = SimpleNoiseProvider::new();
+    let noise = TestNoise;
     let empty = RealitySnapshot::empty();
 
     let mut glimmer_seen = false;
@@ -1460,7 +1507,7 @@ fn drifted_reality(min_cell: i64, max_cell: i64) -> RealitySnapshot {
 /// "Days of traveled hallways" never replay; the navigation skeleton does.
 #[test]
 fn peripheral_shift_rearranges_fabric_but_never_the_plan() {
-    let noise = SimpleNoiseProvider::new();
+    let noise = TestNoise;
     let config = GeneratorConfig::low_spec();
     let plans =
         BackroomsLevel::region_plans_for(Position::new(0.0, 0.0), REGION_SIZE, 42, &config, &noise);
@@ -1558,7 +1605,7 @@ fn peripheral_shift_rearranges_fabric_but_never_the_plan() {
 /// warren cell still opens through its west or its north wall.
 #[test]
 fn fabric_stays_connected_through_mixed_drift_epochs() {
-    let noise = SimpleNoiseProvider::new();
+    let noise = TestNoise;
     let tuning = LevelTuning::default();
     let reality = drifted_reality(-4, 4);
     let mut cells_checked = 0usize;
@@ -1596,7 +1643,7 @@ fn fabric_stays_connected_through_mixed_drift_epochs() {
 /// pockets. A provisioned wanderer (tier 0) keeps the full guarantee.
 #[test]
 fn deep_strain_seals_doorways_into_dead_end_pockets() {
-    let noise = SimpleNoiseProvider::new();
+    let noise = TestNoise;
     let tuning = LevelTuning::default();
     let sealed_cells = |reality: &RealitySnapshot| {
         let mut sealed = 0usize;
@@ -1646,7 +1693,7 @@ fn deep_strain_seals_doorways_into_dead_end_pockets() {
 /// the wanderer is provisioned.
 #[test]
 fn deep_strain_hides_narrow_slips_in_solid_walls() {
-    let noise = SimpleNoiseProvider::new();
+    let noise = TestNoise;
     let tuning = LevelTuning::default();
     let slip_spans = |reality: &RealitySnapshot| {
         let mut slips = 0usize;
@@ -1698,7 +1745,7 @@ fn corridor_mouths_drift_with_epochs_and_seal_under_strain() {
     use crate::domain::entities::architecture::CirculationSpine;
     use crate::use_cases::region_plan::spawn_point;
 
-    let noise = SimpleNoiseProvider::new();
+    let noise = TestNoise;
     let spine = CirculationSpine {
         id: 7,
         spine_kind: SpaceProgram::MainCorridor,
@@ -1765,7 +1812,7 @@ fn corridor_mouths_drift_with_epochs_and_seal_under_strain() {
 fn deep_strain_withholds_supply_cells_the_calm_world_offered() {
     use crate::use_cases::anomalies::determinism::{hash, unit};
 
-    let noise = SimpleNoiseProvider::new();
+    let noise = TestNoise;
     let config = GeneratorConfig::low_spec();
     let calm = RealitySnapshot::empty();
     let parched = calm.with_delirium(3);
@@ -1822,7 +1869,7 @@ fn deep_strain_withholds_supply_cells_the_calm_world_offered() {
 fn a_blackout_owns_the_dark_even_over_the_main_corridor() {
     use crate::domain::entities::architecture::{CirculationSpine, RegionPlan};
     let (config, instance) = find_macro_anomaly(AnomalyKind::BlackoutExpanse);
-    let noise = SimpleNoiseProvider::new();
+    let noise = TestNoise;
     let center = instance.footprint.center;
     let start_x = center.x - 300.0;
     let plan = RegionPlan {
@@ -1881,7 +1928,7 @@ fn a_blackout_owns_the_dark_even_over_the_main_corridor() {
 #[test]
 fn blackout_substrate_drifts_but_its_recovery_skeleton_never_does() {
     let (config, instance) = find_macro_anomaly(AnomalyKind::BlackoutExpanse);
-    let noise = SimpleNoiseProvider::new();
+    let noise = TestNoise;
     let empty = RealitySnapshot::empty();
     let bounds = instance.footprint.bounds();
     let min_cx = (bounds.min_x / 40.0).floor() as i64 - 1;
@@ -1927,7 +1974,7 @@ fn blackout_substrate_drifts_but_its_recovery_skeleton_never_does() {
 #[test]
 fn old_territory_has_more_dead_lights_than_young_territory() {
     use crate::use_cases::world_topology::institution_age_at;
-    let noise = SimpleNoiseProvider::new();
+    let noise = TestNoise;
     let tuning = LevelTuning::default();
     let mut young = (0usize, 0usize); // (alive, sites)
     let mut old = (0usize, 0usize);
@@ -1966,7 +2013,7 @@ fn old_territory_has_more_dead_lights_than_young_territory() {
 
 #[test]
 fn test_print_ascii_map() {
-    let noise = SimpleNoiseProvider::new();
+    let noise = TestNoise;
     let tuning = LevelTuning::default();
     let config = GeneratorConfig::low_spec();
     // The whole of region (0,0) at 0.5 u per character.
