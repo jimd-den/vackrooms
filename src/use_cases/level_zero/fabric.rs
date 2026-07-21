@@ -80,10 +80,20 @@ impl BackroomsLevel {
     }
 
     /// Ceiling heights are architectural tiers, not terrain. The common
-    /// bands are perfectly flat; open volumes vary per ~8 u ceiling *zone*
-    /// (one suspended-grid bay run), never per column, and every height
-    /// snaps to the fine voxel lattice so voxelization cannot add
-    /// sub-voxel stair-stepping on top.
+    /// bands are perfectly flat; open volumes vary per fabric *cell* (the
+    /// same `FABRIC_CELL` lattice the wall/doorway decision reads), never
+    /// per column, and every height snaps to the fine voxel lattice so
+    /// voxelization cannot add sub-voxel stair-stepping on top.
+    ///
+    /// Sharing the wall lattice is deliberate, not cosmetic: a height
+    /// *step* between two neighboring cells can then only ever land on a
+    /// column the wall decision already has an opinion about (solid, or a
+    /// lintel), because a fabric cell boundary is exactly where that
+    /// decision is made. Before this shared a `FABRIC_CELL`-independent 8 u
+    /// zone instead, incommensurate with the 7.2 u wall lattice, so a
+    /// height step could fall in the middle of an unrelated room with no
+    /// wall anywhere near it to carry it — see `voxelize_columns`, which
+    /// only ever extends a ceiling step where this invariant holds.
     pub(super) fn fabric_ceiling_height(
         noise: &dyn NoiseProvider,
         seed: u32,
@@ -91,9 +101,8 @@ impl BackroomsLevel {
         wz: f32,
         band: FabricCeilingBand,
     ) -> f32 {
-        const ZONE: f32 = 8.0;
-        let zone_x = (wx / ZONE).floor() * ZONE + ZONE * 0.5;
-        let zone_z = (wz / ZONE).floor() * ZONE + ZONE * 0.5;
+        let zone_x = (wx / FABRIC_CELL).floor() * FABRIC_CELL + FABRIC_CELL * 0.5;
+        let zone_z = (wz / FABRIC_CELL).floor() * FABRIC_CELL + FABRIC_CELL * 0.5;
         let detail = Self::n(noise, seed, 0xB300, zone_x, zone_z, 0.72);
         let (height, lo, hi) = match band {
             FabricCeilingBand::Compression => (2.6, 2.5, 2.8),
