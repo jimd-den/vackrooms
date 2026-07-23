@@ -8,15 +8,18 @@
 
 use std::collections::{HashMap, HashSet};
 
+mod noclip;
+mod peripheral_shift;
+mod presenter;
+mod route;
+
 pub use crate::application::perf_governor::PerfGovernor;
 
 use crate::application::atlas::{AtlasPool, MAX_CHUNKS, payload_rows};
 use crate::application::body::{Body, BodyContext, BodyReadout};
 use crate::application::collision::{CollisionWorld, player_aabb};
 use crate::application::flares::FlareField;
-use crate::application::navigation::{
-    RouteTarget, range_m, relative_bearing_deg, select_anomaly_focus, select_route_target,
-};
+use crate::application::navigation::RouteTarget;
 use crate::application::player::{MoveIntent, Player};
 use crate::application::ports::{
     ChunkDraw, ChunkRequest, ChunkSourcePort, CompletedChunk, Environment, FrameParams,
@@ -28,10 +31,7 @@ use crate::application::streaming::{
 };
 use crate::application::survival_inventory::{ConsumptionIntent, SurvivalInventory};
 use crate::application::thermal;
-use vackrooms::domain::entities::anomaly::{
-    AnomalyKind, FABRIC_DRIFT_CELL, RealitySnapshot, TraversalGateKind, WorldBounds,
-    fabric_drift_cell_of,
-};
+use vackrooms::domain::entities::anomaly::{AnomalyKind, RealitySnapshot, TraversalGateKind};
 use vackrooms::domain::entities::player_vitals::PlayerVitals;
 use vackrooms::domain::entities::supplies::SupplyKind;
 
@@ -355,52 +355,6 @@ impl Engine {
         }
     }
 
-    fn rng_next01(&mut self) -> f32 {
-        self.rng ^= self.rng << 13;
-        self.rng ^= self.rng >> 7;
-        self.rng ^= self.rng << 17;
-        (self.rng >> 40) as f32 / (1u64 << 24) as f32
-    }
-
-    /// Backrooms lore made mechanical: holding a walk into solid wall long
-    /// enough occasionally phases the player through reality.
-    fn update_noclip(&mut self, dt: f32, input: &InputFrame, old_pos: [f32; 3]) {
-        self.noclip_cooldown = (self.noclip_cooldown - dt).max(0.0);
-
-        let i = input.intent;
-        let pushing = input.locked && (i.forward || i.backward || i.left || i.right);
-        let dx = self.player.position[0] - old_pos[0];
-        let dz = self.player.position[2] - old_pos[2];
-        let pinned = pushing && (dx * dx + dz * dz) < 0.002 * 0.002;
-
-        if !pinned {
-            self.push_seconds = 0.0;
-            return;
-        }
-        self.push_seconds += dt;
-        if self.push_seconds < NOCLIP_PUSH_SECONDS || self.noclip_cooldown > 0.0 {
-            return;
-        }
-        self.noclip_cooldown = 1.0;
-        if self.rng_next01() < NOCLIP_CHANCE {
-            self.noclip();
-        }
-    }
-
-    /// Phase through reality by pushing into walls. From Level 0 the fall is
-    /// into the grassland; from anywhere else — including Level 1, exactly
-    /// as the wiki warns — a noclip drops the wanderer back into Level 0.
-    fn noclip(&mut self) {
-        let (target, arrival) = if self.level == LEVEL_BACKROOMS {
-            // Into the grassland you phase in place.
-            (LEVEL_GRASSLAND, None)
-        } else {
-            // The way back drops you at the spawn clearing so you can't
-            // rematerialize inside a wall.
-            (LEVEL_BACKROOMS, Some(self.config.spawn))
-        };
-        self.switch_level(target, arrival);
-    }
 
     /// Switches the active level: drop every resident chunk so the streamer
     /// rebuilds the world from the new level's generator, then optionally
@@ -423,13 +377,7 @@ impl Engine {
         self.push_seconds = 0.0;
         // Flares are world objects of the level they were lit in.
         self.flares.clear();
-        // Leaving the level unobserves everything at once: every tracked
-        // drift cell rearranges, so phasing out and back never returns the
-        // wanderer to the hallways they left.
-        let watched: Vec<(i64, i64)> = self.drift_near.drain().collect();
-        for (cx, cz) in watched {
-            self.reality = self.reality.with_fabric_drift_advanced(cx, cz);
-        }
+        self.abandon_all_watched_drift_cells();
         if let Some(arrival) = arrival {
             self.player.relocate(arrival);
         }
@@ -688,8 +636,7 @@ impl Engine {
                     // A pre-threshold refinement for this key is no longer
                     // authoritative; its late completion cannot clear the new
                     // exact request identity.
-                    self.pending.remove(&key);
-                    self.forced_reloads.insert(key);
+                    self.force_rebuild(key);
                 }
             }
         }
@@ -732,8 +679,7 @@ impl Engine {
                 (item.position.x / cs).floor() * cs,
                 (item.position.z / cs).floor() * cs,
             );
-            self.pending.remove(&key);
-            self.forced_reloads.insert(key);
+            self.force_rebuild(key);
         }
 
         // -- level doors ------------------------------------------------------
@@ -797,203 +743,9 @@ impl Engine {
         self.invalidate_route();
     }
 
-    /// Drops the cached navigation objective; the next tick reselects from
-    /// whatever the *current* level/reality has resident. Called on level
-    /// switches, reality transitions, and death so telemetry never crosses
-    /// a reality address.
-    fn invalidate_route(&mut self) {
-        self.route_target = None;
-        self.route_cooldown = 0.0;
-    }
-
-    /// Reselects the route objective on a bounded cadence from the resident
-    /// level exits — authoritative generator output, never invented. No
-    /// resident door means no route, truthfully.
-    fn update_route(&mut self, dt: f32) {
-        self.route_cooldown -= dt;
-        if self.route_cooldown > 0.0 {
-            return;
-        }
-        self.route_cooldown = ROUTE_RECOMPUTE_PERIOD_S;
-        let player = [self.player.position[0], self.player.position[2]];
-        let selected = select_route_target(self.store.all_level_exits(), player);
-        self.route_target = selected;
-    }
-
-    /// The presenter-facing route anchor: bearing/range are derived fresh
-    /// from the cached target and the live player pose (cheap trig), so the
-    /// needle tracks head movement between reselections.
-    fn route_anchor(&self) -> Option<RouteAnchor> {
-        let target = self.route_target?;
-        let player = [self.player.position[0], self.player.position[2]];
-        Some(RouteAnchor {
-            target_level: target.target_level,
-            bearing_deg: relative_bearing_deg(self.player.yaw, player, target.position),
-            range_m: range_m(player, target.position),
-        })
-    }
-
     /// Accessibility option: automatic consumption of carried supplies.
     pub fn set_assisted_consumption(&mut self, enabled: bool) {
         self.survival.set_assisted_consumption(enabled);
-    }
-
-    /// Squared distance from a point to a drift cell's world rectangle
-    /// (0 inside the cell).
-    fn drift_cell_dist2(cell: (i64, i64), px: f32, pz: f32) -> f32 {
-        let x0 = cell.0 as f32 * FABRIC_DRIFT_CELL;
-        let z0 = cell.1 as f32 * FABRIC_DRIFT_CELL;
-        let dx = (x0 - px).max(px - (x0 + FABRIC_DRIFT_CELL)).max(0.0);
-        let dz = (z0 - pz).max(pz - (z0 + FABRIC_DRIFT_CELL)).max(0.0);
-        dx * dx + dz * dz
-    }
-
-    /// Every drift cell any resident chunk could touch counts as observed.
-    /// The far radius adds hysteresis of a couple of cells, so a cell only
-    /// drifts once the player has genuinely abandoned it.
-    fn drift_near_radius(&self) -> f32 {
-        (self.visual_policy.radius as f32 + 1.0) * self.config.chunk_size
-    }
-
-    fn drift_far_radius(&self) -> f32 {
-        // A mismanaging wanderer loses the hysteresis: the fabric rearranges
-        // almost the moment it leaves the streaming footprint.
-        self.drift_near_radius()
-            + 2.0 * FABRIC_DRIFT_CELL * (1.0 - 0.85 * self.survival.mismanagement())
-    }
-
-    /// The Peripheral Shift: "whenever not directly observed, the layout can
-    /// warp, stretch, or rearrange itself."
-    ///
-    /// Tier 1 — abandoned territory. Cells the player walks near are marked;
-    /// when one falls beyond the far radius every chunk of it has long been
-    /// evicted, its drift epoch advances, and whatever streams back in later
-    /// is a lawfully different warren (corridors, assemblies, and anomalies
-    /// never move — navigation survives; hallway memory does not).
-    ///
-    /// Tier 2 — inside a blackout the shift stalks the player in real time:
-    /// on a slow cadence, cells that lie entirely behind the player's facing,
-    /// beyond what any light could reveal, and fully inside the blackout's
-    /// bounds advance immediately and their resident chunks rebuild. The
-    /// darkness hides the swap; turning around is never a way back.
-    fn update_peripheral_shift(&mut self, dt: f32) {
-        if self.level != LEVEL_BACKROOMS {
-            return;
-        }
-        let (px, pz) = (self.player.position[0], self.player.position[2]);
-
-        // -- tier 1: mark near cells, drift abandoned ones -------------------
-        let near = self.drift_near_radius();
-        let min_cx = fabric_drift_cell_of(px - near);
-        let max_cx = fabric_drift_cell_of(px + near);
-        let min_cz = fabric_drift_cell_of(pz - near);
-        let max_cz = fabric_drift_cell_of(pz + near);
-        for cz in min_cz..=max_cz {
-            for cx in min_cx..=max_cx {
-                if Self::drift_cell_dist2((cx, cz), px, pz) <= near * near {
-                    self.drift_near.insert((cx, cz));
-                }
-            }
-        }
-        let far2 = self.drift_far_radius() * self.drift_far_radius();
-        let abandoned: Vec<(i64, i64)> = self
-            .drift_near
-            .iter()
-            .copied()
-            .filter(|&cell| Self::drift_cell_dist2(cell, px, pz) > far2)
-            .collect();
-        for cell in abandoned {
-            self.drift_near.remove(&cell);
-            self.reality = self.reality.with_fabric_drift_advanced(cell.0, cell.1);
-        }
-
-        // -- tier 2: the blackout rearranges behind the player ---------------
-        self.blackout_shift_cooldown = (self.blackout_shift_cooldown - dt).max(0.0);
-        let blackout_bounds = self
-            .store
-            .all_traversal_gates()
-            .find(|gate| {
-                gate.anomaly_kind == AnomalyKind::BlackoutExpanse
-                    && gate.affected_bounds.contains(px, pz)
-            })
-            .map(|gate| gate.affected_bounds);
-        let Some(bounds) = blackout_bounds else {
-            self.blackout_shift_debug.0 = false;
-            return;
-        };
-        self.blackout_shift_debug.0 = true;
-        if self.blackout_shift_cooldown > 0.0 {
-            return;
-        }
-        let forward = self.player.forward();
-        // The rear shift reaches past the streaming footprint on purpose:
-        // cells it advances beyond residency simply rebuild on approach,
-        // exactly like tier-1 drift.
-        let reach = self.drift_near_radius().max(3.0 * FABRIC_DRIFT_CELL);
-        let mut shifted = Vec::new();
-        for cz in fabric_drift_cell_of(pz - reach)..=fabric_drift_cell_of(pz + reach) {
-            for cx in fabric_drift_cell_of(px - reach)..=fabric_drift_cell_of(px + reach) {
-                let cx_w = (cx as f32 + 0.5) * FABRIC_DRIFT_CELL;
-                let cz_w = (cz as f32 + 0.5) * FABRIC_DRIFT_CELL;
-                // Center-based checks on purpose: a 40 u cell near the
-                // blackout's edge or the player's flank still shifts. The
-                // sliver a check this loose can expose sits in blackout
-                // darkness — and a half-glimpsed wall that wasn't there is
-                // the intended experience, not a bug.
-                let inside = bounds.contains(cx_w, cz_w);
-                let behind = (cx_w - px) * forward[0] + (cz_w - pz) * forward[2] < -4.0;
-                let hidden =
-                    Self::drift_cell_dist2((cx, cz), px, pz) > BLACKOUT_HIDE_DISTANCE.powi(2);
-                if inside && behind && hidden {
-                    shifted.push((cx, cz));
-                }
-            }
-        }
-        self.blackout_shift_debug = (true, shifted.len(), self.blackout_shift_debug.2);
-        if shifted.is_empty() {
-            return;
-        }
-        self.blackout_shift_debug.2 += shifted.len();
-        // Mismanagement accelerates the stalking dark: at full strain the
-        // rear shift fires three times as often.
-        self.blackout_shift_cooldown =
-            BLACKOUT_SHIFT_PERIOD_S / (1.0 + 2.0 * self.survival.mismanagement());
-        for &(cx, cz) in &shifted {
-            self.reality = self.reality.with_fabric_drift_advanced(cx, cz);
-        }
-        // Rebuild the resident chunks of the shifted cells in place. The
-        // install path's player-overlap check keeps the swap safe, and the
-        // request carries the advanced reality by construction.
-        let cell_bounds: Vec<WorldBounds> = shifted
-            .iter()
-            .map(|&(cx, cz)| {
-                WorldBounds::new(
-                    cx as f32 * FABRIC_DRIFT_CELL,
-                    cz as f32 * FABRIC_DRIFT_CELL,
-                    (cx + 1) as f32 * FABRIC_DRIFT_CELL,
-                    (cz + 1) as f32 * FABRIC_DRIFT_CELL,
-                )
-            })
-            .collect();
-        let cs = self.config.chunk_size;
-        let targets: Vec<ChunkKey> = self
-            .store
-            .iter_ordered()
-            .filter(|chunk| {
-                let rect = WorldBounds::new(
-                    chunk.origin.0,
-                    chunk.origin.1,
-                    chunk.origin.0 + cs,
-                    chunk.origin.1 + cs,
-                );
-                cell_bounds.iter().any(|cell| cell.intersects(rect))
-            })
-            .map(|chunk| chunk_key(chunk.origin.0, chunk.origin.1))
-            .collect();
-        for key in targets {
-            self.pending.remove(&key);
-            self.forced_reloads.insert(key);
-        }
     }
 
     fn make_request_for(
@@ -1462,6 +1214,18 @@ impl Engine {
         self.flares.extinguish_buried(self.world.boxes());
     }
 
+    /// Forces one chunk to rebuild on its next streaming pass, dropping any
+    /// in-flight request for it first so a late completion under the old
+    /// identity can't clear the new one. The shared primitive behind every
+    /// "this chunk's world just changed out from under it" event: RedRoom
+    /// threshold crossings, a consumed supply item, and Peripheral Shift's
+    /// blackout rear-shift all reach for exactly this, not a bespoke pair
+    /// of map operations each time.
+    fn force_rebuild(&mut self, key: ChunkKey) {
+        self.pending.remove(&key);
+        self.forced_reloads.insert(key);
+    }
+
     pub fn player(&self) -> &Player {
         &self.player
     }
@@ -1483,281 +1247,13 @@ impl Engine {
     pub fn collision_world(&self) -> &CollisionWorld {
         &self.world
     }
-
-    /// Multi-line plain-text report of the live anomaly machinery, for the
-    /// debug overlay: reality-snapshot epochs, resident traversal gates and
-    /// pit hazards (nearest first), and the streaming pipeline counters.
-    /// Pure formatting over engine state — no browser types, natively
-    /// testable.
-    pub fn anomaly_debug_text(&self) -> String {
-        use std::fmt::Write;
-        let p = self.player.position;
-        let mut out = String::with_capacity(1024);
-        let _ = writeln!(
-            out,
-            "pos ({:.1}, {:.1}, {:.1})  level {}  yaw {:.2}",
-            p[0], p[1], p[2], self.level, self.player.yaw
-        );
-        let _ = writeln!(
-            out,
-            "chunks {} resident ({} fine) | pending {} | backlog {} | forced reloads {}",
-            self.store.len(),
-            self.store.iter_ordered().filter(|c| c.lod == 0).count(),
-            self.pending.len(),
-            self.completed_backlog.len(),
-            self.forced_reloads.len(),
-        );
-        let _ = writeln!(
-            out,
-            "flares {} | push {:.2}s",
-            self.flares.len(),
-            self.push_seconds
-        );
-
-        let stamps = self.reality.stamps();
-        let _ = writeln!(out, "reality: {} stamp(s)", stamps.len());
-        let _ = writeln!(
-            out,
-            "peripheral shift: {} drifted cell(s), {} watched",
-            self.reality.fabric_drifts().len(),
-            self.drift_near.len()
-        );
-        let (inside, eligible, total) = self.blackout_shift_debug;
-        let _ = writeln!(
-            out,
-            "blackout shift: inside={inside} eligible={eligible} \
-             shifted_total={total} cooldown={:.1}s",
-            self.blackout_shift_cooldown
-        );
-        for stamp in stamps {
-            let _ = writeln!(
-                out,
-                "  {:016x} epoch {}  plane {:.1} {:?} {:?}",
-                stamp.instance_id,
-                stamp.epoch,
-                stamp.gate_plane(),
-                stamp.gate_axis,
-                stamp.travel_direction,
-            );
-        }
-
-        let mut gates: Vec<_> = self.store.all_traversal_gates().copied().collect();
-        gates.sort_by_key(|g| g.id);
-        gates.dedup_by_key(|g| g.id);
-        gates.sort_by(|a, b| {
-            let d = |g: &vackrooms::domain::entities::anomaly::TraversalGate| match g.axis {
-                vackrooms::domain::entities::anomaly::Axis2::X => (g.plane - p[0]).abs(),
-                vackrooms::domain::entities::anomaly::Axis2::Z => (g.plane - p[2]).abs(),
-            };
-            d(a).total_cmp(&d(b))
-        });
-        let _ = writeln!(out, "gates resident: {}", gates.len());
-        for gate in gates.iter().take(6) {
-            let dist = match gate.axis {
-                vackrooms::domain::entities::anomaly::Axis2::X => (gate.plane - p[0]).abs(),
-                vackrooms::domain::entities::anomaly::Axis2::Z => (gate.plane - p[2]).abs(),
-            };
-            let epoch = self.reality.lookup(gate.instance_id).map_or(0, |s| s.epoch);
-            let _ = writeln!(
-                out,
-                "  {:?}/{:?} of {:?} {:08x}  plane {:.1} on {:?}  d={:.1}  epoch {}",
-                gate.kind,
-                gate.forward,
-                gate.anomaly_kind,
-                (gate.instance_id & 0xFFFF_FFFF) as u32,
-                gate.plane,
-                gate.axis,
-                dist,
-                epoch,
-            );
-        }
-
-        let mut pits: Vec<_> = self.store.all_pit_hazards().copied().collect();
-        pits.sort_by_key(|h| h.id);
-        pits.dedup_by_key(|h| h.id);
-        pits.sort_by(|a, b| {
-            let d = |h: &vackrooms::domain::entities::anomaly::PitHazard| {
-                let dx = h.center.x - p[0];
-                let dz = h.center.z - p[2];
-                dx * dx + dz * dz
-            };
-            d(a).total_cmp(&d(b))
-        });
-        let _ = writeln!(out, "pit hazards resident: {}", pits.len());
-        for pit in pits.iter().take(4) {
-            let dx = pit.center.x - p[0];
-            let dz = pit.center.z - p[2];
-            let _ = writeln!(
-                out,
-                "  {:08x} at ({:.1}, {:.1})  half {:.1}  d={:.1}  recovery ({:.1}, {:.1})",
-                (pit.id & 0xFFFF_FFFF) as u32,
-                pit.center.x,
-                pit.center.z,
-                pit.half_side,
-                (dx * dx + dz * dz).sqrt(),
-                pit.recovery.x,
-                pit.recovery.z,
-            );
-        }
-        out
-    }
-
-    pub fn stats(&self) -> HudStats {
-        let spawn_key = chunk_key(
-            (self.config.spawn[0] / self.config.chunk_size).floor() * self.config.chunk_size,
-            (self.config.spawn[2] / self.config.chunk_size).floor() * self.config.chunk_size,
-        );
-        let survival = self.survival.readout();
-        HudStats {
-            resident_chunks: self.store.len(),
-            fine_chunks: self.store.iter_ordered().filter(|c| c.lod == 0).count(),
-            atlas_nodes: self.atlas_nodes,
-            collision_boxes: self.world.len(),
-            resolution_scale: self.governor.scale(),
-            ready: self.store.contains(spawn_key),
-            distance_m: self.distance_m as f32,
-            hydration: survival.vitals.hydration,
-            satiety: survival.vitals.satiety,
-            condition: survival.vitals.condition,
-            almond_bottles: survival.almond_bottles,
-            rations: survival.rations,
-            ambient_c: survival.ambient_c,
-            deaths: survival.deaths,
-            level: self.level,
-            body: self.body.readout(),
-            route: self.route_anchor(),
-        }
-    }
-
-    /// The diagnostic aperture's full report: information-dense, truthful
-    /// about unavailable data, and organized into `§`-headed sections the
-    /// presenter renders as panels. Pure formatting over engine state —
-    /// natively testable, and it deliberately reveals everything the normal
-    /// HUD hides (raw vitals, multipliers, stress contributions, targets).
-    pub fn diagnostic_text(&self) -> String {
-        use std::fmt::Write;
-        let mut out = String::with_capacity(2048);
-        let readout = self.body.readout();
-        let debug = self.body.debug();
-        let survival = self.survival.readout();
-
-        let _ = writeln!(out, "§ SUBJECT");
-        let _ = writeln!(
-            out,
-            "steps {}  walked {:.1} m  (raw session distance {:.1} m)",
-            readout.steps,
-            self.body.walked_m(),
-            self.distance_m,
-        );
-        let _ = writeln!(
-            out,
-            "pulse {:.0} bpm -> target {:.0}  signal {:?}  beat x{:.2}",
-            readout.bpm, readout.target_bpm, readout.signal, readout.beat_intensity,
-        );
-        let _ = writeln!(
-            out,
-            "exertion {:.2}  fatigue {:.2}  movement x{:.2}",
-            readout.exertion, readout.fatigue, readout.movement_factor,
-        );
-        let _ = writeln!(
-            out,
-            "factors: capacity x{:.2}  hydr x{:.2}  sati x{:.2}  cond x{:.2}  fatig x{:.2}",
-            debug.exertion_capacity,
-            debug.hydration_factor,
-            debug.satiety_factor,
-            debug.condition_factor,
-            debug.fatigue_factor,
-        );
-        let _ = writeln!(
-            out,
-            "recovery quality {:.2}  heat stress {:.2}  ambient {:.1} C",
-            debug.recovery_quality, debug.heat_stress, survival.ambient_c,
-        );
-        let _ = writeln!(
-            out,
-            "hydration {:.2}  satiety {:.2}  condition {:.2}  excess {:.2}",
-            survival.vitals.hydration,
-            survival.vitals.satiety,
-            survival.vitals.condition,
-            survival.excess,
-        );
-        let _ = writeln!(
-            out,
-            "carried: water {}  rations {}  | assisted consumption {}  deaths {}",
-            survival.almond_bottles,
-            survival.rations,
-            if survival.assisted_consumption {
-                "on"
-            } else {
-                "off"
-            },
-            survival.deaths,
-        );
-
-        let _ = writeln!(out, "§ ROUTE");
-        match (self.route_target, self.route_anchor()) {
-            (Some(target), Some(anchor)) => {
-                let _ = writeln!(
-                    out,
-                    "door {:08x} -> level {}  at ({:.1}, {:.1})",
-                    (target.exit_id & 0xFFFF_FFFF) as u32,
-                    target.target_level,
-                    target.position[0],
-                    target.position[1],
-                );
-                let _ = writeln!(
-                    out,
-                    "range {:.1} m  bearing {:03}  [straight-line; no route graph exists]",
-                    anchor.range_m, anchor.bearing_deg,
-                );
-            }
-            _ => {
-                let _ = writeln!(out, "unresolved: no door inside the streamed field");
-            }
-        }
-
-        let _ = writeln!(out, "§ AWARENESS");
-        let player = [self.player.position[0], self.player.position[2]];
-        let focus = select_anomaly_focus(
-            self.store.all_traversal_gates(),
-            self.store.all_pit_hazards(),
-            player,
-            AWARENESS_RANGE_M,
-        );
-        match focus {
-            Some(focus) => {
-                let _ = writeln!(
-                    out,
-                    "{:?} {:08x}  range {:.1} m  bearing {:03}  priority {}",
-                    focus.kind,
-                    (focus.instance_id & 0xFFFF_FFFF) as u32,
-                    focus.range_m,
-                    relative_bearing_deg(self.player.yaw, player, focus.position),
-                    focus.priority,
-                );
-                let _ = writeln!(
-                    out,
-                    "(debug-only: no player-facing sensing mechanic exists yet)"
-                );
-            }
-            None => {
-                let _ = writeln!(
-                    out,
-                    "no anomaly signature resident within {AWARENESS_RANGE_M:.0} m"
-                );
-            }
-        }
-
-        let _ = writeln!(out, "§ FIELD");
-        out.push_str(&self.anomaly_debug_text());
-        out
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::application::collision::Aabb;
+    use crate::application::navigation::range_m;
     use crate::application::ports::ChunkPayload;
     use std::cell::RefCell;
     use std::rc::Rc;

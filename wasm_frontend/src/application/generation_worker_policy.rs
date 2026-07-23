@@ -5,9 +5,13 @@
 //! and hardware clamping here makes the contract natively testable and keeps
 //! browser APIs out of the application layer.
 
-/// Hard ceiling for generation workers. More workers duplicate the WASM
-/// module and atlas-building scratch memory without improving frame latency.
-pub const MAX_GENERATION_WORKERS: u8 = 4;
+/// Safety ceiling for generation workers — not a target. `Auto` should use
+/// every hardware thread the browser reports (minus one reserved for the
+/// main/render thread), including on high-core-count machines; this only
+/// guards against a browser misreporting an absurd `hardwareConcurrency`
+/// value and spawning an unreasonable number of Worker instances (each one
+/// duplicates the WASM module and atlas-building scratch memory).
+pub const MAX_GENERATION_WORKERS: u8 = 32;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GenerationWorkerPreference {
@@ -120,7 +124,7 @@ mod tests {
         );
         assert_eq!(
             parse_generation_worker_preference("?workers=999"),
-            GenerationWorkerPreference::Fixed(4)
+            GenerationWorkerPreference::Fixed(MAX_GENERATION_WORKERS)
         );
     }
 
@@ -134,13 +138,28 @@ mod tests {
 
     #[test]
     fn resolution_reserves_the_main_thread_and_clamps_to_hardware() {
-        assert_eq!(GenerationWorkerPreference::Auto.resolve(8.0), 4);
+        assert_eq!(GenerationWorkerPreference::Auto.resolve(8.0), 7);
         assert_eq!(GenerationWorkerPreference::Auto.resolve(4.0), 3);
         assert_eq!(GenerationWorkerPreference::Auto.resolve(2.0), 1);
         assert_eq!(GenerationWorkerPreference::Auto.resolve(1.0), 1);
         assert_eq!(GenerationWorkerPreference::Fixed(4).resolve(2.0), 2);
         assert_eq!(GenerationWorkerPreference::Fixed(2).resolve(8.0), 2);
         assert_eq!(GenerationWorkerPreference::Disabled.resolve(8.0), 0);
+    }
+
+    /// A 16-thread machine must not be artificially throttled to a low
+    /// worker count: `Auto` should use (almost) every reported thread. This
+    /// is the regression test for the historical `MAX_GENERATION_WORKERS =
+    /// 4` ceiling, which silently capped every machine above 5 hardware
+    /// threads regardless of what was actually available.
+    #[test]
+    fn auto_scales_to_high_core_counts_instead_of_a_low_fixed_cap() {
+        assert_eq!(GenerationWorkerPreference::Auto.resolve(16.0), 15);
+        assert_eq!(
+            GenerationWorkerPreference::Fixed(16).resolve(16.0),
+            16,
+            "an explicit request for 16 workers on 16-thread hardware must not be clamped below it"
+        );
     }
 
     #[test]

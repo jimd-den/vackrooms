@@ -87,38 +87,32 @@ impl ProvisionContext<'_> {
     }
 }
 
-/// Stamps supplies and doors into one Level 0 chunk and exports their
-/// semantic records. Never called for recursive (red-room-interior) chunks.
-pub(crate) fn stamp_level_zero_provisions(
-    grid: &mut VoxelGrid,
-    chunk_pos: Position,
-    ctx: &ProvisionContext<'_>,
-) {
+/// Decides which almond-water/ration supply items exist within stamping
+/// range of this chunk, without touching the grid: one deterministic
+/// candidate per 40u supply-lattice cell, accepted only on open floor and
+/// only where the strain-scaled density and consumption history allow it.
+/// Pure — same hash-roll/position logic `stamp_level_zero_provisions` used
+/// inline, split out so it (and its rejection reasons) are testable without
+/// a `VoxelGrid`. Chunks that cannot even stamp a candidate (outside the
+/// 0.5u marker margin) skip without evaluating it further, so no decision
+/// ever depends on which chunk happens to be asking.
+fn decide_supply_items(chunk_pos: Position, ctx: &ProvisionContext<'_>) -> Vec<SupplyItem> {
     let water = ctx.config.tuning.almond_water.clamp(0.0, 4.0);
     let food = ctx.config.tuning.rations.clamp(0.0, 4.0);
-    let doors = ctx.config.tuning.level_doors.clamp(0.0, 4.0);
-    if water <= 0.0 && food <= 0.0 && doors <= 0.0 {
-        return;
+    if water <= 0.0 && food <= 0.0 {
+        return Vec::new();
     }
-    let s = ctx.config.voxel_scale;
     let max_x = chunk_pos.x + ctx.config.chunk_size;
     let max_z = chunk_pos.z + ctx.config.chunk_size;
-    let in_chunk = |x: f32, z: f32| x >= chunk_pos.x && x < max_x && z >= chunk_pos.z && z < max_z;
-    // Markers span a few voxels, so an item just outside this grid must
-    // still stamp its overlapping voxels here or seams (and the halo crop)
-    // would disagree with the neighbor that owns it. Stamping quantizes in
-    // world space, making the overlap exact; the semantic export stays with
-    // every grid whose bounds contain the item (halo overlaps are deduped by
-    // id on the consuming side).
     let near_chunk = |x: f32, z: f32, m: f32| {
         x >= chunk_pos.x - m && x < max_x + m && z >= chunk_pos.z - m && z < max_z + m
     };
 
-    // -- almond water on the 40u supply lattice ------------------------------
     let c0x = ((chunk_pos.x - 1.0) / SUPPLY_CELL).floor() as i64;
     let c1x = ((max_x + 1.0) / SUPPLY_CELL).floor() as i64;
     let c0z = ((chunk_pos.z - 1.0) / SUPPLY_CELL).floor() as i64;
     let c1z = ((max_z + 1.0) / SUPPLY_CELL).floor() as i64;
+    let mut items = Vec::new();
     for cz in c0z..=c1z {
         for cx in c0x..=c1x {
             let roll = hash(ctx.seed, 0x0A1A_09D0_57A7_0000, cx, cz);
@@ -140,9 +134,7 @@ pub(crate) fn stamp_level_zero_provisions(
             if ctx.reality.supply_consumed(id) {
                 continue;
             }
-            // One deterministic spot per cell. Chunks that cannot even
-            // stamp it (outside the 0.5u marker margin) skip without
-            // evaluating, so no decision ever depends on the asking chunk.
+            // One deterministic spot per cell.
             let probe = hash(ctx.seed, 0x0A1A_09D0_0000_0000, cx, cz);
             let px = (cx as f32 + 0.06 + 0.88 * unit(probe)) * SUPPLY_CELL;
             let pz = (cz as f32 + 0.06 + 0.88 * unit(probe.rotate_left(23))) * SUPPLY_CELL;
@@ -155,16 +147,48 @@ pub(crate) fn stamp_level_zero_provisions(
             } else {
                 SupplyKind::AlmondWater
             };
-            let item = SupplyItem {
+            items.push(SupplyItem {
                 id,
                 kind,
                 position: Position::new(px, pz),
                 rest_y: 0.0,
-            };
-            stamp_supply_marker(grid, chunk_pos, s, &item);
-            if in_chunk(px, pz) {
-                grid.supply_items.push(item);
-            }
+            });
+        }
+    }
+    items
+}
+
+/// Stamps supplies and doors into one Level 0 chunk and exports their
+/// semantic records. Never called for recursive (red-room-interior) chunks.
+pub(crate) fn stamp_level_zero_provisions(
+    grid: &mut VoxelGrid,
+    chunk_pos: Position,
+    ctx: &ProvisionContext<'_>,
+) {
+    let doors = ctx.config.tuning.level_doors.clamp(0.0, 4.0);
+    let has_supplies =
+        ctx.config.tuning.almond_water > 0.0 || ctx.config.tuning.rations > 0.0;
+    if !has_supplies && doors <= 0.0 {
+        return;
+    }
+    let s = ctx.config.voxel_scale;
+    let max_x = chunk_pos.x + ctx.config.chunk_size;
+    let max_z = chunk_pos.z + ctx.config.chunk_size;
+    let in_chunk = |x: f32, z: f32| x >= chunk_pos.x && x < max_x && z >= chunk_pos.z && z < max_z;
+    // Markers span a few voxels, so an item just outside this grid must
+    // still stamp its overlapping voxels here or seams (and the halo crop)
+    // would disagree with the neighbor that owns it. Stamping quantizes in
+    // world space, making the overlap exact; the semantic export stays with
+    // every grid whose bounds contain the item (halo overlaps are deduped by
+    // id on the consuming side).
+    let near_chunk = |x: f32, z: f32, m: f32| {
+        x >= chunk_pos.x - m && x < max_x + m && z >= chunk_pos.z - m && z < max_z + m
+    };
+
+    for item in decide_supply_items(chunk_pos, ctx) {
+        stamp_supply_marker(grid, chunk_pos, s, &item);
+        if in_chunk(item.position.x, item.position.z) {
+            grid.supply_items.push(item);
         }
     }
 
@@ -256,5 +280,81 @@ fn carve_door_clearing(
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::frameworks_drivers::simple_noise::SimpleNoiseProvider;
+
+    /// `decide_supply_items` is exercised directly, no `VoxelGrid` involved:
+    /// confirms it's deterministic (same chunk always decides the same
+    /// items) and that every accepted item actually lands on open floor —
+    /// the property `is_open_floor` exists to guarantee.
+    #[test]
+    fn supply_items_are_deterministic_and_on_open_floor() {
+        let noise = SimpleNoiseProvider::new();
+        let config = GeneratorConfig::low_spec();
+        let reality = RealitySnapshot::empty();
+        let mut any_items = false;
+
+        for chunk in 0..40i64 {
+            let chunk_pos = Position::new(chunk as f32 * config.chunk_size, 0.0);
+            let plans = BackroomsLevel::region_plans_for(
+                chunk_pos,
+                config.chunk_size,
+                42,
+                &config,
+                &noise,
+            );
+            let ctx = ProvisionContext {
+                seed: 42,
+                config: &config,
+                reality: &reality,
+                noise: &noise,
+                plans: &plans,
+            };
+
+            let items_a = decide_supply_items(chunk_pos, &ctx);
+            let items_b = decide_supply_items(chunk_pos, &ctx);
+            assert_eq!(
+                items_a.len(),
+                items_b.len(),
+                "supply decision is not deterministic for chunk {chunk}"
+            );
+            for item in &items_a {
+                assert!(
+                    ctx.is_open_floor(item.position.x, item.position.z),
+                    "accepted supply item at {:?} is not on open floor",
+                    item.position
+                );
+            }
+            any_items |= !items_a.is_empty();
+        }
+        assert!(any_items, "no supply items found across 40 sampled chunks");
+    }
+
+    /// `almond_water == 0 && rations == 0` must skip the lattice sweep
+    /// entirely rather than decide items nobody wanted, matching the early
+    /// return `stamp_level_zero_provisions` takes for the same setting.
+    #[test]
+    fn zero_tuning_decides_no_supply_items() {
+        let noise = SimpleNoiseProvider::new();
+        let mut config = GeneratorConfig::low_spec();
+        config.tuning.almond_water = 0.0;
+        config.tuning.rations = 0.0;
+        let reality = RealitySnapshot::empty();
+        let chunk_pos = Position::new(0.0, 0.0);
+        let plans =
+            BackroomsLevel::region_plans_for(chunk_pos, config.chunk_size, 42, &config, &noise);
+        let ctx = ProvisionContext {
+            seed: 42,
+            config: &config,
+            reality: &reality,
+            noise: &noise,
+            plans: &plans,
+        };
+        assert!(decide_supply_items(chunk_pos, &ctx).is_empty());
     }
 }

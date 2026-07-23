@@ -19,3 +19,10 @@ edition = "2024"
 # every RNG in the engine is deterministically seeded (StdRng::seed_from_u64),
 # which keeps the core buildable on wasm32-unknown-unknown.
 rand = { version = "0.10.2", default-features = false, features = ["std", "std_rng"] }
+
+[dev-dependencies]
+criterion = "0.8"
+
+[[bench]]
+name = "generation"
+harness = false

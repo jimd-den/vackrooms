@@ -36,26 +36,39 @@ pub(crate) fn voxelize_columns(grid: &mut VoxelGrid, field: &ColumnField, voxel_
                 }
             }
 
-            // A lower ceiling grows a skirt up to its tallest neighbour.  A
-            // request therefore cannot see through a height step that lives
-            // just across its output boundary.
-            let neighbour_ceiling = [
-                field.get(x as i64 - 1, z as i64),
-                field.get(x as i64 + 1, z as i64),
-                field.get(x as i64, z as i64 - 1),
-                field.get(x as i64, z as i64 + 1),
-            ]
-            .iter()
-            .map(|neighbour| to_voxel(neighbour.ceiling_units))
-            .max()
-            .unwrap_or(ceiling_y);
-
-            let cap_material = if plan.solid {
+            // A ceiling-height step can only ever be voxelized where a wall
+            // or door header already reaches up to carry it: fabric_ceiling_
+            // height snaps to the same FABRIC_CELL lattice the wall/lintel
+            // decision reads, so a step is only possible exactly at a
+            // boundary this column's own `solid`/`lintel_from_units` already
+            // has an opinion about. Walls and headers legitimately grow to
+            // whichever neighbour is taller — that is just a wall being tall
+            // enough. An ordinary open column caps at its own height only:
+            // that is a real step in the ceiling plane at a doorway or
+            // opening, not a gap, and inventing a floating patch to hide it
+            // would be unsupported geometry with nothing holding it up.
+            let has_wall_support = plan.solid || plan.lintel_from_units.is_some();
+            let cap_top = if has_wall_support {
+                let neighbour_ceiling = [
+                    field.get(x as i64 - 1, z as i64),
+                    field.get(x as i64 + 1, z as i64),
+                    field.get(x as i64, z as i64 - 1),
+                    field.get(x as i64, z as i64 + 1),
+                ]
+                .iter()
+                .map(|neighbour| to_voxel(neighbour.ceiling_units))
+                .max()
+                .unwrap_or(ceiling_y);
+                neighbour_ceiling.max(ceiling_y)
+            } else {
+                ceiling_y
+            };
+            let cap_material = if has_wall_support {
                 plan.wall_material
             } else {
                 VOXEL_CEILING
             };
-            for y in ceiling_y..=neighbour_ceiling.max(ceiling_y) {
+            for y in ceiling_y..=cap_top {
                 grid.set(x, y, z, cap_material);
             }
 
@@ -74,7 +87,9 @@ pub(crate) fn voxelize_columns(grid: &mut VoxelGrid, field: &ColumnField, voxel_
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::entities::voxel_grid::{EMISSIVE_MATERIALS, VOXEL_FLOOR, VOXEL_WALL};
+    use crate::domain::entities::voxel_grid::{
+        EMISSIVE_MATERIALS, VOXEL_AIR, VOXEL_FLOOR, VOXEL_WALL,
+    };
     use crate::use_cases::level_zero::ColumnPlan;
 
     /// Level 0 currently has one authored emitter contract: fixtures are
@@ -104,6 +119,54 @@ mod tests {
         for y in 1..=4 {
             let material = grid.get(0, y, 0);
             assert_eq!(material, VOXEL_WALL);
+        }
+    }
+
+    /// The bug this guards: two adjacent open (non-solid, no lintel)
+    /// columns at different ceiling heights used to grow a `VOXEL_CEILING`
+    /// skirt on the shorter column, bridging up to the taller neighbour's
+    /// height with nothing underneath it — a ceiling patch floating over
+    /// open, walkable floor. An open column must cap at its own height
+    /// only; a real step in the ceiling plane at the boundary, not an
+    /// unsupported patch.
+    #[test]
+    fn open_columns_never_grow_an_unsupported_ceiling_skirt() {
+        let short = ColumnPlan::open(4.0);
+        let tall = ColumnPlan::open(7.0);
+        let field = ColumnField::sample(2, 1, |x, _z| if x == 0 { short } else { tall });
+        let mut grid = VoxelGrid::new(2, 8, 1);
+        voxelize_columns(&mut grid, &field, 1.0);
+
+        // Column 0's own ceiling cap sits at y=4; nothing above it.
+        assert_eq!(grid.get(0, 4, 0), VOXEL_CEILING);
+        for y in 5..grid.height() {
+            assert_eq!(
+                grid.get(0, y, 0),
+                VOXEL_AIR,
+                "unsupported ceiling patch found at y={y} above an open column"
+            );
+        }
+    }
+
+    /// The support-preserving counterpart: a *solid* boundary column
+    /// between two different ceiling heights must still reach the taller
+    /// neighbour — that is an ordinary wall being tall enough to actually
+    /// separate the two rooms, not the bug above.
+    #[test]
+    fn solid_boundary_columns_still_reach_the_taller_neighbour() {
+        let mut wall = ColumnPlan::open(4.0);
+        wall.solid = true;
+        let tall = ColumnPlan::open(7.0);
+        let field = ColumnField::sample(2, 1, |x, _z| if x == 0 { wall } else { tall });
+        let mut grid = VoxelGrid::new(2, 8, 1);
+        voxelize_columns(&mut grid, &field, 1.0);
+
+        for y in 1..=7 {
+            assert_eq!(
+                grid.get(0, y, 0),
+                VOXEL_WALL,
+                "wall should reach the taller neighbour's ceiling at y={y}"
+            );
         }
     }
 }
