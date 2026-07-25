@@ -9,7 +9,6 @@
 //! flicker-scaled fixture list every renderer sees: a sputtering tube that
 //! is dark this instant radiates nothing this instant.
 
-use crate::application::collision::Aabb;
 use crate::application::ports::LightSource;
 
 /// Unlit-air baseline per level, °C. Level 0's dark corners still hold the
@@ -29,7 +28,7 @@ const HEAT_PER_IRRADIANCE: f32 = 9.0;
 /// Enclosure raises effective heating by up to this factor.
 const ENCLOSURE_GAIN: f32 = 0.6;
 /// Radius probed for enclosing collision mass.
-const ENCLOSURE_RADIUS: f32 = 6.0;
+pub const ENCLOSURE_RADIUS: f32 = 6.0;
 /// Collision-box count that reads as "fully enclosed".
 const ENCLOSURE_SATURATION: f32 = 36.0;
 
@@ -42,7 +41,7 @@ pub fn ambient_celsius(
     level: u32,
     player: [f32; 3],
     lights: &[LightSource],
-    collision: &[Aabb],
+    enclosing_collision_boxes: usize,
 ) -> f32 {
     let mut irradiance = 0.0f32;
     for light in lights {
@@ -55,19 +54,7 @@ pub fn ambient_celsius(
         irradiance += light.intensity * falloff * falloff;
     }
 
-    let mut enclosing = 0usize;
-    for aabb in collision {
-        let center = [
-            (aabb.min[0] + aabb.max[0]) * 0.5,
-            (aabb.min[2] + aabb.max[2]) * 0.5,
-        ];
-        let dx = center[0] - player[0];
-        let dz = center[1] - player[2];
-        if dx * dx + dz * dz <= ENCLOSURE_RADIUS * ENCLOSURE_RADIUS {
-            enclosing += 1;
-        }
-    }
-    let enclosure = (enclosing as f32 / ENCLOSURE_SATURATION).clamp(0.0, 1.0);
+    let enclosure = (enclosing_collision_boxes as f32 / ENCLOSURE_SATURATION).clamp(0.0, 1.0);
 
     let heat = (irradiance * HEAT_PER_IRRADIANCE).min(MAX_LIGHT_HEAT_C)
         * (1.0 + ENCLOSURE_GAIN * enclosure);
@@ -77,6 +64,7 @@ pub fn ambient_celsius(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::application::collision::Aabb;
     use crate::application::ports::LightKind;
 
     fn fixture(position: [f32; 3], intensity: f32) -> LightSource {
@@ -105,30 +93,48 @@ mod tests {
             .collect()
     }
 
+    fn nearby_wall_count(player: [f32; 3], walls: &[Aabb]) -> usize {
+        walls
+            .iter()
+            .filter(|wall| {
+                let center_x = (wall.min[0] + wall.max[0]) * 0.5;
+                let center_z = (wall.min[2] + wall.max[2]) * 0.5;
+                let dx = center_x - player[0];
+                let dz = center_z - player[2];
+                dx * dx + dz * dz <= ENCLOSURE_RADIUS * ENCLOSURE_RADIUS
+            })
+            .count()
+    }
+
     #[test]
     fn darkness_rests_at_the_level_baseline() {
-        let ambient = ambient_celsius(0, [0.0, 1.7, 0.0], &[], &[]);
+        let ambient = ambient_celsius(0, [0.0, 1.7, 0.0], &[], 0);
         assert_eq!(ambient, dark_baseline_c(0));
         assert!(dark_baseline_c(1) < dark_baseline_c(0), "Level 1 runs cold");
     }
 
     #[test]
     fn standing_under_a_fixture_heats_the_air() {
-        let lit = ambient_celsius(0, [0.0, 1.7, 0.0], &[fixture([0.0, 3.0, 0.0], 1.5)], &[]);
-        let far = ambient_celsius(0, [14.0, 1.7, 0.0], &[fixture([0.0, 3.0, 0.0], 1.5)], &[]);
-        assert!(lit > dark_baseline_c(0) + 2.0, "lit air must run hot: {lit}");
+        let lit = ambient_celsius(0, [0.0, 1.7, 0.0], &[fixture([0.0, 3.0, 0.0], 1.5)], 0);
+        let far = ambient_celsius(0, [14.0, 1.7, 0.0], &[fixture([0.0, 3.0, 0.0], 1.5)], 0);
+        assert!(
+            lit > dark_baseline_c(0) + 2.0,
+            "lit air must run hot: {lit}"
+        );
         assert!(far < lit, "heat falls off with distance");
     }
 
     #[test]
     fn enclosure_amplifies_lit_spaces_but_not_dark_ones() {
         let light = [fixture([0.0, 3.0, 0.0], 1.5)];
-        let open = ambient_celsius(0, [0.0, 1.7, 0.0], &light, &[]);
-        let tight = ambient_celsius(0, [0.0, 1.7, 0.0], &light, &walls_around(40));
+        let player = [0.0, 1.7, 0.0];
+        let walls = walls_around(40);
+        let open = ambient_celsius(0, player, &light, 0);
+        let tight = ambient_celsius(0, player, &light, nearby_wall_count(player, &walls));
         assert!(tight > open, "small lit rooms cook: {tight} vs {open}");
 
-        let dark_open = ambient_celsius(0, [0.0, 1.7, 0.0], &[], &[]);
-        let dark_tight = ambient_celsius(0, [0.0, 1.7, 0.0], &[], &walls_around(40));
+        let dark_open = ambient_celsius(0, player, &[], 0);
+        let dark_tight = ambient_celsius(0, player, &[], nearby_wall_count(player, &walls));
         assert_eq!(dark_open, dark_tight, "enclosure without light is inert");
     }
 
@@ -136,7 +142,7 @@ mod tests {
     fn a_flickered_out_tube_radiates_nothing() {
         // The engine multiplies flicker gain into intensity before calling;
         // a dropout frame arrives here as near-zero intensity.
-        let out = ambient_celsius(0, [0.0, 1.7, 0.0], &[fixture([0.0, 3.0, 0.0], 0.02)], &[]);
+        let out = ambient_celsius(0, [0.0, 1.7, 0.0], &[fixture([0.0, 3.0, 0.0], 0.02)], 0);
         assert!(out - dark_baseline_c(0) < 0.5);
     }
 }

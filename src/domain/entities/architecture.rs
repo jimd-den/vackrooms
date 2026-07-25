@@ -12,7 +12,7 @@
 //! *derived* (seed + region coordinate), not from anything stored here.
 
 use crate::domain::entities::anomaly::AnomalyInstance;
-use crate::entities::models::Position;
+use crate::domain::entities::position::Position;
 
 // ---------------------------------------------------------------------------
 // Architect genomes: a "design culture" as a seed-derived parameter set.

@@ -1,39 +1,9 @@
 use crate::domain::entities::voxel_grid::{
     FACE_OCCLUDED_NEGATIVE_X, FACE_OCCLUDED_NEGATIVE_Y, FACE_OCCLUDED_NEGATIVE_Z,
-    FACE_OCCLUDED_POSITIVE_X, FACE_OCCLUDED_POSITIVE_Y, FACE_OCCLUDED_POSITIVE_Z, MATERIAL_COLORS,
-    VOXEL_AIR, VOXEL_ALMOND_WATER, VOXEL_CEILING, VOXEL_CONCRETE_FLOOR, VOXEL_CONCRETE_WALL,
-    VOXEL_CRATE, VOXEL_DAMAGED_WALL, VOXEL_DEEP_CARPET, VOXEL_DRY_CARPET, VOXEL_FLOOR, VOXEL_FLUID,
-    VOXEL_GLIMMER, VOXEL_GRASS, VOXEL_LIGHT, VOXEL_METAL_DOOR, VOXEL_PALE_WALL, VOXEL_PIPE,
-    VOXEL_RED_LIGHT, VOXEL_RED_WALL, VOXEL_STICKY_CARPET, VOXEL_TILE_FLOOR, VOXEL_TREE, VOXEL_WALL,
-    VOXEL_WATER, VoxelGrid,
+    FACE_OCCLUDED_POSITIVE_X, FACE_OCCLUDED_POSITIVE_Y, FACE_OCCLUDED_POSITIVE_Z, VOXEL_AIR,
+    VOXEL_WALL, VoxelGrid,
 };
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum VoxelType {
-    Wall,
-    Floor,
-    Ceiling,
-    Light,
-    RedWall,
-    Grass,
-    Water,
-    Tree,
-    RedLight,
-    PaleWall,
-    DamagedWall,
-    DryCarpet,
-    DeepCarpet,
-    StickyCarpet,
-    Fluid,
-    Glimmer,
-    ConcreteWall,
-    TileFloor,
-    ConcreteFloor,
-    Crate,
-    Pipe,
-    MetalDoor,
-    AlmondWater,
-}
+use crate::use_cases::ports::MaterialPalette;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FaceDirection {
@@ -66,7 +36,7 @@ pub struct MergedQuad {
     pub w: f32,
     pub h: f32,
     pub dir: FaceDirection,
-    pub v_type: VoxelType,
+    pub material: u8,
     /// Base material color. Lighting stays separate so renderers can shade
     /// consistently instead of baking a different color per presentation.
     pub color: u32,
@@ -111,19 +81,23 @@ impl VoxelNeighborhood for GridNeighborhood<'_> {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct FaceKey {
-    v_type: VoxelType,
+    material: u8,
     color: u32,
     light: u8,
     ao: u8,
 }
 
-pub struct VoxelMapper {
+pub struct VoxelMapper<'a> {
     pub voxel_scale: f32,
+    palette: &'a dyn MaterialPalette,
 }
 
-impl VoxelMapper {
-    pub fn new(voxel_scale: f32) -> Self {
-        Self { voxel_scale }
+impl<'a> VoxelMapper<'a> {
+    pub fn new(voxel_scale: f32, palette: &'a dyn MaterialPalette) -> Self {
+        Self {
+            voxel_scale,
+            palette,
+        }
     }
 
     /// Maps the entire grid into merged exposed quads. This compatibility
@@ -203,7 +177,7 @@ impl VoxelMapper {
                 w,
                 h,
                 dir,
-                v_type: key.v_type,
+                material: key.material,
                 color: key.color,
                 light: key.light,
                 ao: key.ao,
@@ -293,48 +267,11 @@ impl VoxelMapper {
     ) -> FaceKey {
         let ao = u8::from(grid.get_face_occlusion(x, y, z) & dir.occlusion_bit() != 0);
         FaceKey {
-            v_type: Self::voxel_type(voxel),
-            color: Self::material_color(voxel),
+            material: voxel,
+            color: self.palette.color(voxel),
             light: grid.get_light(x, y, z),
             ao,
         }
-    }
-
-    fn voxel_type(voxel: u8) -> VoxelType {
-        match voxel {
-            VOXEL_WALL => VoxelType::Wall,
-            VOXEL_FLOOR => VoxelType::Floor,
-            VOXEL_CEILING => VoxelType::Ceiling,
-            VOXEL_LIGHT => VoxelType::Light,
-            VOXEL_RED_LIGHT => VoxelType::RedLight,
-            VOXEL_RED_WALL => VoxelType::RedWall,
-            VOXEL_GRASS => VoxelType::Grass,
-            VOXEL_WATER => VoxelType::Water,
-            VOXEL_TREE => VoxelType::Tree,
-            VOXEL_PALE_WALL => VoxelType::PaleWall,
-            VOXEL_DAMAGED_WALL => VoxelType::DamagedWall,
-            VOXEL_DRY_CARPET => VoxelType::DryCarpet,
-            VOXEL_DEEP_CARPET => VoxelType::DeepCarpet,
-            VOXEL_STICKY_CARPET => VoxelType::StickyCarpet,
-            VOXEL_FLUID => VoxelType::Fluid,
-            VOXEL_GLIMMER => VoxelType::Glimmer,
-            VOXEL_CONCRETE_WALL => VoxelType::ConcreteWall,
-            VOXEL_TILE_FLOOR => VoxelType::TileFloor,
-            VOXEL_CONCRETE_FLOOR => VoxelType::ConcreteFloor,
-            VOXEL_CRATE => VoxelType::Crate,
-            VOXEL_PIPE => VoxelType::Pipe,
-            VOXEL_METAL_DOOR => VoxelType::MetalDoor,
-            VOXEL_ALMOND_WATER => VoxelType::AlmondWater,
-            _ => VoxelType::Wall,
-        }
-    }
-
-    fn material_color(voxel: u8) -> u32 {
-        // Single authority: the palette table beside the material ids.
-        MATERIAL_COLORS
-            .get(voxel as usize)
-            .copied()
-            .unwrap_or(0x000000)
     }
 
     /// Helper that performs 2D greedy meshing on a slice.
@@ -360,11 +297,11 @@ impl VoxelMapper {
                         if visited[u + quad_w][v] {
                             break;
                         }
-                        if let Some(next) = get_face(u + quad_w, v) {
-                            if next == key {
-                                quad_w += 1;
-                                continue;
-                            }
+                        if let Some(next) = get_face(u + quad_w, v)
+                            && next == key
+                        {
+                            quad_w += 1;
+                            continue;
                         }
                         break;
                     }
@@ -405,13 +342,14 @@ impl VoxelMapper {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::adapters::material_palette::DEFAULT_MATERIAL_PALETTE;
 
     #[test]
     fn test_voxel_mapping() {
         let mut grid = VoxelGrid::new(2, 2, 2);
         grid.set(0, 0, 0, VOXEL_WALL);
 
-        let mapper = VoxelMapper::new(1.0);
+        let mapper = VoxelMapper::new(1.0, &DEFAULT_MATERIAL_PALETTE);
         let quads = mapper.map_voxel_grid(&grid);
 
         // Single isolated wall block should have 6 faces merged as 6 quads of size 1x1
@@ -430,7 +368,7 @@ mod tests {
         grid.set(2, 0, 0, VOXEL_WALL);
         grid.set(3, 0, 0, VOXEL_WALL);
 
-        let mapper = VoxelMapper::new(1.0);
+        let mapper = VoxelMapper::new(1.0, &DEFAULT_MATERIAL_PALETTE);
         let quads = mapper.map_voxel_grid(&grid);
 
         // The Up faces of these 4 aligned blocks should merge into a single 4x1 quad!
@@ -451,7 +389,7 @@ mod tests {
         grid.set(2, 0, 1, VOXEL_WALL); // interior x = 1
         grid.set(3, 0, 1, VOXEL_WALL); // +X halo
 
-        let mapper = VoxelMapper::new(1.0);
+        let mapper = VoxelMapper::new(1.0, &DEFAULT_MATERIAL_PALETTE);
         let quads = mapper.map_voxel_grid_with_padding(&grid, 1);
         assert!(
             !quads.iter().any(|q| q.dir == FaceDirection::East),
@@ -467,7 +405,7 @@ mod tests {
         grid.set_light(0, 0, 0, 5);
         grid.set_light(1, 0, 0, 6);
 
-        let mapper = VoxelMapper::new(1.0);
+        let mapper = VoxelMapper::new(1.0, &DEFAULT_MATERIAL_PALETTE);
         let up: Vec<_> = mapper
             .map_voxel_grid(&grid)
             .into_iter()

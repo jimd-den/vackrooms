@@ -488,7 +488,8 @@ impl Engine {
             self.level,
             self.player.position,
             &scene_lights,
-            self.world.boxes(),
+            self.world
+                .count_centers_within_xz(self.player.position, thermal::ENCLOSURE_RADIUS),
         );
         self.survival.advance_vitals(dt, instantaneous_c);
         // Consumption is deliberate; the survival aggregate also owns the
@@ -1139,8 +1140,7 @@ impl Engine {
                 .iter_ordered()
                 .map(|c| c.payload.nodes.len() / 4)
                 .sum();
-            let boxes: Vec<_> = self.store.all_collision_boxes().copied().collect();
-            self.world.rebuild(boxes.iter());
+            self.world.rebuild(self.store.all_collision_boxes());
             self.flares.extinguish_buried(self.world.boxes());
             return;
         }
@@ -1209,8 +1209,7 @@ impl Engine {
             .map(|c| c.payload.nodes.len() / 4)
             .sum();
 
-        let boxes: Vec<_> = self.store.all_collision_boxes().copied().collect();
-        self.world.rebuild(boxes.iter());
+        self.world.rebuild(self.store.all_collision_boxes());
         self.flares.extinguish_buried(self.world.boxes());
     }
 
@@ -1259,7 +1258,7 @@ mod tests {
     use std::rc::Rc;
     use vackrooms::domain::entities::anomaly::LevelExit;
     use vackrooms::domain::entities::supplies::SupplyItem;
-    use vackrooms::entities::models::Position;
+    use vackrooms::domain::entities::position::Position;
 
     /// Synchronous source whose every chunk carries one almond water beside
     /// the spawn and one door to Level 1 a few steps away.
@@ -2238,7 +2237,7 @@ mod tests {
     #[test]
     fn entering_a_pit_uses_authored_relocation() {
         use vackrooms::domain::entities::anomaly::PitHazard;
-        use vackrooms::entities::models::Position;
+        use vackrooms::domain::entities::position::Position;
         let mut engine = Engine::new(
             EngineConfig::default(),
             Box::new(RecordingRenderer::default()),

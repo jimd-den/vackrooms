@@ -8,7 +8,7 @@ use crate::domain::entities::anomaly::{
     TraversalGate, TraversalGateKind,
 };
 use crate::domain::entities::architecture::AssemblyInstance;
-use crate::entities::models::Position;
+use crate::domain::entities::position::Position;
 use crate::use_cases::anomalies::determinism::{SNAP, mix64, stable_id};
 use crate::use_cases::generate_chunk::GeneratorConfig;
 

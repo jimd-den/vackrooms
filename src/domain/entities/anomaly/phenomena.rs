@@ -3,7 +3,7 @@
 //! Placement belongs to the planner. Once an instance exists, this module
 //! provides only deterministic geometry queries derived from its stable data.
 
-use crate::entities::models::Position;
+use crate::domain::entities::position::Position;
 
 use super::geometry::{OrientedFootprint, OrthoBasis, WorldBounds};
 use super::mix64;

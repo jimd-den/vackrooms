@@ -322,15 +322,16 @@ void main() {
 
 /// Assembles the vertex shader (quad rebuild + all lighting, flat).
 pub fn vertex_source() -> String {
+    let material_color = chunks::material_color_glsl();
     let mut source = String::with_capacity(
         VERTEX_HEADER.len()
-            + chunks::MATERIAL_COLOR_GLSL.len()
+            + material_color.len()
             + chunks::NOISE_GLSL.len()
             + chunks::SPOT_CONE_GLSL.len()
             + VERTEX_BODY.len(),
     );
     source.push_str(VERTEX_HEADER);
-    source.push_str(chunks::MATERIAL_COLOR_GLSL);
+    source.push_str(&material_color);
     source.push_str(chunks::NOISE_GLSL);
     source.push_str(chunks::SPOT_CONE_GLSL);
     source.push_str(VERTEX_BODY);

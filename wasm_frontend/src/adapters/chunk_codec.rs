@@ -25,6 +25,7 @@ pub fn encode_chunk_payload(payload: &ChunkPayload) -> Vec<u8> {
             + payload.surface.vertices.len() * 10
             + payload.surface.indices.len() * 4
             + payload.surface.faces.instances.len() * 16
+            + payload.surface.light_volume_bytes.len()
             + payload.lights.len() * 51
             + payload.collision.len() * 24
             + payload.traversal_gates.len() * TraversalGate::WORDS * 4
@@ -56,15 +57,14 @@ pub fn encode_chunk_payload(payload: &ChunkPayload) -> Vec<u8> {
     put_aabb(&mut out, &s.bounds);
     out.push(s.lod);
     put_f32(&mut out, s.voxel_scale);
-    // Version-six compatibility slots: legacy WebGL workers placed an RGB
-    // light volume here. WebGPU consumes analytic lights and compact per-face
-    // baked values, so new payloads encode an empty volume while retaining
-    // all later field offsets/order.
-    for _ in 0..3 {
-        put_u32(&mut out, 0);
+    // The volume occupies the original version-six slots, so restoring the
+    // payload does not change later field offsets or require a format bump.
+    for dimension in s.light_volume_dims {
+        put_u32(&mut out, dimension);
     }
     out.push(0);
-    put_u32(&mut out, 0);
+    put_u32(&mut out, s.light_volume_bytes.len() as u32);
+    out.extend_from_slice(&s.light_volume_bytes);
 
     put_u32(&mut out, payload.lights.len() as u32);
     for l in &payload.lights {
@@ -177,10 +177,10 @@ pub fn decode_chunk_payload(bytes: &[u8]) -> Option<ChunkPayload> {
     let bounds = r.aabb()?;
     let lod = r.u8()?;
     let voxel_scale = r.f32()?;
-    let _legacy_light_volume_size = [r.u32()?, r.u32()?, r.u32()?];
-    let _legacy_light_volume_padding = r.u8()?;
+    let light_volume_dims = [r.u32()?, r.u32()?, r.u32()?];
+    let _light_volume_padding = r.u8()?;
     let volume_len = r.len(1)?;
-    let _legacy_light_volume = r.slice(volume_len)?;
+    let light_volume_bytes = r.slice(volume_len)?.to_vec();
 
     let light_count = r.len(51)?;
     let mut lights = Vec::with_capacity(light_count);
@@ -284,6 +284,8 @@ pub fn decode_chunk_payload(bytes: &[u8]) -> Option<ChunkPayload> {
                 cell_size,
             },
             voxel_scale,
+            light_volume_bytes,
+            light_volume_dims,
         },
         lights,
         collision,
@@ -431,7 +433,7 @@ mod tests {
             AnomalyKind, Axis2, AxisDirection, PitHazard, TraversalGate, TraversalGateKind,
             WorldBounds,
         };
-        use vackrooms::entities::models::Position;
+        use vackrooms::domain::entities::position::Position;
 
         let source =
             LocalChunkSource::new(SimpleNoiseProvider::new(), 42, GeneratorConfig::low_spec());

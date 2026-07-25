@@ -4,7 +4,7 @@
 //! one small module makes that invariant visible: planners choose a footprint,
 //! while samplers only translate between world and footprint-local space.
 
-use crate::entities::models::Position;
+use crate::domain::entities::position::Position;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 #[repr(u8)]

@@ -23,7 +23,7 @@
 //! query order, chunk size, or LOD. Neighboring macro cells must compute
 //! *identical* shared portals from their own side of an edge.
 
-use crate::entities::models::Position;
+use crate::domain::entities::position::Position;
 
 /// Side of one macro graph cell, world units. Exactly 2×2 regions and one
 /// anomaly macro-lattice cell, so all three lattices stay phase-aligned.

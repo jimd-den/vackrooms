@@ -2,7 +2,7 @@
 //! ceilings, fixtures, and sparse interior partitioning.
 
 use crate::domain::entities::architecture::*;
-use crate::entities::models::Position;
+use crate::domain::entities::position::Position;
 
 use super::{EDGE_MARGIN, snap};
 
@@ -41,11 +41,20 @@ fn structure_for(genome: &ArchitectGenome, aseed: f32) -> StructuralSystemInstan
         StructuralSystem::DeepSpansWithBeams => (bay * 1.5, bay),
         _ => (bay, bay),
     };
+    // A designer with no tolerance for asymmetry (1) centers the column
+    // grid on the footprint instead of letting it fall wherever an offset
+    // phase lands; one with none of that tolerance (0) keeps today's
+    // freely offset grid.
+    let tol = genome.tolerance_for_symmetry.clamp(0.0, 1.0);
+    let phase = (
+        snap(aseed * 4.0 * (1.0 - tol)),
+        snap(aseed * 8.0 % 4.0 * (1.0 - tol)),
+    );
     StructuralSystemInstance {
         system: genome.structural_system,
         bay_x,
         bay_z,
-        phase: (snap(aseed * 4.0), snap(aseed * 8.0 % 4.0)),
+        phase,
         column_side: 0.4,
     }
 }
@@ -108,9 +117,28 @@ fn fixtures_for(
         }
         LightingLanguage::SparsePendants => {
             let n = 1 + (aseed * 2.0) as i32;
+            // A designer with high tolerance for symmetry mirrors and
+            // centers pendants along the room's long axis instead of
+            // scattering them by golden-ratio jitter; `tol` blends between
+            // the two rather than switching sharply between them.
+            let tol = genome.tolerance_for_symmetry.clamp(0.0, 1.0);
+            let (cx, cz) = ((x0 + x1) * 0.5, (z0 + z1) * 0.5);
+            let long_x = (x1 - x0) >= (z1 - z0);
             for k in 0..n {
-                let fx = x0 + (x1 - x0) * (0.3 + 0.4 * ((k as f32 * 0.618 + aseed) % 1.0));
-                let fz = z0 + (z1 - z0) * (0.3 + 0.4 * ((k as f32 * 0.382 + aseed * 2.0) % 1.0));
+                let jx = x0 + (x1 - x0) * (0.3 + 0.4 * ((k as f32 * 0.618 + aseed) % 1.0));
+                let jz = z0 + (z1 - z0) * (0.3 + 0.4 * ((k as f32 * 0.382 + aseed * 2.0) % 1.0));
+                let centered = if n > 1 {
+                    k as f32 / (n - 1) as f32 - 0.5
+                } else {
+                    0.0
+                };
+                let (sx, sz) = if long_x {
+                    (cx + centered * (x1 - x0) * 0.6, cz)
+                } else {
+                    (cx, cz + centered * (z1 - z0) * 0.6)
+                };
+                let fx = jx + (sx - jx) * tol;
+                let fz = jz + (sz - jz) * tol;
                 out.push(Fixture {
                     at: Position::new(snap(fx), snap(fz)),
                     half_x: 0.3,
@@ -123,15 +151,22 @@ fn fixtures_for(
     out
 }
 
-/// Interior partitioning is deliberately sparse. A private-office suite may
-/// split once, producing one long interruption rather than a cell grid.
+/// Interior partitioning is deliberately sparse. A suite may split once or
+/// twice, producing a few long interruptions rather than a cell grid. How
+/// readily it splits at all is `furnishing_density`: 0 reads as a bare
+/// shell that almost never partitions, 1 as a densely partitioned interior
+/// that almost always does — the axis genome.rs derives but that, until
+/// now, nothing consumed.
 fn spaces_for(
     program: SpaceProgram,
     footprint: &Polygon2,
     genome: &ArchitectGenome,
     aseed: f32,
 ) -> Vec<Space> {
-    if program != SpaceProgram::PrivateOffice {
+    if !matches!(
+        program,
+        SpaceProgram::PrivateOffice | SpaceProgram::OpenOffice | SpaceProgram::ConferenceRoom
+    ) {
         return Vec::new();
     }
     let (x0, z0, x1, z1) = footprint.bounds();
@@ -139,7 +174,8 @@ fn spaces_for(
     let span = if long_x { x1 - x0 } else { z1 - z0 };
     let want = genome.room_proportions.min_side.max(12.0);
     let n = ((span / want) as usize).clamp(1, 2);
-    let n = if aseed > 0.62 { n } else { 1 };
+    let split_threshold = (1.0 - genome.furnishing_density).clamp(0.05, 0.95);
+    let n = if aseed > split_threshold { n } else { 1 };
     if n <= 1 {
         return Vec::new();
     }
@@ -155,7 +191,7 @@ fn spaces_for(
             Polygon2::rect(x0, z0 + a, x1 - x0, b - a)
         };
         out.push(Space {
-            program: SpaceProgram::PrivateOffice,
+            program,
             footprint: rect,
         });
     }
@@ -264,4 +300,106 @@ pub(super) fn place_suite(
         entrances,
         footprint,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn genome_with(furnishing_density: f32, tolerance_for_symmetry: f32) -> ArchitectGenome {
+        ArchitectGenome {
+            circulation: CirculationStyle::StraightSpine,
+            structural_system: StructuralSystem::RegularGrid,
+            room_proportions: ProportionRules {
+                min_side: 12.0,
+                max_side: 18.0,
+                elongation: 0.5,
+            },
+            threshold_language: ThresholdLanguage::OpenPortal,
+            ceiling_language: CeilingLanguage::FlatTiles,
+            lighting_language: LightingLanguage::SparsePendants,
+            furnishing_density,
+            renovation_history: RenovationStyle::Untouched,
+            tolerance_for_symmetry,
+        }
+    }
+
+    #[test]
+    fn furnishing_density_scales_how_readily_a_suite_partitions() {
+        // Wide enough (30u span, 12u min_side) that a split candidate exists
+        // at all (n = 2 before the density gate).
+        let footprint = Polygon2::rect(0.0, 0.0, 30.0, 12.0);
+        let bare_shell = genome_with(0.0, 0.5);
+        let dense = genome_with(1.0, 0.5);
+        assert!(
+            spaces_for(SpaceProgram::OpenOffice, &footprint, &bare_shell, 0.5).is_empty(),
+            "furnishing_density 0 should almost never partition"
+        );
+        assert_eq!(
+            spaces_for(SpaceProgram::OpenOffice, &footprint, &dense, 0.5).len(),
+            2,
+            "furnishing_density 1 should almost always partition"
+        );
+    }
+
+    #[test]
+    fn interior_partitions_apply_beyond_private_office() {
+        let footprint = Polygon2::rect(0.0, 0.0, 30.0, 12.0);
+        let dense = genome_with(1.0, 0.5);
+        for program in [
+            SpaceProgram::PrivateOffice,
+            SpaceProgram::OpenOffice,
+            SpaceProgram::ConferenceRoom,
+        ] {
+            assert!(
+                !spaces_for(program, &footprint, &dense, 0.5).is_empty(),
+                "{program:?} should be eligible for interior partitioning"
+            );
+        }
+        assert!(
+            spaces_for(SpaceProgram::Storage, &footprint, &dense, 0.5).is_empty(),
+            "programs outside the eligible set must stay bare shells"
+        );
+    }
+
+    #[test]
+    fn tolerance_for_symmetry_centers_the_structural_phase() {
+        let aseed = 0.37;
+        let free = structure_for(&genome_with(0.5, 0.0), aseed);
+        assert_eq!(
+            free.phase,
+            (snap(aseed * 4.0), snap(aseed * 8.0 % 4.0)),
+            "tolerance 0 must reproduce the original freely offset phase"
+        );
+        let centered = structure_for(&genome_with(0.5, 1.0), aseed);
+        assert_eq!(
+            centered.phase,
+            (0.0, 0.0),
+            "tolerance 1 must center the bay grid on the footprint"
+        );
+    }
+
+    #[test]
+    fn tolerance_for_symmetry_mirrors_and_centers_sparse_pendants() {
+        let footprint = Polygon2::rect(0.0, 0.0, 20.0, 10.0);
+        let aseed = 0.6;
+        let jittered = fixtures_for(&genome_with(0.5, 0.0), &footprint, true, aseed);
+        let centered = fixtures_for(&genome_with(0.5, 1.0), &footprint, true, aseed);
+        assert_eq!(jittered.len(), centered.len());
+        assert!(
+            jittered.iter().zip(&centered).any(|(j, c)| {
+                (j.at.x - c.at.x).abs() > 1e-3 || (j.at.z - c.at.z).abs() > 1e-3
+            }),
+            "full symmetry tolerance must move at least one pendant off its jittered spot"
+        );
+        // At full tolerance, an odd fixture count's middle pendant must land
+        // exactly on the room's centerline (the mirrored layout's fixed
+        // point), once snapped to the same lattice every position here uses.
+        let (x0, z0, x1, z1) = footprint.bounds();
+        let (cx, cz) = (snap((x0 + x1) * 0.5), snap((z0 + z1) * 0.5));
+        if centered.len() % 2 == 1 {
+            let mid = &centered[centered.len() / 2];
+            assert!((mid.at.x - cx).abs() < 1e-4 && (mid.at.z - cz).abs() < 1e-4);
+        }
+    }
 }

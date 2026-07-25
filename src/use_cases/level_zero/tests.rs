@@ -4,14 +4,17 @@ use crate::domain::entities::anomaly::{
     AnomalyInstance, AnomalyKind, RealitySnapshot, WorldBounds,
 };
 use crate::domain::entities::architecture::SpaceProgram;
-use crate::domain::entities::voxel_grid::{VOXEL_AIR, VOXEL_STICKY_CARPET, VOXEL_WALL, VoxelGrid};
-use crate::entities::models::Position;
+use crate::domain::entities::voxel_grid::{
+    VOXEL_AGED_WALLPAPER, VOXEL_AIR, VOXEL_FLOOR, VOXEL_STAINED_CARPET, VOXEL_STICKY_CARPET,
+    VOXEL_WALL, VoxelGrid,
+};
+use crate::domain::entities::position::Position;
 use crate::use_cases::anomalies::geometry::sample_anomaly;
 use crate::use_cases::generate_chunk::{GeneratorConfig, LevelTuning};
 use crate::use_cases::level_generator::LevelGenerator;
 use crate::use_cases::ports::NoiseProvider;
 use crate::use_cases::red_rooms::geometry::sample_red_room;
-use crate::use_cases::region_plan::{PLAN_WALL_T, REGION_SIZE, region_index};
+use crate::use_cases::region_plan::{PLAN_WALL_T, REGION_SIZE};
 
 struct TestNoise;
 
@@ -256,7 +259,7 @@ fn corridors_from_the_plan_are_carved_open() {
     let config = GeneratorConfig::low_spec();
     let plans =
         BackroomsLevel::region_plans_for(Position::new(0.0, 0.0), 80.0, 42, &config, &noise);
-    let plan = &plans.iter().find(|(k, _)| *k == (0, 0)).unwrap().1;
+    let plan = plans.plan_for_region(0, 0).unwrap();
     let spine = &plan.corridors[0];
 
     let mut checked = 0;
@@ -300,11 +303,9 @@ fn circulation_uses_the_raised_ceiling_hierarchy() {
                 &config,
                 &noise,
             );
-            let plan = &plans
-                .iter()
-                .find(|(key, _)| *key == (rx, rz))
-                .expect("requested region plan")
-                .1;
+            let plan = plans
+                .plan_for_region(rx, rz)
+                .expect("requested region plan");
             for spine in &plan.corridors {
                 let segment = spine.path.windows(2).next().expect("spine segment");
                 let sample = Position::new(
@@ -345,7 +346,7 @@ fn assemblies_have_walls_and_open_entrances() {
     let tuning = LevelTuning::default();
     let plans =
         BackroomsLevel::region_plans_for(Position::new(0.0, 0.0), 80.0, 42, &config, &noise);
-    let plan = &plans.iter().find(|(k, _)| *k == (0, 0)).unwrap().1;
+    let plan = plans.plan_for_region(0, 0).unwrap();
     assert!(!plan.assemblies.is_empty());
 
     for a in &plan.assemblies {
@@ -412,7 +413,7 @@ fn abandoned_expansions_are_unlit() {
                 &config,
                 &noise,
             );
-            let plan = &plans[0].1;
+            let plan = plans.plan_for_region(rx, rz).unwrap();
             for a in &plan.assemblies {
                 if !a.corruption.abandoned {
                     continue;
@@ -475,7 +476,7 @@ fn stairwells_sample_as_rising_flights() {
                 &config,
                 &noise,
             );
-            let plan = &plans.iter().find(|(k, _)| *k == (rx, rz)).unwrap().1;
+            let plan = plans.plan_for_region(rx, rz).unwrap();
             let Some(stair) = plan
                 .assemblies
                 .iter()
@@ -599,11 +600,9 @@ fn rare_doorways_still_have_lintels() {
                 &config,
                 &noise,
             );
-            let plan = &plans
-                .iter()
-                .find(|(key, _)| *key == (rx, rz))
-                .expect("requested region plan")
-                .1;
+            let plan = plans
+                .plan_for_region(rx, rz)
+                .expect("requested region plan");
             for a in &plan.assemblies {
                 for e in &a.entrances {
                     if e.width <= DOOR_WIDTH + 0.01 {
@@ -729,7 +728,11 @@ fn lods_of_the_same_chunk_correspond() {
         GeneratorConfig::low_spec().at_lod(1),
         &noise,
     );
-    let solid = |g: &VoxelGrid, x: usize, z: usize| g.get(x, 1, z) == VOXEL_WALL;
+    // Ordinary fabric walls now voxelize as either the fresh or the aged
+    // wallpaper material depending on `institution_age`, both equally solid.
+    let solid = |g: &VoxelGrid, x: usize, z: usize| {
+        matches!(g.get(x, 1, z), VOXEL_WALL | VOXEL_AGED_WALLPAPER)
+    };
     let (mut matches, mut total) = (0usize, 0usize);
     for z in 0..coarse.depth() {
         for x in 0..coarse.width() {
@@ -775,7 +778,7 @@ fn spawn_is_a_readable_walled_corridor() {
 
     let plans =
         BackroomsLevel::region_plans_for(Position::new(0.0, 0.0), 80.0, 42, &config, &noise);
-    let plan = &plans.iter().find(|(k, _)| *k == (0, 0)).unwrap().1;
+    let plan = plans.plan_for_region(0, 0).unwrap();
     let spine = &plan.corridors[0];
     assert!(
         spine.distance(sp.x, sp.z) < 0.3,
@@ -836,8 +839,9 @@ fn every_fabric_cell_opens_west_or_north() {
                 &noise,
             );
             let plan_for = |wx: f32, wz: f32| {
-                let key = (region_index(wx), region_index(wz));
-                &plans.iter().find(|(k, _)| *k == key).unwrap().1
+                plans
+                    .plan_at(Position::new(wx, wz))
+                    .expect("region window covers fabric cell")
             };
             // The invariant belongs to *pure* fabric. Cells clipped by a
             // corridor edge or an assembly take their connectivity from
@@ -922,7 +926,7 @@ fn red_rooms_are_lit_red_but_never_built_red() {
                 &config,
                 &noise,
             );
-            let plan = &plans.iter().find(|(k, _)| *k == (rx, rz)).unwrap().1;
+            let plan = plans.plan_for_region(rx, rz).unwrap();
             for a in &plan.assemblies {
                 if !a.corruption.red_room {
                     continue;
@@ -1117,7 +1121,7 @@ fn red_threshold_closes_the_remembered_entrance_into_a_loop() {
                 &config,
                 &noise,
             );
-            let plan = &plans.iter().find(|(k, _)| *k == (rx, rz)).unwrap().1;
+            let plan = plans.plan_for_region(rx, rz).unwrap();
             if let Some(red) = plan
                 .anomalies
                 .iter()
@@ -1512,11 +1516,9 @@ fn peripheral_shift_rearranges_fabric_but_never_the_plan() {
     let plans =
         BackroomsLevel::region_plans_for(Position::new(0.0, 0.0), REGION_SIZE, 42, &config, &noise);
     let plan_for = |wx: f32, wz: f32| {
-        &plans
-            .iter()
-            .find(|(k, _)| *k == (region_index(wx), region_index(wz)))
-            .unwrap()
-            .1
+        plans
+            .plan_at(Position::new(wx, wz))
+            .expect("region window covers sampled fabric")
     };
     // Drift cells 0..=1 on each axis (world 0..80); leave the rest pristine.
     let reality = drifted_reality(0, 1);
@@ -2011,6 +2013,57 @@ fn old_territory_has_more_dead_lights_than_young_territory() {
     );
 }
 
+/// Ordinary fabric now derives its wall/floor materials from
+/// `EnvironmentProfile` instead of hardcoded constants, with
+/// `institution_age` (sampled at each column's own `FABRIC_CELL` anchor)
+/// steering a real decay gradient: old wings should show
+/// `VOXEL_AGED_WALLPAPER`/`VOXEL_STAINED_CARPET`, young wings the ordinary
+/// `VOXEL_WALL`/`VOXEL_FLOOR`.
+#[test]
+fn old_territory_shows_stained_ordinary_materials() {
+    use crate::use_cases::world_topology::institution_age_at;
+    let noise = TestNoise;
+    let tuning = LevelTuning::default();
+    let (mut fresh_wall, mut aged_wall) = (false, false);
+    let (mut fresh_floor, mut aged_floor) = (false, false);
+    for kz in -40i64..40 {
+        for kx in -40i64..40 {
+            let anchor_x = (kx as f32 + 0.5) * FABRIC_CELL;
+            let anchor_z = (kz as f32 + 0.5) * FABRIC_CELL;
+            if BackroomsLevel::in_expanse(&noise, 42, anchor_x, anchor_z) {
+                continue;
+            }
+            let age = institution_age_at(&noise, 42, anchor_x, anchor_z);
+            let base_x = kx as f32 * FABRIC_CELL;
+            let base_z = kz as f32 * FABRIC_CELL;
+            // A near-wall-band offset and a room-center offset per cell, so
+            // both a solid and a floor column get a chance every iteration
+            // (fabric-lattice-test-stride pitfall: a single fixed offset can
+            // land in the same relative spot forever and miss a class of
+            // column entirely).
+            for (ox, oz) in [(0.05, 3.6), (3.6, 3.6)] {
+                let column =
+                    BackroomsLevel::column_plan(&noise, 42, &tuning, base_x + ox, base_z + oz);
+                if column.solid {
+                    if age < 0.35 {
+                        fresh_wall |= column.wall_material == VOXEL_WALL;
+                    } else if age > 0.65 {
+                        aged_wall |= column.wall_material == VOXEL_AGED_WALLPAPER;
+                    }
+                } else if age < 0.35 {
+                    fresh_floor |= column.floor_material == VOXEL_FLOOR;
+                } else if age > 0.65 {
+                    aged_floor |= column.floor_material == VOXEL_STAINED_CARPET;
+                }
+            }
+        }
+    }
+    assert!(fresh_wall, "no fresh (young-territory) wall column sampled");
+    assert!(aged_wall, "no aged (old-territory) wall column sampled");
+    assert!(fresh_floor, "no fresh (young-territory) floor column sampled");
+    assert!(aged_floor, "no aged (old-territory) floor column sampled");
+}
+
 #[test]
 fn test_print_ascii_map() {
     let noise = TestNoise;
@@ -2019,7 +2072,7 @@ fn test_print_ascii_map() {
     // The whole of region (0,0) at 0.5 u per character.
     let plans =
         BackroomsLevel::region_plans_for(Position::new(0.0, 0.0), 80.0, 42, &config, &noise);
-    let plan = &plans.iter().find(|(k, _)| *k == (0, 0)).unwrap().1;
+    let plan = plans.plan_for_region(0, 0).unwrap();
     let mut map = String::new();
     for sz in 0..160 {
         for sx in 0..160 {

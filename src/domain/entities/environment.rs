@@ -7,15 +7,20 @@
 //! profile instead of re-inventing ad hoc zone checks.
 
 use crate::domain::entities::voxel_grid::{
-    VOXEL_DAMAGED_WALL, VOXEL_DEEP_CARPET, VOXEL_DRY_CARPET, VOXEL_FLOOR, VOXEL_FLUID,
-    VOXEL_GLIMMER, VOXEL_LIGHT, VOXEL_PALE_WALL, VOXEL_RED_LIGHT, VOXEL_RED_WALL,
-    VOXEL_STICKY_CARPET, VOXEL_WALL,
+    VOXEL_AGED_WALLPAPER, VOXEL_DAMAGED_WALL, VOXEL_DEEP_CARPET, VOXEL_DRY_CARPET, VOXEL_FLOOR,
+    VOXEL_FLUID, VOXEL_GLIMMER, VOXEL_LIGHT, VOXEL_PALE_WALL, VOXEL_RED_LIGHT, VOXEL_RED_WALL,
+    VOXEL_STAINED_CARPET, VOXEL_STICKY_CARPET, VOXEL_WALL,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WallTreatment {
     /// Ordinary Level 0 yellow wallpaper.
     YellowWallpaper,
+    /// Ordinary Level 0 wallpaper, but `institution_age` has passed the
+    /// point where this wing reads as visibly old: duller, browner,
+    /// stained. Never a separate zone from `YellowWallpaper` — the same
+    /// fabric, sampled later in its life.
+    AgedWallpaper,
     /// Pale bone-tinted arch-room masonry.
     PaleArch,
     /// Rough, damaged blackout-expanse surface.
@@ -215,6 +220,7 @@ impl EnvironmentProfile {
     pub fn wall_voxel(&self) -> u8 {
         match self.wall {
             WallTreatment::YellowWallpaper => VOXEL_WALL,
+            WallTreatment::AgedWallpaper => VOXEL_AGED_WALLPAPER,
             WallTreatment::PaleArch => VOXEL_PALE_WALL,
             WallTreatment::RoughBlackout => VOXEL_DAMAGED_WALL,
             WallTreatment::CrimsonPeeled => VOXEL_RED_WALL,
@@ -233,6 +239,10 @@ impl EnvironmentProfile {
                 _ => VOXEL_DEEP_CARPET,
             },
             (CarpetDepth::Deep, _) => VOXEL_DEEP_CARPET,
+            (CarpetDepth::Normal, CarpetCondition::Damp) => match self.wall {
+                WallTreatment::AgedWallpaper => VOXEL_STAINED_CARPET,
+                _ => VOXEL_FLOOR,
+            },
             _ => VOXEL_FLOOR,
         }
     }
@@ -280,6 +290,23 @@ mod tests {
         let core = EnvironmentProfile::blackout(0.9);
         assert_eq!(core.ceiling, CeilingCharacter::Compressed);
         assert_eq!(core.audio, AudioAmbience::BlackoutSilence);
+    }
+
+    #[test]
+    fn aged_wallpaper_stains_ordinary_fabric_carpet_too() {
+        let fresh = EnvironmentProfile::level0_fabric();
+        let aged = EnvironmentProfile {
+            wall: WallTreatment::AgedWallpaper,
+            ..EnvironmentProfile::level0_fabric()
+        };
+        assert_eq!(fresh.wall_voxel(), VOXEL_WALL);
+        assert_eq!(fresh.floor_voxel(), VOXEL_FLOOR);
+        assert_eq!(aged.wall_voxel(), VOXEL_AGED_WALLPAPER);
+        assert_eq!(
+            aged.floor_voxel(),
+            VOXEL_STAINED_CARPET,
+            "an aged wing's ordinary carpet must read as stained too, not just the wall"
+        );
     }
 
     #[test]

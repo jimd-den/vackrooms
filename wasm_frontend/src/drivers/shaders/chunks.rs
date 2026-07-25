@@ -6,6 +6,10 @@
 //! is a self-contained set of GLSL functions/consts with no `uniform`
 //! declarations, so any stage can include it.
 
+use std::fmt::Write;
+
+use vackrooms::adapters::material_palette::MATERIAL_VISUALS;
+
 /// The flashlight spotlight cone — **GLSL mirror of the single spec in
 /// `adapters::cpu_splatter::flashlight`** (inner/outer angle, finite-range
 /// inverse-square transport, lamp offset, and tint). A tuning change there
@@ -59,37 +63,41 @@ vec3 spotBeam(vec3 camPos, vec3 camForward, vec3 surfacePos, vec3 N) {
 }
 "#;
 
-/// Material palette lookup, shared by the surface and splat paths so both
-/// rasterizers color a wall identically.
-pub const MATERIAL_COLOR_GLSL: &str = r#"
-vec3 materialColor(float material) {
-    // Exact bytes from domain::voxel_grid::MATERIAL_COLORS. Keeping the
-    // integer numerators visible makes palette drift reviewable.
-    if (material < 1.5) return vec3(221.0, 204.0, 102.0) / 255.0;
-    if (material < 2.5) return vec3(153.0, 136.0,  17.0) / 255.0;
-    if (material < 3.5) return vec3(204.0, 204.0, 204.0) / 255.0;
-    if (material < 4.5) return vec3(255.0, 248.0, 214.0) / 255.0;
-    if (material < 5.5) return vec3(136.0,   0.0,   0.0) / 255.0;
-    if (material < 6.5) return vec3( 79.0, 154.0,  61.0) / 255.0;
-    if (material < 7.5) return vec3( 58.0, 111.0, 184.0) / 255.0;
-    if (material < 8.5) return vec3(107.0,  74.0,  47.0) / 255.0;
-    if (material < 9.5) return vec3(255.0,  68.0,  51.0) / 255.0;
-    if (material < 10.5) return vec3(216.0, 210.0, 192.0) / 255.0;
-    if (material < 11.5) return vec3(138.0, 127.0,  92.0) / 255.0;
-    if (material < 12.5) return vec3(194.0, 183.0, 107.0) / 255.0;
-    if (material < 13.5) return vec3(107.0,  94.0,  34.0) / 255.0;
-    if (material < 14.5) return vec3(122.0,  74.0,  38.0) / 255.0;
-    if (material < 15.5) return vec3( 46.0,  42.0,  34.0) / 255.0;
-    if (material < 16.5) return vec3(159.0, 196.0, 232.0) / 255.0;
-    if (material < 17.5) return vec3(143.0, 141.0, 136.0) / 255.0;
-    if (material < 18.5) return vec3(189.0, 187.0, 176.0) / 255.0;
-    if (material < 19.5) return vec3(110.0, 108.0, 102.0) / 255.0;
-    if (material < 20.5) return vec3(156.0, 123.0,  74.0) / 255.0;
-    if (material < 21.5) return vec3( 62.0,  67.0,  72.0) / 255.0;
-    if (material < 22.5) return vec3( 74.0,  90.0, 106.0) / 255.0;
-    return vec3(237.0, 230.0, 208.0) / 255.0;
+/// Builds the palette lookup shared by both WebGL rasterizers. Shader source
+/// is assembled once at startup, so deriving it here removes a hand-maintained
+/// GLSL mirror without adding frame-time work.
+pub fn material_color_glsl() -> String {
+    let mut source = String::from("vec3 materialColor(float material) {\n");
+    for (material, visual) in MATERIAL_VISUALS.iter().enumerate() {
+        let red = (visual.color >> 16) & 0xff;
+        let green = (visual.color >> 8) & 0xff;
+        let blue = visual.color & 0xff;
+        writeln!(
+            source,
+            "    if (material < {:.1}) return vec3({red}.0, {green}.0, {blue}.0) / 255.0;",
+            material as f32 + 0.5,
+        )
+        .expect("writing to a String cannot fail");
+    }
+    source.push_str("    return vec3(0.0);\n}\n");
+    source
 }
-"#;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn generated_glsl_contains_every_palette_entry() {
+        let glsl = material_color_glsl();
+        for visual in MATERIAL_VISUALS {
+            let red = (visual.color >> 16) & 0xff;
+            let green = (visual.color >> 8) & 0xff;
+            let blue = visual.color & 0xff;
+            assert!(glsl.contains(&format!("vec3({red}.0, {green}.0, {blue}.0)")));
+        }
+    }
+}
 
 /// World-hash and interleaved-gradient-noise helpers.
 ///

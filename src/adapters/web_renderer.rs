@@ -1,8 +1,9 @@
 use crate::adapters::json_presenter::JsonPresenter;
+use crate::adapters::material_palette::DEFAULT_MATERIAL_PALETTE;
 use crate::adapters::octree_gpu_serializer::OctreeGpuSerializer;
 use crate::adapters::voxel_mapper::VoxelMapper;
 use crate::domain::entities::voxel_grid::VoxelGrid;
-use crate::domain::use_cases::build_octree::BuildOctreeUseCase;
+use crate::use_cases::build_octree::BuildOctreeUseCase;
 
 /// WebRendererAdapter acts as a Presenter in Clean Architecture.
 /// It translates the core domain object (VoxelGrid) into formats
@@ -11,8 +12,8 @@ pub struct WebRendererAdapter;
 
 impl WebRendererAdapter {
     /// Translates VoxelGrid into a JSON string representing greedy-meshed quads.
-    pub fn to_json(grid: &VoxelGrid, _chunk_size: f32) -> String {
-        let mapper = VoxelMapper::new(0.1);
+    pub fn to_json(grid: &VoxelGrid, voxel_scale: f32) -> String {
+        let mapper = VoxelMapper::new(voxel_scale, &DEFAULT_MATERIAL_PALETTE);
         let quads = mapper.map_voxel_grid(grid);
         JsonPresenter::render_voxels(&quads)
     }
@@ -20,7 +21,7 @@ impl WebRendererAdapter {
     /// Converts VoxelGrid into a Sparse Voxel Octree (SVO) and serializes
     /// the flattened node texture buffer and structural metadata to JSON.
     pub fn to_octree_json(grid: &VoxelGrid, depth: u32, world_size: f32) -> String {
-        let builder = BuildOctreeUseCase::new();
+        let builder = BuildOctreeUseCase::new(&DEFAULT_MATERIAL_PALETTE);
         let svo = builder.execute(grid, depth, world_size);
         let gpu_data = OctreeGpuSerializer::serialize_to_gpu_data(&svo);
 
@@ -62,7 +63,7 @@ impl WebRendererAdapter {
         voxel_scale: f32,
         chunk_size: f32,
     ) -> Vec<u8> {
-        let builder = BuildOctreeUseCase::new();
+        let builder = BuildOctreeUseCase::new(&DEFAULT_MATERIAL_PALETTE);
         let svo = builder.execute(grid, depth, world_size);
         let gpu_data = OctreeGpuSerializer::serialize_to_gpu_data(&svo);
 
@@ -96,6 +97,10 @@ mod tests {
         grid.set(0, 0, 0, VOXEL_WALL);
         let json = WebRendererAdapter::to_json(&grid, 2.0);
         assert!(json.starts_with("["));
+        assert!(
+            json.contains("\"w\":2"),
+            "voxel scale must reach the mapper"
+        );
     }
 
     #[test]

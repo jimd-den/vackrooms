@@ -2,13 +2,12 @@
 //! indexed mesh payload. Geometry stays chunk-local and fixed-point so GPU
 //! uploads are small and camera precision does not degrade far from origin.
 
-use vackrooms::adapters::voxel_mapper::{FaceDirection, MergedQuad, VoxelMapper, VoxelType};
-use vackrooms::domain::entities::voxel_grid::{
-    VOXEL_ALMOND_WATER, VOXEL_CEILING, VOXEL_CONCRETE_FLOOR, VOXEL_CONCRETE_WALL, VOXEL_CRATE,
-    VOXEL_DAMAGED_WALL, VOXEL_DEEP_CARPET, VOXEL_DRY_CARPET, VOXEL_FLOOR, VOXEL_FLUID,
-    VOXEL_GLIMMER, VOXEL_GRASS, VOXEL_LIGHT, VOXEL_METAL_DOOR, VOXEL_PALE_WALL, VOXEL_PIPE,
-    VOXEL_RED_LIGHT, VOXEL_RED_WALL, VOXEL_STICKY_CARPET, VOXEL_TILE_FLOOR, VOXEL_TREE, VOXEL_WALL,
-    VOXEL_WATER, VoxelGrid,
+use vackrooms::adapters::material_palette::DEFAULT_MATERIAL_PALETTE;
+use vackrooms::adapters::voxel_mapper::{FaceDirection, MergedQuad, VoxelMapper};
+use vackrooms::domain::entities::voxel_grid::VoxelGrid;
+
+use vackrooms::domain::entities::probe_grid::{
+    DEFAULT_PROBE_DEPTH, DEFAULT_PROBE_HEIGHT, DEFAULT_PROBE_WIDTH, ProbeGrid,
 };
 
 use crate::application::collision::Aabb;
@@ -43,7 +42,7 @@ pub fn build_surface_artifacts(
     lateral_padding: usize,
     artifacts: RenderArtifactNeeds,
 ) -> SurfaceMeshPayload {
-    let mapper = VoxelMapper::new(voxel_scale);
+    let mapper = VoxelMapper::new(voxel_scale, &DEFAULT_MATERIAL_PALETTE);
     let quads = mapper.map_voxel_grid_with_padding(halo_grid, lateral_padding);
     let width = halo_grid.width() - lateral_padding * 2;
     let depth = halo_grid.depth() - lateral_padding * 2;
@@ -55,6 +54,13 @@ pub fn build_surface_artifacts(
             depth as f32 * voxel_scale,
         ],
     );
+    let probe_grid = ProbeGrid::from_voxel_grid(
+        halo_grid,
+        DEFAULT_PROBE_WIDTH,
+        DEFAULT_PROBE_HEIGHT,
+        DEFAULT_PROBE_DEPTH,
+    );
+    let (pw, ph, pd) = probe_grid.dimensions();
     let mut mesh = SurfaceMeshPayload {
         vertices: Vec::with_capacity(if artifacts.indexed_surface_mesh() {
             quads.len() * 4
@@ -74,6 +80,8 @@ pub fn build_surface_artifacts(
             crate::application::ports::FaceInstanceSet::empty()
         },
         voxel_scale,
+        light_volume_bytes: probe_grid.as_bytes().to_vec(),
+        light_volume_dims: [pw as u32, ph as u32, pd as u32],
     };
     if artifacts.indexed_surface_mesh() {
         for quad in &quads {
@@ -139,7 +147,7 @@ fn append_quad(mesh: &mut SurfaceMeshPayload, quad: &MergedQuad, voxel_scale: f3
 
     let base = mesh.vertices.len() as u32;
     let normal_axis = normal_axis(quad.dir);
-    let material = material_id(quad.v_type);
+    let material = quad.material;
     for position in points {
         mesh.vertices.push(PackedVertex {
             position: position.map(pack_position),
@@ -170,37 +178,10 @@ fn normal_axis(dir: FaceDirection) -> u8 {
     }
 }
 
-pub(crate) fn material_id(v_type: VoxelType) -> u8 {
-    match v_type {
-        VoxelType::Wall => VOXEL_WALL,
-        VoxelType::Floor => VOXEL_FLOOR,
-        VoxelType::Ceiling => VOXEL_CEILING,
-        VoxelType::Light => VOXEL_LIGHT,
-        VoxelType::RedWall => VOXEL_RED_WALL,
-        VoxelType::Grass => VOXEL_GRASS,
-        VoxelType::Water => VOXEL_WATER,
-        VoxelType::Tree => VOXEL_TREE,
-        VoxelType::RedLight => VOXEL_RED_LIGHT,
-        VoxelType::PaleWall => VOXEL_PALE_WALL,
-        VoxelType::DamagedWall => VOXEL_DAMAGED_WALL,
-        VoxelType::DryCarpet => VOXEL_DRY_CARPET,
-        VoxelType::DeepCarpet => VOXEL_DEEP_CARPET,
-        VoxelType::StickyCarpet => VOXEL_STICKY_CARPET,
-        VoxelType::Fluid => VOXEL_FLUID,
-        VoxelType::Glimmer => VOXEL_GLIMMER,
-        VoxelType::ConcreteWall => VOXEL_CONCRETE_WALL,
-        VoxelType::TileFloor => VOXEL_TILE_FLOOR,
-        VoxelType::ConcreteFloor => VOXEL_CONCRETE_FLOOR,
-        VoxelType::Crate => VOXEL_CRATE,
-        VoxelType::Pipe => VOXEL_PIPE,
-        VoxelType::MetalDoor => VOXEL_METAL_DOOR,
-        VoxelType::AlmondWater => VOXEL_ALMOND_WATER,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use vackrooms::domain::entities::voxel_grid::VOXEL_WALL;
 
     #[test]
     fn isolated_voxel_becomes_indexed_closed_surface() {

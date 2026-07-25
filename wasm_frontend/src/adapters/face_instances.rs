@@ -17,7 +17,6 @@
 
 use vackrooms::adapters::voxel_mapper::{FaceDirection, MergedQuad};
 
-use crate::adapters::surface_mesh::material_id;
 use crate::application::ports::{
     FACE_INSTANCE_FLAG_EMISSIVE, FaceCellRange, FaceInstanceSet, POSITION_FIXED_SCALE,
     PackedFaceInstance,
@@ -143,7 +142,7 @@ fn face_frame(quad: &MergedQuad, s: f32) -> FaceFrame {
 
 fn emit_capped(quad: &MergedQuad, s: f32, max_cells: u32, out: &mut Vec<PackedFaceInstance>) {
     let frame = face_frame(quad, s);
-    let material = material_id(quad.v_type);
+    let material = quad.material;
     let flags = if vackrooms::domain::entities::voxel_grid::EMISSIVE_MATERIALS.contains(&material) {
         FACE_INSTANCE_FLAG_EMISSIVE
     } else {
@@ -201,6 +200,7 @@ fn normal_axis(dir: FaceDirection) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use vackrooms::adapters::material_palette::DEFAULT_MATERIAL_PALETTE;
     use vackrooms::adapters::voxel_mapper::VoxelMapper;
     use vackrooms::domain::entities::voxel_grid::{VOXEL_WALL, VoxelGrid};
 
@@ -212,7 +212,8 @@ mod tests {
     fn isolated_voxel_yields_six_unit_faces_on_their_planes() {
         let mut grid = VoxelGrid::new(3, 2, 3);
         grid.set(1, 0, 1, VOXEL_WALL);
-        let quads = VoxelMapper::new(1.0).map_voxel_grid_with_padding(&grid, 1);
+        let quads = VoxelMapper::new(1.0, &DEFAULT_MATERIAL_PALETTE)
+            .map_voxel_grid_with_padding(&grid, 1);
         let set = build_face_instances(&quads, 1.0);
 
         assert_eq!(set.instances.len(), 6);
@@ -247,7 +248,8 @@ mod tests {
                 grid.set(x, 0, z, VOXEL_WALL);
             }
         }
-        let quads = VoxelMapper::new(1.0).map_voxel_grid_with_padding(&grid, 1);
+        let quads = VoxelMapper::new(1.0, &DEFAULT_MATERIAL_PALETTE)
+            .map_voxel_grid_with_padding(&grid, 1);
         let set = build_face_instances(&quads, 1.0);
 
         let max_cells = (MAX_FACE_EXTENT_UNITS.floor() as u32).max(1);
@@ -273,7 +275,8 @@ mod tests {
                 }
             }
         }
-        let quads = VoxelMapper::new(0.5).map_voxel_grid_with_padding(&grid, 1);
+        let quads = VoxelMapper::new(0.5, &DEFAULT_MATERIAL_PALETTE)
+            .map_voxel_grid_with_padding(&grid, 1);
         let set = build_face_instances(&quads, 0.5);
 
         let mut covered = 0u32;
@@ -304,7 +307,8 @@ mod tests {
             }
         }
         let s = 0.4;
-        let quads = VoxelMapper::new(s).map_voxel_grid_with_padding(&grid, 1);
+        let quads = VoxelMapper::new(s, &DEFAULT_MATERIAL_PALETTE)
+            .map_voxel_grid_with_padding(&grid, 1);
         let set = build_face_instances(&quads, s);
 
         let quad_area: f32 = quads.iter().map(|q| (q.w / s) * (q.h / s)).sum();

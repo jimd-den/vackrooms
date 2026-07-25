@@ -11,9 +11,10 @@ use crate::domain::entities::anomaly::{AnomalyKind, LevelExit, RealitySnapshot};
 use crate::domain::entities::architecture::RegionPlan;
 use crate::domain::entities::supplies::{SupplyItem, SupplyKind};
 use crate::domain::entities::voxel_grid::{VOXEL_AIR, VOXEL_WALL, VoxelGrid};
-use crate::entities::models::Position;
+use crate::domain::entities::position::Position;
 use crate::use_cases::anomalies::determinism::{hash, unit};
 use crate::use_cases::generate_chunk::GeneratorConfig;
+use crate::use_cases::infinite_level::InfiniteRegionWindow;
 use crate::use_cases::level_generator::LEVEL_HABITABLE;
 use crate::use_cases::level_one::generate::{
     ARRIVAL_POINT, DOOR_TRIGGER_HALF, stamp_level_door, stamp_supply_marker,
@@ -49,16 +50,12 @@ pub(crate) struct ProvisionContext<'a> {
     pub config: &'a GeneratorConfig,
     pub reality: &'a RealitySnapshot,
     pub noise: &'a dyn NoiseProvider,
-    pub plans: &'a [((i64, i64), RegionPlan)],
+    pub plans: &'a InfiniteRegionWindow,
 }
 
 impl ProvisionContext<'_> {
     fn plan_of(&self, wx: f32, wz: f32) -> Option<&RegionPlan> {
-        let key = (region_index(wx), region_index(wz));
-        self.plans
-            .iter()
-            .find(|(k, _)| *k == key)
-            .map(|(_, plan)| plan)
+        self.plans.plan_at(Position::new(wx, wz))
     }
 
     /// True when the walking plane at a world point is ordinary open fabric:

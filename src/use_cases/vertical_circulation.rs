@@ -30,7 +30,7 @@ use crate::domain::entities::architecture::{
     StructuralSystem, StructuralSystemInstance,
 };
 use crate::domain::entities::world_topology::{VerticalLink, VerticalLinkKind};
-use crate::entities::models::Position;
+use crate::domain::entities::position::Position;
 use crate::use_cases::level_zero::ColumnPlan;
 
 /// Stairwell frontage along its corridor, world units.

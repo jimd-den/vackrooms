@@ -278,7 +278,10 @@ pub fn get_blueprint_svg(seed: u32, rx: i32, rz: i32, voxel_scale: f32, size_wor
     let noise = vackrooms::frameworks_drivers::simple_noise::SimpleNoiseProvider::new();
     let plan = vackrooms::use_cases::region_plan::generate_region_plan(
         seed,
-        vackrooms::entities::models::Position::new(rx as f32 * size_world, rz as f32 * size_world),
+        vackrooms::domain::entities::position::Position::new(
+            rx as f32 * size_world,
+            rz as f32 * size_world,
+        ),
         size_world,
         &vackrooms::use_cases::generate_chunk::GeneratorConfig::low_spec(),
         &noise,
@@ -330,7 +333,10 @@ pub fn get_debug_region_json(seed: u32, region_x: i32, region_z: i32) -> String 
     let noise = vackrooms::frameworks_drivers::simple_noise::SimpleNoiseProvider::new();
     let size = vackrooms::use_cases::region_plan::REGION_SIZE;
     let origin =
-        vackrooms::entities::models::Position::new(region_x as f32 * size, region_z as f32 * size);
+        vackrooms::domain::entities::position::Position::new(
+            region_x as f32 * size,
+            region_z as f32 * size,
+        );
     let config = vackrooms::use_cases::generate_chunk::GeneratorConfig::low_spec();
     let plan = vackrooms::use_cases::region_plan::generate_region_plan(
         seed, origin, size, &config, &noise,
@@ -458,12 +464,12 @@ pub fn get_debug_chunk_json(seed: u32, chunk_x: f32, chunk_z: f32, voxel_scale: 
     } else {
         vackrooms::use_cases::generate_chunk::GeneratorConfig::low_spec()
     };
-    let chunk_origin = vackrooms::entities::models::Position::new(chunk_x, chunk_z);
+    let chunk_origin = vackrooms::domain::entities::position::Position::new(chunk_x, chunk_z);
     let generator =
         vackrooms::use_cases::generate_chunk::GenerateChunkArchitectureUseCase::new(&noise);
     let grid = generator.execute(chunk_origin, seed, config.clone());
     let region_size = vackrooms::use_cases::region_plan::REGION_SIZE;
-    let region_origin = vackrooms::entities::models::Position::new(
+    let region_origin = vackrooms::domain::entities::position::Position::new(
         (chunk_x / region_size).floor() * region_size,
         (chunk_z / region_size).floor() * region_size,
     );
@@ -713,7 +719,7 @@ pub fn get_chunk_blueprint_svg(
     layer: String,
 ) -> String {
     let noise = vackrooms::frameworks_drivers::simple_noise::SimpleNoiseProvider::new();
-    let chunk_pos = vackrooms::entities::models::Position::new(chunk_x, chunk_z);
+    let chunk_pos = vackrooms::domain::entities::position::Position::new(chunk_x, chunk_z);
 
     let config = if voxel_scale <= 0.1 {
         vackrooms::use_cases::generate_chunk::GeneratorConfig::high_spec()
@@ -730,7 +736,7 @@ pub fn get_chunk_blueprint_svg(
     let rz = (chunk_z / region_size).floor() * region_size;
     let semantics = vackrooms::use_cases::region_plan::generate_region_plan(
         seed,
-        vackrooms::entities::models::Position::new(rx, rz),
+        vackrooms::domain::entities::position::Position::new(rx, rz),
         region_size,
         &config,
         &noise,
@@ -780,7 +786,7 @@ pub fn get_chunk_voxel_blueprint_svg(
     show_ceiling: bool,
 ) -> String {
     let noise = vackrooms::frameworks_drivers::simple_noise::SimpleNoiseProvider::new();
-    let chunk_pos = vackrooms::entities::models::Position::new(chunk_x, chunk_z);
+    let chunk_pos = vackrooms::domain::entities::position::Position::new(chunk_x, chunk_z);
 
     let config = if voxel_scale <= 0.1 {
         vackrooms::use_cases::generate_chunk::GeneratorConfig::high_spec()
@@ -799,7 +805,7 @@ pub fn get_chunk_voxel_blueprint_svg(
     let rz = (chunk_z / region_size).floor() * region_size;
     let plan = vackrooms::use_cases::region_plan::generate_region_plan(
         seed,
-        vackrooms::entities::models::Position::new(rx, rz),
+        vackrooms::domain::entities::position::Position::new(rx, rz),
         region_size,
         &config,
         &noise,
@@ -849,7 +855,7 @@ pub fn get_large_voxel_blueprint_svg(
     let rz_origin = rz_val as f32 * size_world;
     let semantics = vackrooms::use_cases::region_plan::generate_region_plan(
         seed,
-        vackrooms::entities::models::Position::new(rx_origin, rz_origin),
+        vackrooms::domain::entities::position::Position::new(rx_origin, rz_origin),
         size_world,
         &config,
         &noise,
@@ -879,7 +885,7 @@ pub fn get_large_voxel_blueprint_svg(
             let chunk_x = rx_origin + i as f32 * chunk_size;
             let chunk_z = rz_origin + j as f32 * chunk_size;
             let grid = generator.execute(
-                vackrooms::entities::models::Position::new(chunk_x, chunk_z),
+                vackrooms::domain::entities::position::Position::new(chunk_x, chunk_z),
                 seed,
                 config.clone(),
             );

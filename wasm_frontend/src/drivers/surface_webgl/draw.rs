@@ -77,6 +77,20 @@ impl RendererPort for SurfaceRenderer {
         }
     }
 
+    fn cpu_telemetry_string(&self) -> Option<String> {
+        let stats = self.stats;
+        let gpu_ms = self.timer.last_ms().unwrap_or(0.0);
+        Some(format!(
+            "surface {} tri / {} calls / {}/{} chunks / {} shadow casters / GPU {:.2}ms",
+            stats.triangles_drawn,
+            stats.draw_calls,
+            stats.visible_chunks,
+            stats.resident_chunks,
+            stats.shadow_casters,
+            gpu_ms,
+        ))
+    }
+
     fn upload_atlas(&mut self, _texels: &[u32]) {}
 
     fn upload_label_atlas(&mut self, rgba: &[u8], width: u32, height: u32) {
@@ -130,7 +144,8 @@ fn render_frame(renderer: &mut SurfaceRenderer, frame: &FrameParams, toggles: Re
         }
     }
 
-    let shadow = render_shadow_pass(renderer, frame, toggles.shadow_pass);
+    let (shadow, shadow_casters, shadow_draw_calls) =
+        render_shadow_pass(renderer, frame, toggles.shadow_pass);
 
     bind_frame_uniforms(
         renderer,
@@ -139,8 +154,16 @@ fn render_frame(renderer: &mut SurfaceRenderer, frame: &FrameParams, toggles: Re
         toggles.dither,
         toggles.baked_lighting,
     );
-    draw_visible_meshes(renderer, &visible, &shadow);
+    let (triangles_drawn, main_draw_calls) = draw_visible_meshes(renderer, &visible, &shadow);
     draw_supply_labels(renderer, frame);
+
+    renderer.stats = super::SurfaceFrameStats {
+        visible_chunks: visible.len(),
+        resident_chunks: renderer.meshes.len(),
+        draw_calls: shadow_draw_calls + main_draw_calls,
+        triangles_drawn,
+        shadow_casters,
+    };
 }
 
 /// Camera-facing product labels over nearby supply pickups. A cutout pass:
@@ -294,12 +317,12 @@ fn render_shadow_pass(
     renderer: &SurfaceRenderer,
     frame: &FrameParams,
     enabled: bool,
-) -> ShadowState {
+) -> (ShadowState, u32, u32) {
     let Some(hero) = frame.active_scene_lights().first() else {
-        return ShadowState::default();
+        return (ShadowState::default(), 0, 0);
     };
     if !enabled {
-        return ShadowState::default();
+        return (ShadowState::default(), 0, 0);
     }
 
     let range = hero.radius;
@@ -330,7 +353,35 @@ fn render_shadow_pass(
         &light_view_projection,
     );
 
+    let hero_min_x = hero.position[0] - ortho_half;
+    let hero_max_x = hero.position[0] + ortho_half;
+    let hero_min_z = hero.position[2] - ortho_half;
+    let hero_max_z = hero.position[2] + ortho_half;
+    let hero_min_y = hero.position[1] - range;
+    let hero_max_y = hero.position[1] + 2.0;
+
+    let mut casters_count = 0u32;
+    let mut draw_calls = 0u32;
+
     for mesh in renderer.meshes.values() {
+        let chunk_max_x = mesh.origin[0] + mesh.bounds_max[0];
+        let chunk_max_y = mesh.origin[1] + mesh.bounds_max[1];
+        let chunk_max_z = mesh.origin[2] + mesh.bounds_max[2];
+
+        // Footprint AABB intersection test for hero-light caster culling
+        if chunk_max_x < hero_min_x
+            || mesh.origin[0] > hero_max_x
+            || chunk_max_z < hero_min_z
+            || mesh.origin[2] > hero_max_z
+            || chunk_max_y < hero_min_y
+            || mesh.origin[1] > hero_max_y
+        {
+            continue;
+        }
+
+        casters_count += 1;
+        draw_calls += 1;
+
         gl.uniform3f(
             renderer.shadow_uniforms.chunk_origin.as_ref(),
             mesh.origin[0],
@@ -347,10 +398,14 @@ fn render_shadow_pass(
     gl.viewport(0, 0, renderer.width, renderer.height);
     gl.color_mask(true, true, true, true);
 
-    ShadowState {
-        light_index: 0,
-        light_view_projection,
-    }
+    (
+        ShadowState {
+            light_index: 0,
+            light_view_projection,
+        },
+        casters_count,
+        draw_calls,
+    )
 }
 
 /// Binds state shared by every visible mesh exactly once per frame.
@@ -469,14 +524,23 @@ fn bind_light_uniforms(renderer: &SurfaceRenderer, frame: &FrameParams, shadow: 
     );
 }
 
-fn draw_visible_meshes(renderer: &SurfaceRenderer, visible: &[VisibleDraw], shadow: &ShadowState) {
+fn draw_visible_meshes(
+    renderer: &SurfaceRenderer,
+    visible: &[VisibleDraw],
+    shadow: &ShadowState,
+) -> (u32, u32) {
+    let mut triangles = 0u32;
+    let mut draw_calls = 0u32;
     for draw in visible {
         let Some(mesh) = renderer.meshes.get(&draw.key) else {
             continue;
         };
         draw_mesh(renderer, mesh, draw, shadow);
+        triangles += (mesh.index_count / 3) as u32;
+        draw_calls += 1;
     }
     renderer.gl.bind_vertex_array(None);
+    (triangles, draw_calls)
 }
 
 /// Binds the only per-mesh state: local transform bounds, baked light volume,

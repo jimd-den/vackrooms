@@ -6,7 +6,7 @@
 //! ids live in the `RealitySnapshot`, so a regenerated chunk deterministically
 //! omits what the wanderer already drank.
 
-use crate::entities::models::Position;
+use crate::domain::entities::position::Position;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(u8)]

@@ -1,6 +1,6 @@
 use super::*;
 use super::suites::aabb_overlap;
-use crate::entities::models::Position;
+use crate::domain::entities::position::Position;
 use crate::use_cases::ports::NoiseProvider;
 
 struct TestNoise;

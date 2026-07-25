@@ -290,7 +290,7 @@ pub enum BlueprintSlice {
 
 pub fn render_voxel_chunk_svg(
     grid: &crate::domain::entities::voxel_grid::VoxelGrid,
-    origin: crate::entities::models::Position,
+    origin: crate::domain::entities::position::Position,
     config: &crate::use_cases::generate_chunk::GeneratorConfig,
     slice: BlueprintSlice,
     semantics: Option<&RegionPlan>,
@@ -480,7 +480,11 @@ pub fn render_voxel_chunk_svg(
     svg
 }
 
-fn point_to_polyline_distance(x: f32, z: f32, path: &[crate::entities::models::Position]) -> f32 {
+fn point_to_polyline_distance(
+    x: f32,
+    z: f32,
+    path: &[crate::domain::entities::position::Position],
+) -> f32 {
     let mut min_dist = f32::MAX;
     for seg in path.windows(2) {
         let p1 = seg[0];

@@ -1,4 +1,5 @@
-use crate::adapters::voxel_mapper::{FaceDirection, MergedQuad, VoxelType};
+use crate::adapters::material_palette::material_visual;
+use crate::adapters::voxel_mapper::{FaceDirection, MergedQuad};
 
 /// Interface Adapter to convert MergedQuads to JSON format for the web presentation layer.
 pub struct JsonPresenter;
@@ -18,35 +19,11 @@ impl JsonPresenter {
                 FaceDirection::West => "\"west\"",
             };
 
-            let type_str = match quad.v_type {
-                VoxelType::Wall => "\"wall\"",
-                VoxelType::Floor => "\"floor\"",
-                VoxelType::Ceiling => "\"ceiling\"",
-                VoxelType::Light => "\"light\"",
-                VoxelType::RedWall => "\"redwall\"",
-                VoxelType::Grass => "\"grass\"",
-                VoxelType::Water => "\"water\"",
-                VoxelType::Tree => "\"tree\"",
-                VoxelType::RedLight => "\"redlight\"",
-                VoxelType::PaleWall => "\"palewall\"",
-                VoxelType::DamagedWall => "\"damagedwall\"",
-                VoxelType::DryCarpet => "\"drycarpet\"",
-                VoxelType::DeepCarpet => "\"deepcarpet\"",
-                VoxelType::StickyCarpet => "\"stickycarpet\"",
-                VoxelType::Fluid => "\"fluid\"",
-                VoxelType::Glimmer => "\"glimmer\"",
-                VoxelType::ConcreteWall => "\"concretewall\"",
-                VoxelType::TileFloor => "\"tilefloor\"",
-                VoxelType::ConcreteFloor => "\"concretefloor\"",
-                VoxelType::Crate => "\"crate\"",
-                VoxelType::Pipe => "\"pipe\"",
-                VoxelType::MetalDoor => "\"metaldoor\"",
-                VoxelType::AlmondWater => "\"almondwater\"",
-            };
+            let material_name = material_visual(quad.material).name;
 
             let obj = format!(
-                "{{\"x\":{},\"y\":{},\"z\":{},\"w\":{},\"h\":{},\"dir\":{},\"type\":{},\"color\":{}}}",
-                quad.x, quad.y, quad.z, quad.w, quad.h, dir_str, type_str, quad.color
+                "{{\"x\":{},\"y\":{},\"z\":{},\"w\":{},\"h\":{},\"dir\":{},\"type\":\"{}\",\"color\":{}}}",
+                quad.x, quad.y, quad.z, quad.w, quad.h, dir_str, material_name, quad.color
             );
 
             json.push_str(&obj);
@@ -73,7 +50,7 @@ mod tests {
             w: 4.0,
             h: 1.0,
             dir: FaceDirection::Up,
-            v_type: VoxelType::Wall,
+            material: crate::domain::entities::voxel_grid::VOXEL_WALL,
             color: 1441813,
             light: 0,
             ao: 0,

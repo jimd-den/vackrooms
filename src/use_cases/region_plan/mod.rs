@@ -20,7 +20,7 @@
 //! so plan geometry lands identically at every LOD.
 
 use crate::domain::entities::architecture::*;
-use crate::entities::models::Position;
+use crate::domain::entities::position::Position;
 use crate::use_cases::anomaly_plan::plan_anomalies_for_region;
 use crate::use_cases::generate_chunk::GeneratorConfig;
 use crate::use_cases::ports::NoiseProvider;

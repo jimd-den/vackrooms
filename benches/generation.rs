@@ -18,8 +18,9 @@
 
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use vackrooms::domain::entities::voxel_grid::{VOXEL_AIR, VOXEL_WALL, VoxelGrid};
-use vackrooms::domain::use_cases::build_octree::BuildOctreeUseCase;
-use vackrooms::entities::models::Position;
+use vackrooms::adapters::material_palette::DEFAULT_MATERIAL_PALETTE;
+use vackrooms::use_cases::build_octree::BuildOctreeUseCase;
+use vackrooms::domain::entities::position::Position;
 use vackrooms::frameworks_drivers::simple_noise::SimpleNoiseProvider;
 use vackrooms::use_cases::generate_chunk::GeneratorConfig;
 use vackrooms::use_cases::region_plan::{REGION_SIZE, generate_region_plan};
@@ -61,7 +62,10 @@ fn octree_build(c: &mut Criterion) {
 
         let room = hollow_room(edge);
         group.bench_with_input(BenchmarkId::new("hollow_room", edge), &room, |b, grid| {
-            b.iter(|| BuildOctreeUseCase::new().execute(grid, depth, world_size));
+            b.iter(|| {
+                BuildOctreeUseCase::new(&DEFAULT_MATERIAL_PALETTE)
+                    .execute(grid, depth, world_size)
+            });
         });
 
         let checker = checkerboard(edge);
@@ -69,7 +73,10 @@ fn octree_build(c: &mut Criterion) {
             BenchmarkId::new("checkerboard", edge),
             &checker,
             |b, grid| {
-                b.iter(|| BuildOctreeUseCase::new().execute(grid, depth, world_size));
+                b.iter(|| {
+                    BuildOctreeUseCase::new(&DEFAULT_MATERIAL_PALETTE)
+                        .execute(grid, depth, world_size)
+                });
             },
         );
     }

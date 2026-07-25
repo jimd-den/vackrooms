@@ -27,7 +27,7 @@ use std::time::Instant;
 use std::collections::HashMap;
 
 use rayon::prelude::*;
-use vackrooms::domain::entities::voxel_grid::material_color_f32;
+use vackrooms::adapters::material_palette::material_color_f32;
 use vackrooms::frameworks_drivers::simple_noise::SimpleNoiseProvider;
 use vackrooms::use_cases::generate_chunk::GeneratorConfig;
 use vackrooms::use_cases::region_plan::spawn_point;

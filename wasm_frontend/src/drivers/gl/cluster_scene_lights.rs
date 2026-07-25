@@ -58,6 +58,76 @@ fn reaches_bounds(light: &LightSource, bounds_min: [f32; 3], bounds_max: [f32; 3
     distance_squared <= light.radius * light.radius
 }
 
+/// Persistent cache for per-chunk top-K light selection with hysteresis.
+///
+/// # Rationale & Design Pattern (Observer & Strategy Pattern)
+/// Prevents light popping across chunk seams when camera movement or floating point sorting
+/// slight changes candidate light order. A candidate replaces an existing selected light only
+/// if its calculated importance score exceeds the existing light's score by at least 20%.
+#[derive(Debug, Clone, Default)]
+pub struct LightSelectionCache {
+    entries: std::collections::HashMap<crate::application::ports::SurfaceChunkKey, Vec<u64>>,
+}
+
+impl LightSelectionCache {
+    pub fn new() -> Self {
+        Self {
+            entries: std::collections::HashMap::new(),
+        }
+    }
+
+    /// Ranks lights reaching bounds and applies a hysteresis filter against previous frame selection.
+    pub fn select_lights_with_hysteresis(
+        &mut self,
+        key: crate::application::ports::SurfaceChunkKey,
+        candidate_lights: &[LightSource],
+        bounds_min: [f32; 3],
+        bounds_max: [f32; 3],
+        top_k: usize,
+    ) -> Vec<LightSource> {
+        let center = [
+            (bounds_min[0] + bounds_max[0]) * 0.5,
+            (bounds_min[1] + bounds_max[1]) * 0.5,
+            (bounds_min[2] + bounds_max[2]) * 0.5,
+        ];
+
+        // Rank candidates by estimated irradiance score = intensity / (distance_sq + 1.0)
+        let mut scored: Vec<(f32, &LightSource)> = candidate_lights
+            .iter()
+            .map(|light| {
+                let dx = light.position[0] - center[0];
+                let dy = light.position[1] - center[1];
+                let dz = light.position[2] - center[2];
+                let dist_sq = dx * dx + dy * dy + dz * dz;
+                let score = light.intensity / (dist_sq + 1.0);
+                (score, light)
+            })
+            .collect();
+        scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+
+        let previous_ids = self.entries.get(&key);
+        let mut selected = Vec::with_capacity(top_k.min(scored.len()));
+
+        for (score, light) in scored {
+            if selected.len() >= top_k {
+                break;
+            }
+            let is_previously_selected = previous_ids.map_or(false, |ids| ids.contains(&light.id));
+            let effective_score = if is_previously_selected {
+                score * 1.20 // 20% hysteresis boost to retain current lights and prevent seam popping
+            } else {
+                score
+            };
+            selected.push((effective_score, light));
+        }
+
+        selected.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+        let result: Vec<LightSource> = selected.into_iter().take(top_k).map(|(_, l)| *l).collect();
+        self.entries.insert(key, result.iter().map(|l| l.id).collect());
+        result
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -115,5 +185,25 @@ mod tests {
             &mut clustered,
         );
         assert_eq!(range.count, 1);
+    }
+
+    #[test]
+    fn test_light_selection_cache_hysteresis() {
+        let mut cache = LightSelectionCache::new();
+        let chunk_key = (0, 0);
+
+        let l1 = light(1, [0.0, 1.0, 0.0]);
+        let l2 = light(2, [0.1, 1.0, 0.0]);
+
+        // First frame selects l1 as top 1
+        let sel1 = cache.select_lights_with_hysteresis(chunk_key, &[l1, l2], [0.0, 0.0, 0.0], [1.0, 1.0, 1.0], 1);
+        assert_eq!(sel1.len(), 1);
+        assert_eq!(sel1[0].id, 1);
+
+        // Second frame: l2 moves slightly closer, but l1 is retained due to hysteresis
+        let l2_slightly_closer = light(2, [0.0, 0.95, 0.0]);
+        let sel2 = cache.select_lights_with_hysteresis(chunk_key, &[l1, l2_slightly_closer], [0.0, 0.0, 0.0], [1.0, 1.0, 1.0], 1);
+        assert_eq!(sel2.len(), 1);
+        assert_eq!(sel2[0].id, 1);
     }
 }

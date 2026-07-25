@@ -13,7 +13,7 @@ use crate::domain::entities::voxel_grid::{
     VOXEL_AIR, VOXEL_CEILING, VOXEL_FLOOR, VOXEL_LIGHT, VOXEL_RED_WALL, VOXEL_WALL, VoxelGrid,
 };
 use crate::domain::use_cases::generate_maze::{GrowingTreeGenerator, MazeGenerator};
-use crate::entities::models::Position;
+use crate::domain::entities::position::Position;
 use crate::use_cases::generate_chunk::GeneratorConfig;
 use crate::use_cases::ports::{NoiseProvider, TelemetryPort};
 use rand::rngs::StdRng;
@@ -213,7 +213,7 @@ pub(crate) fn generate_legacy_blueprint(
             // Low frequency noise for zone clustering
             let n = noise_provider.evaluate_2d(
                 seed ^ 0x2b8f_a43c,
-                crate::entities::models::Position::new(wx * 0.05, wz * 0.05),
+                crate::domain::entities::position::Position::new(wx * 0.05, wz * 0.05),
             ); // n is in [-1, 1]
 
             use crate::domain::entities::cell::MicrobiomeZone;

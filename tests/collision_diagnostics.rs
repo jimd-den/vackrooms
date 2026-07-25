@@ -1,5 +1,5 @@
-use vackrooms::domain::entities::voxel_grid::{VOXEL_FLOOR, VOXEL_WALL};
-use vackrooms::entities::models::Position;
+use vackrooms::domain::entities::voxel_grid::{VOXEL_FLOOR, VOXEL_STAINED_CARPET, VOXEL_WALL};
+use vackrooms::domain::entities::position::Position;
 use vackrooms::frameworks_drivers::simple_noise::SimpleNoiseProvider;
 /// Collision Diagnostic Tests — TDD Phase 1
 ///
@@ -62,7 +62,10 @@ fn floor_boxes(chunk_x: f32, chunk_z: f32) -> Vec<(f32, f32, f32, f32, f32, f32)
     for z in 0..grid.depth() {
         for x in 0..grid.width() {
             let vt = grid.get(x, 0, z);
-            if vt == VOXEL_FLOOR {
+            // Ordinary fabric floor now voxelizes as either the fresh or
+            // the institution-age-stained carpet material; both are the
+            // same walkable floor geometry this diagnostic cares about.
+            if vt == VOXEL_FLOOR || vt == VOXEL_STAINED_CARPET {
                 let wx = chunk_x + x as f32 * scale;
                 let wz = chunk_z + z as f32 * scale;
                 // Floor voxel: y=0 to y=scale

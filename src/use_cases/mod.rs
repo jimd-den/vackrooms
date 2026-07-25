@@ -2,6 +2,7 @@ pub mod anomalies;
 pub mod anomaly_plan;
 
 pub mod bake_voxel_lighting;
+pub mod build_octree;
 pub mod generate_chunk;
 pub mod grassland_level;
 pub(crate) mod infinite_level;

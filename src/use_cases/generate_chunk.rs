@@ -1,6 +1,6 @@
 use crate::domain::entities::anomaly::RealitySnapshot;
 use crate::domain::entities::voxel_grid::VoxelGrid;
-use crate::entities::models::Position;
+use crate::domain::entities::position::Position;
 use crate::use_cases::legacy_blueprint;
 use crate::use_cases::ports::{NULL_TELEMETRY, NoiseProvider, TelemetryPort};
 
@@ -155,11 +155,12 @@ pub struct GeneratorConfig {
     pub chunk_size: f32,
     pub voxel_scale: f32,
     /// Which level generator fills the chunks (see `level_generator`):
-    /// 0 = Backrooms (default), 1 = legacy office blueprint, 34 = grassland.
+    /// 0 = Backrooms, 1 = Habitable Zone, 34 = grassland, 90 = legacy offices.
     pub level: u32,
     /// User-facing generation knobs (URL query params in the browser).
     pub tuning: LevelTuning,
-    /// Stateful Level 0 phenomena. Outdoor/legacy levels ignore this group.
+    /// Stateful phenomena. Each level generator explicitly decides which
+    /// settings and reality-state fields apply to its world.
     pub anomalies: AnomalyTuning,
 }
 
@@ -725,7 +726,7 @@ mod tests {
                 let wz = 10.0 * chunk_size + (cz as f32) * 5.0;
                 let n = noise.evaluate_2d(
                     seed ^ 0x2b8f_a43c,
-                    crate::entities::models::Position::new(wx * 0.05, wz * 0.05),
+                    crate::domain::entities::position::Position::new(wx * 0.05, wz * 0.05),
                 );
 
                 let zone = if n < -0.7 {

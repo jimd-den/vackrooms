@@ -15,7 +15,7 @@
 use web_sys::WebGl2RenderingContext as Gl;
 
 use crate::application::ports::{
-    ChunkDraw, FrameParams, RendererPort, SurfaceChunk, SurfaceChunkKey,
+    ChunkDraw, FrameParams, RenderArtifactNeeds, RendererPort, SurfaceChunk, SurfaceChunkKey,
 };
 use crate::application::render_settings::RenderToggles;
 use crate::drivers::gl::lights::{
@@ -44,6 +44,11 @@ impl Default for ShadowState {
 }
 
 impl RendererPort for SplatRenderer {
+    fn artifact_needs(&self) -> RenderArtifactNeeds {
+        // Face pages drive the main pass; the indexed surface drives shadows.
+        RenderArtifactNeeds::SPLAT.union(RenderArtifactNeeds::SURFACE)
+    }
+
     fn uses_surface_meshes(&self) -> bool {
         true
     }
@@ -71,13 +76,16 @@ impl RendererPort for SplatRenderer {
 
     fn cpu_telemetry_string(&self) -> Option<String> {
         let stats = self.stats;
+        let gpu_ms = self.timer.last_ms().unwrap_or(0.0);
         Some(format!(
-            "splat {} faces / {} calls / {} chunks / {} cells culled / {} dropped",
+            "splat {} faces / {} calls / {}/{} chunks / {} cells culled / {} dropped / GPU {:.2}ms",
             stats.faces_drawn,
             stats.draw_calls,
             stats.chunks_drawn,
+            self.chunks.len(),
             stats.cells_culled,
             stats.faces_dropped,
+            gpu_ms,
         ))
     }
 
@@ -341,26 +349,45 @@ fn draw_visible_chunks(
     let mut stats = FrameStats::default();
 
     for chunk in visible {
-        // OPTIMIZATION (rt_budget): once the profile budget is exhausted,
-        // discard whole far chunks. The disabled reference path draws every
-        // face that survived the independently controlled visibility tests.
-        if face_budget_enabled && stats.faces_drawn >= renderer.profile.face_budget {
-            stats.faces_dropped = stats
-                .faces_dropped
-                .saturating_add(chunk.instance_count.max(0) as u32);
+        let total_faces = chunk.instance_count.max(0) as u32;
+        let available_budget = if face_budget_enabled {
+            renderer.profile.face_budget.saturating_sub(stats.faces_drawn)
+        } else {
+            u32::MAX
+        };
+
+        if available_budget == 0 {
+            stats.faces_dropped = stats.faces_dropped.saturating_add(total_faces);
             continue;
         }
 
         bind_chunk(renderer, chunk);
         stats.chunks_drawn += 1;
 
-        // OPTIMIZATION (rt_cells): reject invisible cell ranges and merge
-        // adjacent visible ranges. The disabled reference path submits the
-        // complete chunk instance page in one draw.
+        // OPTIMIZATION (rt_cells): compare faces saved against WebGL draw call overhead (~64 faces).
         if cell_culling_enabled {
-            draw_visible_cells(renderer, chunk, frame, &mut stats);
+            let visible_cell_faces: u32 = chunk
+                .cells
+                .iter()
+                .filter_map(|range| {
+                    let center = [
+                        chunk.origin[0] + (range.cell[0] as f32 + 0.5) * chunk.cell_size,
+                        chunk.origin[1] + (range.cell[1] as f32 + 0.5) * chunk.cell_size,
+                        chunk.origin[2] + (range.cell[2] as f32 + 0.5) * chunk.cell_size,
+                    ];
+                    sphere_visible(center, chunk.cell_size * 1.5, frame, MAX_DRAW_DISTANCE)
+                        .map(|_| range.count)
+                })
+                .sum();
+
+            let faces_saved = total_faces.saturating_sub(visible_cell_faces);
+            if faces_saved > 64 {
+                draw_visible_cells(renderer, chunk, frame, &mut stats);
+            } else {
+                draw_instance_range(renderer, 0, total_faces.min(available_budget), &mut stats);
+            }
         } else {
-            draw_instance_range(renderer, 0, chunk.instance_count.max(0) as u32, &mut stats);
+            draw_instance_range(renderer, 0, total_faces.min(available_budget), &mut stats);
         }
     }
 

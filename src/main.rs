@@ -3,10 +3,10 @@ use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::thread;
 
-use vackrooms::entities::models::Position;
+use vackrooms::domain::entities::position::Position;
 use vackrooms::frameworks_drivers::simple_noise::SimpleNoiseProvider;
 use vackrooms::frameworks_drivers::std_telemetry::StdTelemetry;
-use vackrooms::interface_adapters::web_renderer::WebRendererAdapter;
+use vackrooms::adapters::web_renderer::WebRendererAdapter;
 use vackrooms::use_cases::generate_chunk::GenerateChunkArchitectureUseCase;
 
 /// Presentation Layer & Driver:
@@ -81,7 +81,7 @@ fn handle_client(mut stream: TcpStream) {
             let chunk = generator.execute(Position::new(chunk_x, chunk_z), 42, config);
 
             // Adapt to Web Format (greedy meshed faces)
-            let json = WebRendererAdapter::to_json(&chunk, config.chunk_size);
+            let json = WebRendererAdapter::to_json(&chunk, config.voxel_scale);
 
             let response = format!(
                 "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",

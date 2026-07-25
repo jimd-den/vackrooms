@@ -13,7 +13,7 @@ use crate::domain::entities::anomaly::{
     WorldBounds,
 };
 use crate::domain::entities::architecture::RegionPlan;
-use crate::entities::models::Position;
+use crate::domain::entities::position::Position;
 use crate::use_cases::generate_chunk::GeneratorConfig;
 use crate::use_cases::infinite_level::InfiniteRegionWindow;
 use crate::use_cases::level_generator::LEVEL_BACKROOMS;

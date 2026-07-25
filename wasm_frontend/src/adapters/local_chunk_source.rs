@@ -11,6 +11,7 @@
 //!     -> surface/face extraction      (only when the renderer requests it)
 
 use vackrooms::adapters::octree_gpu_serializer::OctreeGpuSerializer;
+use vackrooms::adapters::material_palette::DEFAULT_MATERIAL_PALETTE;
 use vackrooms::domain::entities::anomaly::RealitySnapshot;
 use vackrooms::domain::entities::sparse_voxel_octree::{SparseVoxelOctree, SvoNode};
 use vackrooms::domain::entities::voxel_grid::{
@@ -18,9 +19,9 @@ use vackrooms::domain::entities::voxel_grid::{
     FACE_OCCLUDED_POSITIVE_X, FACE_OCCLUDED_POSITIVE_Y, FACE_OCCLUDED_POSITIVE_Z, VOXEL_AIR,
     VoxelGrid,
 };
-use vackrooms::domain::use_cases::build_octree::BuildOctreeUseCase;
-use vackrooms::entities::models::Position;
+use vackrooms::domain::entities::position::Position;
 use vackrooms::use_cases::generate_chunk::{GenerateChunkArchitectureUseCase, GeneratorConfig};
+use vackrooms::use_cases::build_octree::BuildOctreeUseCase;
 use vackrooms::use_cases::ports::{NULL_TELEMETRY, NoiseProvider, TelemetryPort};
 
 use crate::adapters::collect_emissive_lights::collect_emissive_lights;
@@ -34,7 +35,7 @@ use crate::application::ports::{
 /// the carpet/fluid classes are visual-only: including them would make the
 /// player collide with the floor they stand on. Shared with the core so a
 /// new wall class can never render solid but collide hollow.
-const SOLID_TYPES: [u8; 8] = vackrooms::domain::entities::voxel_grid::SOLID_MATERIALS;
+const SOLID_TYPES: [u8; 9] = vackrooms::domain::entities::voxel_grid::SOLID_MATERIALS;
 
 pub struct LocalChunkSource<N: NoiseProvider> {
     noise: N,
@@ -110,7 +111,8 @@ impl<N: NoiseProvider> LocalChunkSource<N> {
         };
 
         let svo_depth = config.svo_depth();
-        let svo = BuildOctreeUseCase::new().execute(&grid, svo_depth, config.svo_world_size());
+        let svo = BuildOctreeUseCase::new(&DEFAULT_MATERIAL_PALETTE)
+            .execute(&grid, svo_depth, config.svo_world_size());
 
         let (root, nodes) = if artifacts.svo_nodes() {
             (
@@ -344,7 +346,7 @@ mod tests {
         let mut grid = VoxelGrid::new(4, 4, 4);
         grid.set(1, 0, 2, VOXEL_WALL);
         grid.set(0, 0, 0, VOXEL_FLOOR);
-        let svo = BuildOctreeUseCase::new().execute(&grid, 2, 2.0);
+        let svo = BuildOctreeUseCase::new(&DEFAULT_MATERIAL_PALETTE).execute(&grid, 2, 2.0);
 
         let boxes = extract_collision_boxes(&svo, 10.0, 20.0, 0.5);
         assert_eq!(boxes.len(), 1);

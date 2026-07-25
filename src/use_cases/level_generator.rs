@@ -14,8 +14,8 @@
 //!   orchestrating use case runs the exposed-face lighting bake afterwards.
 
 use crate::domain::entities::anomaly::RealitySnapshot;
+use crate::domain::entities::position::Position;
 use crate::domain::entities::voxel_grid::VoxelGrid;
-use crate::entities::models::Position;
 use crate::use_cases::generate_chunk::GeneratorConfig;
 use crate::use_cases::ports::NoiseProvider;
 
@@ -29,30 +29,27 @@ pub const LEVEL_GRASSLAND: u32 = 34;
 pub const LEVEL_LEGACY_OFFICES: u32 = 90;
 
 pub trait LevelGenerator {
-    /// Fills one chunk. `chunk_pos` is the chunk origin in world units.
-    fn generate(
-        &self,
-        chunk_pos: Position,
-        seed: u32,
-        config: GeneratorConfig,
-        noise: &dyn NoiseProvider,
-    ) -> VoxelGrid;
-
     /// Fills one chunk under a deterministic encounter-state snapshot.
-    ///
-    /// Most levels are entirely immutable and inherit this implementation.
-    /// Level 0 overrides it so anomaly infill/topology can be a pure function
-    /// of the same snapshot that keyed the chunk request. Keeping the legacy
-    /// `generate` entry point makes stateless tools and tests explicit users
-    /// of epoch zero.
+    /// Implementors must choose explicitly whether that state affects them;
+    /// no default is allowed to silently discard it.
     fn generate_with_reality(
         &self,
         chunk_pos: Position,
         seed: u32,
         config: GeneratorConfig,
         noise: &dyn NoiseProvider,
-        _reality: &RealitySnapshot,
+        reality: &RealitySnapshot,
+    ) -> VoxelGrid;
+
+    /// Convenience entry point for tools that deliberately request epoch zero.
+    /// `chunk_pos` is the chunk origin in world units.
+    fn generate(
+        &self,
+        chunk_pos: Position,
+        seed: u32,
+        config: GeneratorConfig,
+        noise: &dyn NoiseProvider,
     ) -> VoxelGrid {
-        self.generate(chunk_pos, seed, config, noise)
+        self.generate_with_reality(chunk_pos, seed, config, noise, &RealitySnapshot::empty())
     }
 }

@@ -86,57 +86,19 @@ pub const VOXEL_METAL_DOOR: u8 = 22;
 /// Almond water bottle marker. Non-solid, faintly emissive so bottles
 /// glint in dim fabric; the pickup itself is the exported `SupplyItem`.
 pub const VOXEL_ALMOND_WATER: u8 = 23;
+/// Duller, browner ordinary Level 0 wallpaper: `institution_age` past
+/// threshold. Solid like WALL, same material class, just older.
+pub const VOXEL_AGED_WALLPAPER: u8 = 24;
+/// Duller, blotchier ordinary Level 0 carpet, paired with
+/// `VOXEL_AGED_WALLPAPER`. Walkable, like FLOOR.
+pub const VOXEL_STAINED_CARPET: u8 = 25;
 
 /// Number of voxel material ids (the palette table length).
-pub const VOXEL_MATERIAL_COUNT: usize = 24;
-
-/// The one authoritative material palette, `0xRRGGBB` per voxel id. Every
-/// consumer — octree bake, greedy-mesh debug colors, CPU splatter, and the
-/// generated GLSL tables — derives from this table so a new material can
-/// never render differently across paths.
-pub const MATERIAL_COLORS: [u32; VOXEL_MATERIAL_COUNT] = [
-    0x000000, // 0 air (never drawn)
-    0xDDCC66, // 1 yellow wallpaper wall
-    0x998811, // 2 office carpet floor
-    0xCCCCCC, // 3 dropped ceiling
-    0xFFF8D6, // 4 fluorescent panel
-    0x880000, // 5 crimson / peeled red wall
-    0x4F9A3D, // 6 grass
-    0x3A6FB8, // 7 water
-    0x6B4A2F, // 8 tree / dark pillar
-    0xFF4433, // 9 red light
-    0xD8D2C0, // 10 pale arch wall
-    0x8A7F5C, // 11 rough damaged wall
-    0xC2B76B, // 12 dry shallow carpet
-    0x6B5E22, // 13 deep wet carpet
-    0x7A4A26, // 14 sticky red-room carpet
-    0x2E2A22, // 15 dark pooled fluid
-    0x9FC4E8, // 16 cool emergency glimmer
-    0x8F8D88, // 17 bare structural concrete
-    0xBDBBB0, // 18 institutional tile floor
-    0x6E6C66, // 19 poured concrete slab
-    0x9C7B4A, // 20 wooden supply crate
-    0x3E4348, // 21 exposed pipe / rebar
-    0x4A5A6A, // 22 metal fire-exit door
-    0xEDE6D0, // 23 almond water bottle
-];
-
-/// Palette lookup as normalized linear-ish RGB for shader tables.
-pub fn material_color_f32(voxel: u8) -> [f32; 3] {
-    let c = MATERIAL_COLORS
-        .get(voxel as usize)
-        .copied()
-        .unwrap_or(0x000000);
-    [
-        ((c >> 16) & 0xFF) as f32 / 255.0,
-        ((c >> 8) & 0xFF) as f32 / 255.0,
-        (c & 0xFF) as f32 / 255.0,
-    ]
-}
+pub const VOXEL_MATERIAL_COUNT: usize = 26;
 
 /// Materials that block the player and produce collision boxes. Everything
 /// else is walkable or decorative.
-pub const SOLID_MATERIALS: [u8; 8] = [
+pub const SOLID_MATERIALS: [u8; 9] = [
     VOXEL_WALL,
     VOXEL_TREE,
     VOXEL_RED_WALL,
@@ -145,6 +107,7 @@ pub const SOLID_MATERIALS: [u8; 8] = [
     VOXEL_CONCRETE_WALL,
     VOXEL_CRATE,
     VOXEL_PIPE,
+    VOXEL_AGED_WALLPAPER,
 ];
 
 /// Materials that emit light in the baked flood fill and render emissive.

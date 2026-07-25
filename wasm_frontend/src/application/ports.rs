@@ -156,6 +156,10 @@ pub struct SurfaceMeshPayload {
     pub faces: FaceInstanceSet,
     /// World size of one voxel cell at this payload's LOD.
     pub voxel_scale: f32,
+    /// Packed RGB8 3D light-volume probe data.
+    pub light_volume_bytes: Vec<u8>,
+    /// Dimensions of the 3D probe volume (width, height, depth).
+    pub light_volume_dims: [u32; 3],
 }
 
 impl SurfaceMeshPayload {
@@ -167,6 +171,8 @@ impl SurfaceMeshPayload {
             lod,
             faces: FaceInstanceSet::empty(),
             voxel_scale: 1.0,
+            light_volume_bytes: vec![0, 0, 0],
+            light_volume_dims: [1, 1, 1],
         }
     }
 }

@@ -9,7 +9,7 @@
 
 use crate::domain::entities::anomaly::WorldBounds;
 use crate::domain::entities::architecture::RegionPlan;
-use crate::entities::models::Position;
+use crate::domain::entities::position::Position;
 use crate::use_cases::generate_chunk::GeneratorConfig;
 use crate::use_cases::ports::NoiseProvider;
 use crate::use_cases::region_plan::{REGION_SIZE, generate_region_plan, region_index};
@@ -19,7 +19,7 @@ use crate::use_cases::region_plan::{REGION_SIZE, generate_region_plan, region_in
 /// Plans are stored in `(z, x)` row-major order.  That order is deliberately
 /// independent of hash maps and request timing, so planning the same area is
 /// replayable on the main thread, in a worker, or during a test.
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub(crate) struct InfiniteRegionWindow {
     min_region_x: i64,
     min_region_z: i64,

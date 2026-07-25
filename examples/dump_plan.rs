@@ -1,4 +1,4 @@
-use vackrooms::entities::models::Position;
+use vackrooms::domain::entities::position::Position;
 use vackrooms::frameworks_drivers::simple_noise::SimpleNoiseProvider;
 use vackrooms::use_cases::generate_chunk::GeneratorConfig;
 use vackrooms::use_cases::region_plan::{REGION_SIZE, debug_region_ascii, generate_region_plan};

@@ -6,7 +6,7 @@
 use js_sys::{Uint8Array, Uint32Array};
 use web_sys::{WebGl2RenderingContext as Gl, WebGlBuffer, WebGlVertexArrayObject};
 
-use crate::application::ports::SurfaceChunk;
+use crate::application::ports::{SurfaceChunk, SurfaceMeshPayload};
 use crate::drivers::gl::light_volume::upload_light_volume;
 
 use super::SurfaceRenderer;
@@ -109,6 +109,17 @@ impl SurfaceRenderer {
             let location = location as u32;
             gl.enable_vertex_attrib_array(location);
             gl.vertex_attrib_pointer_with_i32(location, size, ty, false, VERTEX_STRIDE, offset);
+        }
+    }
+
+    /// Updates only the chunk's 3D irradiance light volume texture without
+    /// destroying or re-allocating vertex/index buffer object (VAO/VBO/IBO) state.
+    pub(crate) fn update_light_volume(&mut self, key: crate::application::ports::SurfaceChunkKey, mesh: &SurfaceMeshPayload) {
+        if let Some(gpu_mesh) = self.meshes.get_mut(&key) {
+            self.gl.delete_texture(Some(&gpu_mesh.light_texture));
+            if let Ok(new_tex) = upload_light_volume(&self.gl, mesh) {
+                gpu_mesh.light_texture = new_tex;
+            }
         }
     }
 }

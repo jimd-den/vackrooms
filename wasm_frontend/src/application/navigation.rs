@@ -150,7 +150,7 @@ mod tests {
     use vackrooms::domain::entities::anomaly::{
         Axis2, AxisDirection, TraversalGateKind, WorldBounds,
     };
-    use vackrooms::entities::models::Position;
+    use vackrooms::domain::entities::position::Position;
 
     fn exit(id: u64, x: f32, z: f32, target_level: u32) -> LevelExit {
         LevelExit {

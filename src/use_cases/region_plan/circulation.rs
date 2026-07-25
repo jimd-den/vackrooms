@@ -5,7 +5,7 @@
 //! competing street grid.
 
 use crate::domain::entities::architecture::*;
-use crate::entities::models::Position;
+use crate::domain::entities::position::Position;
 use crate::use_cases::world_topology::hash01;
 
 use super::{EDGE_MARGIN, snap, snap_width, v_edge_portal_z};

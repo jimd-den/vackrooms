@@ -5,7 +5,7 @@
 
 use crate::domain::entities::anomaly::AnomalyKind;
 use crate::domain::entities::architecture::*;
-use crate::entities::models::Position;
+use crate::domain::entities::position::Position;
 use crate::use_cases::generate_chunk::GeneratorConfig;
 use crate::use_cases::ports::NoiseProvider;
 use crate::use_cases::world_topology::hash01;
@@ -50,10 +50,7 @@ pub(super) fn corrupt(
         abandon_assembly(&mut assemblies[k]);
     }
 
-    if dominant.renovation_history != RenovationStyle::Untouched {
-        let k = pick_index(h(8), assemblies.len());
-        overlay_renovation(&mut assemblies[k]);
-    }
+    apply_renovation_history(dominant.renovation_history, assemblies, h(8), h(9));
 
     // Applied last so it respects whatever the earlier passes decided (an
     // abandoned shell stays dark).
@@ -138,7 +135,37 @@ fn abandon_assembly(assembly: &mut AssemblyInstance) {
     }
 }
 
-/// Rule 3: a renovation overlays the original structural grid.
+/// Rule 3: renovation history overlays the original structural grid. A
+/// partial refit contradicts one assembly; a fuller history of layered
+/// refits leaves a second, distinct assembly contradicted too — otherwise
+/// the two `RenovationStyle` variants would be indistinguishable once
+/// generated, despite the type's own doc comment promising more.
+fn apply_renovation_history(
+    history: RenovationStyle,
+    assemblies: &mut [AssemblyInstance],
+    pick1: f32,
+    pick2: f32,
+) {
+    match history {
+        RenovationStyle::Untouched => {}
+        RenovationStyle::PartialRefit => {
+            let k = pick_index(pick1, assemblies.len());
+            overlay_renovation(&mut assemblies[k]);
+        }
+        RenovationStyle::LayeredRefits => {
+            let k1 = pick_index(pick1, assemblies.len());
+            overlay_renovation(&mut assemblies[k1]);
+            if assemblies.len() > 1 {
+                // Offset from k1 rather than re-rolling, so the second pick
+                // is guaranteed distinct instead of merely likely to be.
+                let k2 = (k1 + 1 + pick_index(pick2, assemblies.len() - 1)) % assemblies.len();
+                overlay_renovation(&mut assemblies[k2]);
+            }
+        }
+    }
+}
+
+/// A renovation overlays the original structural grid on one assembly.
 fn overlay_renovation(assembly: &mut AssemblyInstance) {
     assembly.corruption.renovation_overlay = true;
 }
@@ -339,6 +366,70 @@ mod tests {
         assert!(a.corruption.renovation_overlay);
         assert!(!a.corruption.abandoned);
         assert!(!a.corruption.red_room);
+    }
+
+    fn three_assemblies() -> Vec<AssemblyInstance> {
+        vec![
+            minimal_assembly(0, 0.0, 20.0),
+            minimal_assembly(1, 20.0, 20.0),
+            minimal_assembly(2, 40.0, 20.0),
+        ]
+    }
+
+    #[test]
+    fn untouched_history_overlays_nothing() {
+        let mut assemblies = three_assemblies();
+        apply_renovation_history(RenovationStyle::Untouched, &mut assemblies, 0.5, 0.5);
+        assert!(assemblies.iter().all(|a| !a.corruption.renovation_overlay));
+    }
+
+    #[test]
+    fn partial_refit_overlays_exactly_one_assembly() {
+        let mut assemblies = three_assemblies();
+        apply_renovation_history(RenovationStyle::PartialRefit, &mut assemblies, 0.5, 0.5);
+        assert_eq!(
+            assemblies
+                .iter()
+                .filter(|a| a.corruption.renovation_overlay)
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn layered_refits_overlay_two_distinct_assemblies() {
+        // Scan a spread of (pick1, pick2) pairs rather than one fixed pair,
+        // so the "distinct" guarantee is checked for more than one lucky
+        // roll of pick_index.
+        for i in 0..7 {
+            for j in 0..7 {
+                let mut assemblies = three_assemblies();
+                let pick1 = i as f32 / 7.0;
+                let pick2 = j as f32 / 7.0;
+                apply_renovation_history(
+                    RenovationStyle::LayeredRefits,
+                    &mut assemblies,
+                    pick1,
+                    pick2,
+                );
+                let overlaid: Vec<_> = assemblies
+                    .iter()
+                    .filter(|a| a.corruption.renovation_overlay)
+                    .collect();
+                assert_eq!(
+                    overlaid.len(),
+                    2,
+                    "layered refits must contradict two assemblies (pick1={pick1}, pick2={pick2})"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn layered_refits_overlay_falls_back_to_one_with_a_single_assembly() {
+        let mut assemblies = vec![minimal_assembly(0, 0.0, 20.0)];
+        apply_renovation_history(RenovationStyle::LayeredRefits, &mut assemblies, 0.5, 0.5);
+        assert!(assemblies[0].corruption.renovation_overlay);
     }
 
     #[test]

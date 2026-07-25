@@ -466,7 +466,7 @@ mod tests {
     use crate::domain::entities::anomaly::{
         ArchProfile, OrientedFootprint, OrthoBasis, QuarterTurn,
     };
-    use crate::entities::models::Position;
+    use crate::domain::entities::position::Position;
     use crate::frameworks_drivers::simple_noise::SimpleNoiseProvider;
 
     fn arch_room(behavior: ArchBehavior) -> AnomalyInstance {

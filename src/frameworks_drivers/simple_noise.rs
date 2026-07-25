@@ -1,4 +1,4 @@
-use crate::entities::models::Position;
+use crate::domain::entities::position::Position;
 use crate::use_cases::ports::NoiseProvider;
 
 /// SimpleNoiseProvider is a concrete implementation of the NoiseProvider port.

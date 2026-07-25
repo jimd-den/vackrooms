@@ -58,3 +58,31 @@ pub fn chunk_bounding_sphere(origin: [f32; 3], bounds_max: [f32; 3]) -> ([f32; 3
         * 0.5;
     (center, radius)
 }
+
+/// Conservative AABB vs. Frustum test with safety inflation margin (0.5 voxel).
+///
+/// # Rationale
+/// Prevents false culls on side view boundaries while rejecting chunks strictly outside
+/// the extended camera view cone.
+pub fn aabb_frustum_visible(
+    origin: [f32; 3],
+    bounds_max: [f32; 3],
+    frame: &FrameParams,
+    margin: f32,
+) -> bool {
+    let (center, radius) = chunk_bounding_sphere(origin, bounds_max);
+    let inflated_radius = radius + margin;
+    sphere_visible(center, inflated_radius, frame, MAX_DRAW_DISTANCE).is_some()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_chunk_bounding_sphere_computation() {
+        let (center, radius) = chunk_bounding_sphere([0.0, 0.0, 0.0], [16.0, 8.0, 16.0]);
+        assert_eq!(center, [8.0, 4.0, 8.0]);
+        assert!(radius > 0.0);
+    }
+}

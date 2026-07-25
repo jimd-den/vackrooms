@@ -7,14 +7,13 @@ use crate::domain::entities::anomaly::{
     TraversalGateKind, WorldBounds,
 };
 use crate::domain::entities::architecture::{LightKind, RegionPlan, RuntimeLight};
+use crate::domain::entities::position::Position;
 use crate::domain::entities::voxel_grid::VoxelGrid;
-use crate::entities::models::Position;
 use crate::use_cases::generate_chunk::GeneratorConfig;
 use crate::use_cases::infinite_level::InfiniteRegionWindow;
 use crate::use_cases::level_generator::LevelGenerator;
 use crate::use_cases::ports::NoiseProvider;
 use crate::use_cases::red_rooms::recursive_level::RecursiveLevelWindow;
-use crate::use_cases::region_plan::region_index;
 
 use super::{BackroomsLevel, ColumnField, ColumnPlan, GRID_HEIGHT_UNITS, voxelize_columns};
 
@@ -51,7 +50,7 @@ fn gate_crosses_bounds(gate: &TraversalGate, bounds: WorldBounds) -> bool {
 /// stable ids before anything reaches the write stage.
 #[allow(clippy::too_many_arguments)]
 fn decide_traversal_gates_and_hazards(
-    plans: &[((i64, i64), RegionPlan)],
+    plans: &InfiniteRegionWindow,
     recursive_level: Option<&RecursiveLevelWindow>,
     chunk_bounds: WorldBounds,
 ) -> (Vec<TraversalGate>, Vec<PitHazard>) {
@@ -63,40 +62,45 @@ fn decide_traversal_gates_and_hazards(
     let mut seen_instances = std::collections::HashSet::new();
     let mut seen_gates = std::collections::HashSet::new();
     let mut seen_hazards = std::collections::HashSet::new();
-    let mut export_interactions = |plan: &RegionPlan| {
-        for anomaly in &plan.anomalies {
-            if !seen_instances.insert(anomaly.id)
-                || !anomaly
-                    .footprint
-                    .bounds()
-                    .intersects(authored_bounds.expanded(1.0))
-            {
-                continue;
-            }
-            for gate in anomaly.traversal_gates() {
-                if gate_crosses_bounds(gate, authored_bounds) && seen_gates.insert(gate.id) {
-                    gates.push(recursive_level.map_or(*gate, |recursive| recursive.project_gate(*gate)));
+    {
+        let mut export_interactions = |plan: &RegionPlan| {
+            for anomaly in &plan.anomalies {
+                if !seen_instances.insert(anomaly.id)
+                    || !anomaly
+                        .footprint
+                        .bounds()
+                        .intersects(authored_bounds.expanded(1.0))
+                {
+                    continue;
+                }
+                for gate in anomaly.traversal_gates() {
+                    if gate_crosses_bounds(gate, authored_bounds) && seen_gates.insert(gate.id) {
+                        gates.push(
+                            recursive_level
+                                .map_or(*gate, |recursive| recursive.project_gate(*gate)),
+                        );
+                    }
+                }
+                for hazard in anomaly.pit_hazards_for_bounds(authored_bounds) {
+                    if seen_hazards.insert(hazard.id) {
+                        hazards.push(
+                            recursive_level
+                                .map_or(hazard, |recursive| recursive.project_hazard(hazard)),
+                        );
+                    }
                 }
             }
-            for hazard in anomaly.pit_hazards_for_bounds(authored_bounds) {
-                if seen_hazards.insert(hazard.id) {
-                    hazards.push(
-                        recursive_level.map_or(hazard, |recursive| recursive.project_hazard(hazard)),
-                    );
-                }
+        };
+        if let Some(recursive) = recursive_level {
+            for (_, plan) in recursive.iter() {
+                export_interactions(plan);
             }
-        }
-    };
-    if let Some(recursive) = recursive_level {
-        for (_, plan) in recursive.iter() {
-            export_interactions(plan);
-        }
-    } else {
-        for (_, plan) in plans {
-            export_interactions(plan);
+        } else {
+            for (_, plan) in plans.iter() {
+                export_interactions(plan);
+            }
         }
     }
-    drop(export_interactions);
 
     // The recursive branch supplies its own anomaly semantics, while the
     // encounter that opened it retains one checkpoint in visible space.
@@ -126,7 +130,7 @@ fn decide_traversal_gates_and_hazards(
 /// this queries the column plan directly instead of the still-empty grid.
 #[allow(clippy::too_many_arguments)]
 fn decide_runtime_lights(
-    plans: &[((i64, i64), RegionPlan)],
+    plans: &InfiniteRegionWindow,
     recursive_level: Option<&RecursiveLevelWindow>,
     chunk_pos: Position,
     config: &GeneratorConfig,
@@ -135,134 +139,132 @@ fn decide_runtime_lights(
     reality: &RealitySnapshot,
 ) -> Vec<RuntimeLight> {
     let plan_of = |wx: f32, wz: f32| -> &RegionPlan {
-        let key = (region_index(wx), region_index(wz));
         plans
-            .iter()
-            .find(|(k, _)| *k == key)
-            .map(|(_, p)| p)
+            .plan_at(Position::new(wx, wz))
             .expect("region window covers the requested voxel halo")
     };
     let mut lights = Vec::new();
     let mut seen = std::collections::HashSet::new();
-    let mut collect_runtime_lights = |plan: &RegionPlan| {
-        for a in &plan.assemblies {
-            if a.corruption.abandoned {
-                continue;
-            }
-            for f in &a.fixtures {
-                if !f.lit {
+    {
+        let mut collect_runtime_lights = |plan: &RegionPlan| {
+            for a in &plan.assemblies {
+                if a.corruption.abandoned {
                     continue;
                 }
-                let rendered_at = recursive_level
-                    .map_or(f.at, |recursive| recursive.project_position(f.at));
-                let key = (rendered_at.x.to_bits(), rendered_at.z.to_bits());
-                if !seen.insert(key) {
-                    continue;
-                }
+                for f in &a.fixtures {
+                    if !f.lit {
+                        continue;
+                    }
+                    let rendered_at =
+                        recursive_level.map_or(f.at, |recursive| recursive.project_position(f.at));
+                    let key = (rendered_at.x.to_bits(), rendered_at.z.to_bits());
+                    if !seen.insert(key) {
+                        continue;
+                    }
 
-                let (sample_at, fixture_plan) = if let Some(recursive) = recursive_level {
-                    recursive
-                        .plan_at(rendered_at)
-                        .expect("recursive region window covers its projected fixtures")
-                } else {
-                    (f.at, plan_of(f.at.x, f.at.z))
-                };
-
-                // Region-scale anomaly interiors own their fixture rhythm.
-                // Do not leak an overwritten assembly's runtime light into a
-                // blackout/pillar/pit payload.
-                if fixture_plan.anomalies.iter().any(|anomaly| {
-                    anomaly.kind != AnomalyKind::RedRoom && anomaly.contains(sample_at.x, sample_at.z)
-                }) {
-                    continue;
-                }
-
-                let cx = rendered_at.x - chunk_pos.x;
-                let cz = rendered_at.z - chunk_pos.z;
-                if cx >= -15.0
-                    && cx <= config.chunk_size + 15.0
-                    && cz >= -15.0
-                    && cz <= config.chunk_size + 15.0
-                {
-                    let ceiling_units = a
-                        .ceiling_zones
-                        .iter()
-                        .find(|z| z.area.contains(f.at.x, f.at.z))
-                        .map(|z| z.height_units)
-                        .unwrap_or(4.0);
-                    let is_atrium = matches!(
-                        a.program,
-                        crate::domain::entities::architecture::SpaceProgram::Atrium
-                    );
-                    let y = runtime_light_height(ceiling_units, is_atrium);
-
-                    let kind = if f.half_x > f.half_z * 2.0 || f.half_z > f.half_x * 2.0 {
-                        LightKind::Strip
+                    let (sample_at, fixture_plan) = if let Some(recursive) = recursive_level {
+                        recursive
+                            .plan_at(rendered_at)
+                            .expect("recursive region window covers its projected fixtures")
                     } else {
-                        LightKind::CeilingPanel
+                        (f.at, plan_of(f.at.x, f.at.z))
                     };
 
-                    let is_buried = if let Some(recursive) = recursive_level {
-                        BackroomsLevel::plan_column_in_reality(
-                            fixture_plan,
-                            noise,
-                            recursive.seed(),
-                            recursive.config(),
-                            reality,
-                            sample_at.x,
-                            sample_at.z,
-                        )
-                        .solid
-                    } else {
-                        BackroomsLevel::plan_column_in_reality(
-                            fixture_plan,
-                            noise,
-                            seed,
-                            config,
-                            reality,
-                            sample_at.x,
-                            sample_at.z,
-                        )
-                        .solid
-                    };
+                    // Region-scale anomaly interiors own their fixture rhythm.
+                    // Do not leak an overwritten assembly's runtime light into a
+                    // blackout/pillar/pit payload.
+                    if fixture_plan.anomalies.iter().any(|anomaly| {
+                        anomaly.kind != AnomalyKind::RedRoom
+                            && anomaly.contains(sample_at.x, sample_at.z)
+                    }) {
+                        continue;
+                    }
 
-                    if !is_buried {
-                        // Red rooms are exposed purely by their light color;
-                        // the fixtures keep the room's spacing.
-                        let rgb = if recursive_level.is_some() || a.corruption.red_room {
-                            [1.0, 0.22, 0.16]
+                    let cx = rendered_at.x - chunk_pos.x;
+                    let cz = rendered_at.z - chunk_pos.z;
+                    if cx >= -15.0
+                        && cx <= config.chunk_size + 15.0
+                        && cz >= -15.0
+                        && cz <= config.chunk_size + 15.0
+                    {
+                        let ceiling_units = a
+                            .ceiling_zones
+                            .iter()
+                            .find(|z| z.area.contains(f.at.x, f.at.z))
+                            .map(|z| z.height_units)
+                            .unwrap_or(4.0);
+                        let is_atrium = matches!(
+                            a.program,
+                            crate::domain::entities::architecture::SpaceProgram::Atrium
+                        );
+                        let y = runtime_light_height(ceiling_units, is_atrium);
+
+                        let kind = if f.half_x > f.half_z * 2.0 || f.half_z > f.half_x * 2.0 {
+                            LightKind::Strip
                         } else {
-                            [1.0, 0.95, 0.8]
+                            LightKind::CeilingPanel
                         };
-                        lights.push(RuntimeLight {
-                            world_pos: [rendered_at.x, y, rendered_at.z],
-                            half_size: [f.half_x, f.half_z],
-                            rgb,
-                            range: if is_atrium { 24.0 } else { 16.0 },
-                            intensity: if is_atrium { 4.0 } else { 1.0 },
-                            enabled: true,
-                            kind,
-                        });
+
+                        let is_buried = if let Some(recursive) = recursive_level {
+                            BackroomsLevel::plan_column_in_reality(
+                                fixture_plan,
+                                noise,
+                                recursive.seed(),
+                                recursive.config(),
+                                reality,
+                                sample_at.x,
+                                sample_at.z,
+                            )
+                            .solid
+                        } else {
+                            BackroomsLevel::plan_column_in_reality(
+                                fixture_plan,
+                                noise,
+                                seed,
+                                config,
+                                reality,
+                                sample_at.x,
+                                sample_at.z,
+                            )
+                            .solid
+                        };
+
+                        if !is_buried {
+                            // Red rooms are exposed purely by their light color;
+                            // the fixtures keep the room's spacing.
+                            let rgb = if recursive_level.is_some() || a.corruption.red_room {
+                                [1.0, 0.22, 0.16]
+                            } else {
+                                [1.0, 0.95, 0.8]
+                            };
+                            lights.push(RuntimeLight {
+                                world_pos: [rendered_at.x, y, rendered_at.z],
+                                half_size: [f.half_x, f.half_z],
+                                rgb,
+                                range: if is_atrium { 24.0 } else { 16.0 },
+                                intensity: if is_atrium { 4.0 } else { 1.0 },
+                                enabled: true,
+                                kind,
+                            });
+                        }
                     }
                 }
             }
-        }
-    };
-    if let Some(recursive) = recursive_level {
-        for (_, plan) in recursive.iter() {
-            collect_runtime_lights(plan);
-        }
-    } else {
-        for (_, plan) in plans {
-            collect_runtime_lights(plan);
+        };
+        if let Some(recursive) = recursive_level {
+            for (_, plan) in recursive.iter() {
+                collect_runtime_lights(plan);
+            }
+        } else {
+            for (_, plan) in plans.iter() {
+                collect_runtime_lights(plan);
+            }
         }
     }
-    drop(collect_runtime_lights);
     lights
 }
 
 impl BackroomsLevel {
-
     /// Region plans for every region a chunk (plus a margin) overlaps.
     pub(crate) fn region_plans_for(
         chunk_pos: Position,
@@ -270,25 +272,12 @@ impl BackroomsLevel {
         seed: u32,
         config: &GeneratorConfig,
         noise: &dyn NoiseProvider,
-    ) -> Vec<((i64, i64), RegionPlan)> {
+    ) -> InfiniteRegionWindow {
         InfiniteRegionWindow::around_chunk(chunk_pos, chunk_size, 1.0, seed, config, noise)
-            .iter()
-            .map(|(key, plan)| (key, plan.clone()))
-            .collect()
     }
 }
 
 impl LevelGenerator for BackroomsLevel {
-    fn generate(
-        &self,
-        chunk_pos: Position,
-        seed: u32,
-        config: GeneratorConfig,
-        noise: &dyn NoiseProvider,
-    ) -> VoxelGrid {
-        self.generate_with_reality(chunk_pos, seed, config, noise, &RealitySnapshot::empty())
-    }
-
     fn generate_with_reality(
         &self,
         chunk_pos: Position,
@@ -321,11 +310,8 @@ impl LevelGenerator for BackroomsLevel {
 
         // Architecture first: plan every region this chunk overlaps.
         let plan_of = |wx: f32, wz: f32| -> &RegionPlan {
-            let key = (region_index(wx), region_index(wz));
             plans
-                .iter()
-                .find(|(k, _)| *k == key)
-                .map(|(_, p)| p)
+                .plan_at(Position::new(wx, wz))
                 .expect("region window covers the requested voxel halo")
         };
 
@@ -496,6 +482,9 @@ mod tests {
 
             any_lights |= !lights_a.is_empty();
         }
-        assert!(any_lights, "no runtime lights found across 40 sampled chunks");
+        assert!(
+            any_lights,
+            "no runtime lights found across 40 sampled chunks"
+        );
     }
 }

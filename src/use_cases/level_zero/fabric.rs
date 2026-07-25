@@ -5,8 +5,8 @@
 //! and vaults punctuate it; they are never the default.
 
 use crate::domain::entities::anomaly::RealitySnapshot;
-use crate::entities::models::Position;
-use crate::domain::entities::voxel_grid::{VOXEL_FLOOR, VOXEL_LIGHT, VOXEL_WALL};
+use crate::domain::entities::environment::{EnvironmentProfile, WallTreatment};
+use crate::domain::entities::position::Position;
 use crate::use_cases::generate_chunk::LevelTuning;
 use crate::use_cases::ports::NoiseProvider;
 use crate::use_cases::region_plan::PLAN_WALL_T;
@@ -167,6 +167,33 @@ impl BackroomsLevel {
         let ceiling_band = Self::fabric_ceiling_band(noise, seed, wx, wz);
         let ceiling_units = Self::fabric_ceiling_height(noise, seed, wx, wz, ceiling_band);
 
+        // ---- material/decay -------------------------------------------------
+        // Every consumer of Level 0 materials is meant to derive from one
+        // `EnvironmentProfile` (see environment.rs's module doc); ordinary
+        // fabric is the one caller that used to bypass it with hardcoded
+        // constants. `institution_age` already ages the fixture survival
+        // ratio below; sampling it once more here, at this column's own
+        // `FABRIC_CELL` anchor (the wall lattice, not the light lattice —
+        // each decision reads the field at its own deciding cell, same
+        // pattern the light block already uses), gives ordinary rooms a real
+        // decay gradient instead of one flat color everywhere.
+        let cx = (wx / FABRIC_CELL).floor() as i64;
+        let cz = (wz / FABRIC_CELL).floor() as i64;
+        let cell_age = crate::use_cases::world_topology::institution_age_at(
+            noise,
+            seed,
+            (cx as f32 + 0.5) * FABRIC_CELL,
+            (cz as f32 + 0.5) * FABRIC_CELL,
+        );
+        let env = EnvironmentProfile {
+            wall: if cell_age > 0.55 {
+                WallTreatment::AgedWallpaper
+            } else {
+                WallTreatment::YellowWallpaper
+            },
+            ..EnvironmentProfile::level0_fabric()
+        };
+
         // In open and vaulted regions, partitions dissolve and only sparse
         // structural columns remain. The cheap dropped-ceiling material is
         // therefore carried through unexpectedly large space.
@@ -211,8 +238,6 @@ impl BackroomsLevel {
                 // around them have dropped they survive as column stubs.
                 solid = tuning.walls > 0.0;
             } else if in_w || in_n {
-                let cx = (wx / FABRIC_CELL).floor() as i64;
-                let cz = (wz / FABRIC_CELL).floor() as i64;
                 // The whole fabric cell rearranges as one: its epoch is read
                 // at the cell's own center, never at the sampled column.
                 let epoch = reality.fabric_drift_epoch(
@@ -354,9 +379,9 @@ impl BackroomsLevel {
             light,
             red_light: false,
             lintel_from_units,
-            wall_material: VOXEL_WALL,
-            floor_material: VOXEL_FLOOR,
-            light_material: VOXEL_LIGHT,
+            wall_material: env.wall_voxel(),
+            floor_material: env.floor_voxel(),
+            light_material: env.light_voxel(),
         }
     }
 }

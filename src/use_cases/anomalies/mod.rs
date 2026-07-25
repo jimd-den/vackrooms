@@ -11,7 +11,7 @@ mod macro_planner;
 
 use crate::domain::entities::anomaly::{AnomalyInstance, WorldBounds};
 use crate::domain::entities::architecture::AssemblyInstance;
-use crate::entities::models::Position;
+use crate::domain::entities::position::Position;
 use crate::use_cases::generate_chunk::GeneratorConfig;
 use crate::use_cases::ports::NoiseProvider;
 use crate::use_cases::red_rooms::planning::plan_red_rooms;

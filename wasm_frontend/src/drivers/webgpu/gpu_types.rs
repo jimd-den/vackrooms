@@ -6,6 +6,9 @@
 //! upon.
 
 use bytemuck::{Pod, Zeroable};
+use vackrooms::adapters::material_palette::material_visual;
+#[cfg(test)]
+use vackrooms::adapters::material_palette::MATERIAL_VISUALS;
 
 use crate::application::ports::{
     DynamicLight, FrameParams, LightKind, LightSource, PackedFaceInstance, PackedVertex,
@@ -13,7 +16,7 @@ use crate::application::ports::{
 };
 use crate::application::render_settings::RenderToggles;
 use crate::application::rendering::{camera_basis, webgpu_view_projection};
-use vackrooms::domain::entities::voxel_grid::{MATERIAL_COLORS, material_emission_strength};
+use vackrooms::domain::entities::voxel_grid::material_emission_strength;
 
 /// The high byte of a packed material visual stores authored emission over
 /// the current domain range of `0..=10`. The low 24 bits remain the canonical
@@ -21,11 +24,7 @@ use vackrooms::domain::entities::voxel_grid::{MATERIAL_COLORS, material_emission
 const PACKED_EMISSION_UNITS_PER_RADIANCE: f32 = u8::MAX as f32 / 10.0;
 
 fn pack_material_visual(material: u8) -> u32 {
-    let color = MATERIAL_COLORS
-        .get(usize::from(material))
-        .copied()
-        .unwrap_or_default()
-        & 0x00ff_ffff;
+    let color = material_visual(material).color & 0x00ff_ffff;
     let emission = material_emission_strength(material).unwrap_or_default();
     let quantized_emission = (emission * PACKED_EMISSION_UNITS_PER_RADIANCE)
         .round()
@@ -393,15 +392,15 @@ mod tests {
         assert_eq!(packed.z_normal_material >> 24, 7);
         assert_eq!(packed.light_ao & 0xff, 13);
         assert_eq!((packed.light_ao >> 8) & 0xff, 201);
-        assert_eq!(packed.visual & 0x00ff_ffff, MATERIAL_COLORS[7]);
+        assert_eq!(packed.visual & 0x00ff_ffff, MATERIAL_VISUALS[7].color);
     }
 
     #[test]
     fn packed_visuals_derive_palette_and_emission_from_the_domain_contract() {
-        for (material, expected_color) in MATERIAL_COLORS.iter().copied().enumerate() {
+        for (material, visual) in MATERIAL_VISUALS.iter().enumerate() {
             let material = material as u8;
             let packed = pack_material_visual(material);
-            assert_eq!(packed & 0x00ff_ffff, expected_color, "material {material}");
+            assert_eq!(packed & 0x00ff_ffff, visual.color, "material {material}");
 
             let decoded_emission = (packed >> 24) as f32 / PACKED_EMISSION_UNITS_PER_RADIANCE;
             let expected_emission = material_emission_strength(material).unwrap_or_default();

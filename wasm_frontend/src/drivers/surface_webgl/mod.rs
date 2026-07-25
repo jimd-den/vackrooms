@@ -85,6 +85,15 @@ pub(crate) struct LabelUniforms {
     pub fog_start: Option<WebGlUniformLocation>,
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SurfaceFrameStats {
+    pub visible_chunks: usize,
+    pub resident_chunks: usize,
+    pub draw_calls: u32,
+    pub triangles_drawn: u32,
+    pub shadow_casters: u32,
+}
+
 /// Surface rasterizer with incremental chunk mesh uploads. One VAO/VBO/IBO
 /// tuple per resident chunk keeps the draw path allocation-free.
 pub struct SurfaceRenderer {
@@ -103,6 +112,7 @@ pub struct SurfaceRenderer {
     pub(crate) label_uniforms: LabelUniforms,
     /// Present once the driver has decoded and shipped the label atlas.
     pub(crate) label_atlas: Option<web_sys::WebGlTexture>,
+    pub(crate) stats: SurfaceFrameStats,
 }
 
 impl SurfaceRenderer {
@@ -184,6 +194,7 @@ impl SurfaceRenderer {
             label_program,
             label_uniforms,
             label_atlas: None,
+            stats: SurfaceFrameStats::default(),
         })
     }
 

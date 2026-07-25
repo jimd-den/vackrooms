@@ -13,7 +13,7 @@
 use crate::domain::entities::voxel_grid::{
     VOXEL_GRASS, VOXEL_LIGHT, VOXEL_TREE, VOXEL_WATER, VoxelGrid,
 };
-use crate::entities::models::Position;
+use crate::domain::entities::position::Position;
 use crate::use_cases::generate_chunk::GeneratorConfig;
 use crate::use_cases::level_generator::LevelGenerator;
 use crate::use_cases::ports::NoiseProvider;
@@ -41,12 +41,13 @@ impl GrasslandLevel {
 }
 
 impl LevelGenerator for GrasslandLevel {
-    fn generate(
+    fn generate_with_reality(
         &self,
         chunk_pos: Position,
         seed: u32,
         config: GeneratorConfig,
         noise: &dyn NoiseProvider,
+        _reality: &crate::domain::entities::anomaly::RealitySnapshot,
     ) -> VoxelGrid {
         let s = config.voxel_scale;
         let width = (config.chunk_size / s).round() as usize;

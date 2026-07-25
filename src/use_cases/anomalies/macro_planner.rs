@@ -9,7 +9,7 @@ use crate::domain::entities::anomaly::{
     OrientedFootprint, OrthoBasis, PillarLattice, PitLattice, QuarterTurn, TraversalGate,
     TraversalGateKind, WorldBounds,
 };
-use crate::entities::models::Position;
+use crate::domain::entities::position::Position;
 use crate::use_cases::generate_chunk::GeneratorConfig;
 use crate::use_cases::ports::NoiseProvider;
 use crate::use_cases::world_topology::sample_fields;

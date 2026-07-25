@@ -7,7 +7,7 @@ use crate::domain::entities::voxel_grid::{
     VOXEL_ALMOND_WATER, VOXEL_CONCRETE_FLOOR, VOXEL_CONCRETE_WALL, VOXEL_CRATE, VOXEL_METAL_DOOR,
     VOXEL_PIPE, VOXEL_TILE_FLOOR, VoxelGrid,
 };
-use crate::entities::models::Position;
+use crate::domain::entities::position::Position;
 use crate::use_cases::anomalies::determinism::{hash, unit};
 use crate::use_cases::generate_chunk::GeneratorConfig;
 use crate::use_cases::level_generator::{LEVEL_BACKROOMS, LevelGenerator};
@@ -492,16 +492,6 @@ pub(crate) fn stamp_level_door(
 }
 
 impl LevelGenerator for HabitableLevel {
-    fn generate(
-        &self,
-        chunk_pos: Position,
-        seed: u32,
-        config: GeneratorConfig,
-        noise: &dyn NoiseProvider,
-    ) -> VoxelGrid {
-        self.generate_with_reality(chunk_pos, seed, config, noise, &RealitySnapshot::empty())
-    }
-
     fn generate_with_reality(
         &self,
         chunk_pos: Position,

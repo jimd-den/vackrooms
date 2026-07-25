@@ -15,7 +15,7 @@
 //! justify the system's name.
 
 use crate::domain::entities::architecture::*;
-use crate::entities::models::Position;
+use crate::domain::entities::position::Position;
 use crate::use_cases::ports::NoiseProvider;
 use crate::use_cases::world_topology::hash01;
 

@@ -4,7 +4,7 @@
 //! reality changes. The application detects a crossing, then the reality
 //! reducer interprets it as a deterministic state transition.
 
-use crate::entities::models::Position;
+use crate::domain::entities::position::Position;
 
 use super::geometry::{Axis2, AxisDirection, WorldBounds, decode_axis, decode_direction};
 use super::phenomena::{AnomalyId, AnomalyKind, decode_kind};

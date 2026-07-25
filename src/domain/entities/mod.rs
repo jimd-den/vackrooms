@@ -4,6 +4,8 @@ pub mod cell;
 pub mod environment;
 pub mod grid;
 pub mod player_vitals;
+pub mod position;
+pub mod probe_grid;
 pub mod sparse_voxel_octree;
 pub mod supplies;
 pub mod voxel_grid;

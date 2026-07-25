@@ -7,8 +7,9 @@
 //! actually-solid voxel in the source octree. Phantom hits (the "random
 //! floating squares" artifact) fail the test with a diagnostic dump.
 
-use vackrooms::domain::use_cases::build_octree::BuildOctreeUseCase;
-use vackrooms::entities::models::Position;
+use vackrooms::adapters::material_palette::DEFAULT_MATERIAL_PALETTE;
+use vackrooms::use_cases::build_octree::BuildOctreeUseCase;
+use vackrooms::domain::entities::position::Position;
 use vackrooms::frameworks_drivers::simple_noise::SimpleNoiseProvider;
 use vackrooms::use_cases::generate_chunk::{GenerateChunkArchitectureUseCase, GeneratorConfig};
 
@@ -302,7 +303,11 @@ fn multi_chunk_raymarch_reports_no_phantom_geometry() {
         .map(|c| {
             let generator = GenerateChunkArchitectureUseCase::new(&noise);
             let grid = generator.execute(Position::new(c.origin.0, c.origin.1), seed, config);
-            BuildOctreeUseCase::new().execute(&grid, config.svo_depth(), config.svo_world_size())
+            BuildOctreeUseCase::new(&DEFAULT_MATERIAL_PALETTE).execute(
+                &grid,
+                config.svo_depth(),
+                config.svo_world_size(),
+            )
         })
         .collect();
 

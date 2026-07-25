@@ -7,9 +7,10 @@
 //! the same halo grid that is meshed. A direct light exists exactly when a
 //! downward-facing emissive surface exists.
 
+use vackrooms::adapters::material_palette::material_color_f32;
 use vackrooms::domain::entities::voxel_grid::{
     VOXEL_AIR, VOXEL_GLIMMER, VOXEL_LIGHT, VOXEL_RED_LIGHT, VoxelGrid,
-    material_color_f32, material_emission_strength,
+    material_emission_strength,
 };
 use vackrooms::use_cases::bake_voxel_lighting::DEFAULT_MAX_LIGHT_RANGE_WORLD_UNITS;
 

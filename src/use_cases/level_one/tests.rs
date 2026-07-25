@@ -10,7 +10,7 @@ use crate::domain::entities::voxel_grid::{
     VoxelGrid,
 };
 use crate::domain::entities::supplies::SupplyItem;
-use crate::entities::models::Position;
+use crate::domain::entities::position::Position;
 use crate::use_cases::generate_chunk::GeneratorConfig;
 use crate::use_cases::level_generator::{LEVEL_BACKROOMS, LevelGenerator};
 use crate::use_cases::ports::NoiseProvider;

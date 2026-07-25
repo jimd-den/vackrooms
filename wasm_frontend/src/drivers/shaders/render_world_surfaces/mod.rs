@@ -66,9 +66,10 @@ out vec4 fragColor;
 
 /// Builds one readable GLSL translation unit from purpose-sized sections.
 pub fn fragment_source() -> String {
+    let material_color = chunks::material_color_glsl();
     [
         FRAGMENT_INTERFACE,
-        chunks::MATERIAL_COLOR_GLSL,
+        &material_color,
         chunks::NOISE_GLSL,
         chunks::SPOT_CONE_GLSL,
         chunks::FLARE_CORES_GLSL,

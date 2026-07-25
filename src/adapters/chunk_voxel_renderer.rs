@@ -23,7 +23,7 @@ use crate::domain::entities::voxel_grid::{
     VOXEL_WALL, VOXEL_RED_WALL, VOXEL_FLOOR, VOXEL_CEILING,
     VOXEL_LIGHT, VOXEL_RED_LIGHT, VOXEL_GRASS, VOXEL_WATER, VOXEL_TREE,
 };
-use crate::entities::models::Position;
+use crate::domain::entities::position::Position;
 
 // ---------------------------------------------------------------------------
 // Public API types

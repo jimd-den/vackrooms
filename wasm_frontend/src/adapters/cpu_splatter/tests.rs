@@ -295,12 +295,13 @@ fn mip_aggregation_works_for_root_last_node_order() {
     // BEFORE their parent, so the root is the LAST node — the opposite
     // order of SparseVoxelOctree::set. build_mips must handle both.
     use vackrooms::domain::entities::voxel_grid::{VOXEL_WALL, VoxelGrid};
-    use vackrooms::domain::use_cases::build_octree::BuildOctreeUseCase;
+    use vackrooms::adapters::material_palette::DEFAULT_MATERIAL_PALETTE;
+    use vackrooms::use_cases::build_octree::BuildOctreeUseCase;
 
     let mut grid = VoxelGrid::new(4, 4, 4);
     grid.set(0, 0, 0, VOXEL_WALL);
     grid.set(3, 3, 3, VOXEL_WALL);
-    let svo = BuildOctreeUseCase::new().execute(&grid, 2, 4.0);
+    let svo = BuildOctreeUseCase::new(&DEFAULT_MATERIAL_PALETTE).execute(&grid, 2, 4.0);
     let gpu = OctreeGpuSerializer::serialize_to_gpu_data(&svo);
     let mips = build_mips(&gpu.texel_data);
 

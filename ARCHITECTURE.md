@@ -10,19 +10,16 @@ client-side and needs no server).
 
 ## Rendering family
 
-`create_renderer` parses `?renderer=` and a typed quality profile, then creates
-one `WebGpuRenderer`. That facade owns the adapter, device, queue, browser
-surface, frame resources, and exactly one composable strategy:
+The engine targets **WebGL2** as its primary production rendering API, prioritizing reliable hardware compatibility, static probe volume lighting, and selective dynamic shadows.
 
-| `?renderer=` | Strategy | GPU work |
+| Strategy | Role & Purpose | Target Profile |
 |---|---|---|
-| `surface` *(default)* | indexed surfaces | Pull compact vertices from storage, draw a `u32` index buffer, and reuse both for the hero fixture's depth map. |
-| `splat` | face splats | Pull compact face records and expand each instance to four quad corners in both visible and depth-only hero-shadow passes; no indexed caster mesh is generated. |
-| `raymarch` | SVO raymarcher | Draw one fullscreen triangle and traverse the merged SVO storage-buffer atlas per fragment. |
-| `cpu` | CPU reference / WebGPU present | Run the deterministic software SVO rasterizer, upload its RGBA8 framebuffer, and present it with a fullscreen WebGPU pass. |
+| `surface` *(default)* | **Primary High-Quality Renderer** | Packed greedy meshes, per-chunk analytic light ranges, hero-light PCF shadows, dynamic dithered fog, and 3D probe volume sampling (`L_baked`). |
+| `splat` | **Low-Spec / Dense Geometry** | Instanced face splats with quad expansion; preserves flat retro voxel aesthetic and reads shared 3D probe volume. |
+| `raymarch` | **Diagnostic & Reference** | Fullscreen SVO raymarcher for volumetric inspection, special effects, and reference comparison. |
+| `cpu` | **Deterministic Fallback** | Software SVO rasterizer fallback for low-spec environments without rich global illumination. |
 
-All four strategies use WebGPU for presentation. Initialization failures are
-reported to the loading HUD instead of silently changing algorithms.
+Initialization failures are reported to the loading HUD gracefully without silent algorithm fallback.
 
 ### Renderer module boundaries
 
@@ -101,14 +98,13 @@ socket, or clock.
 │   src/frameworks_drivers  SimpleNoiseProvider, StdTelemetry        │
 │  ┌──────────────────────────────────────────────────────────────┐  │
 │  │ INTERFACE ADAPTERS                                           │  │
-│  │   src/adapters            OctreeGpuSerializer, VoxelMapper,  │  │
-│  │                           JsonPresenter                      │  │
-│  │   src/interface_adapters  WebRendererAdapter (presenters)    │  │
+│  │   src/adapters            MaterialPalette, WebRenderer,      │  │
+│  │                           OctreeGpuSerializer, VoxelMapper   │  │
 │  │   wasm_frontend/adapters  InputCollector, LocalChunkSource   │  │
 │  │  ┌────────────────────────────────────────────────────────┐  │  │
 │  │  │ USE CASES (application business rules)                 │  │  │
-│  │  │   src/use_cases           GenerateChunk + ports        │  │  │
-│  │  │   src/domain/use_cases    BuildOctree, lighting, maze  │  │  │
+│  │  │   src/use_cases           GenerateChunk, BuildOctree   │  │  │
+│  │  │   src/domain/use_cases    Domain algorithms and maze   │  │  │
 │  │  │   wasm_frontend/application  Engine (frame loop),      │  │  │
 │  │  │      Player, CollisionWorld, StreamingPolicy, atlas    │  │  │
 │  │  │      + ports (RendererPort, ChunkSourcePort)           │  │  │

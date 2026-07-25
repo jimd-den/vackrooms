@@ -1,11 +1,11 @@
-use crate::entities::models::Position;
+//! Inward-facing interfaces required by application use cases.
+//!
+//! Use cases define only the capability they need. Adapters and drivers own
+//! concrete noise, visual-palette, telemetry, and clock implementations.
 
-/// The Ports layer implements the Dependency Inversion Principle (SOLID).
-/// Instead of the Use Cases depending on a concrete external noise library or framework,
-/// the Use Cases define the interface (Port) they need, and the external layers
-/// (Adapters/Drivers) must implement this interface.
+use crate::domain::entities::position::Position;
 
-/// NoiseProvider is a pure interface for extracting deterministic continuous noise.
+/// `NoiseProvider` is a pure interface for deterministic continuous noise.
 /// We use this to evaluate the Macro Field (Drift, Density, Motif Selection).
 pub trait NoiseProvider {
     /// Returns a noise value, ideally in the range [-1.0, 1.0].
@@ -13,7 +13,14 @@ pub trait NoiseProvider {
     fn evaluate_2d(&self, seed: u32, position: Position) -> f32;
 }
 
-/// TelemetryPort abstracts wall-clock access and log emission so Use Cases
+/// Visual lookup required by use cases that prepare renderer-facing artifacts.
+/// The policy lives in an outer adapter; core material ids remain presentation
+/// agnostic and tests can inject a tiny deterministic palette.
+pub trait MaterialPalette {
+    fn color(&self, material: u8) -> u32;
+}
+
+/// `TelemetryPort` abstracts wall-clock access and log emission so use cases
 /// never touch `std::time` or stdout directly. Both are frameworks concerns,
 /// and `SystemTime::now()` panics on `wasm32-unknown-unknown`.
 pub trait TelemetryPort {
