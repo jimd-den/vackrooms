@@ -11,8 +11,8 @@
     "fileSummary": true,
     "directoryStructure": true,
     "files": true,
-    "removeComments": false,
-    "removeEmptyLines": false,
+    "removeComments": true,
+    "removeEmptyLines": true,
     "compress": false,
     "topFilesLength": 5,
     "showLineNumbers": true,
@@ -21,7 +21,7 @@
     "includeFullDirectoryStructure": true,
     "tokenCountTree": false,
     "git": {
-      "sortByChanges": true,
+      "sortByChanges": false,
       "sortByChangesMaxCommits": 100,
       "includeDiffs": false,
       "includeLogs": false,
@@ -33,7 +33,23 @@
     "useGitignore": true,
     "useDotIgnore": true,
     "useDefaultPatterns": true,
-    "customPatterns": []
+    "customPatterns": [
+      "**/*.md",
+      "**/*.txt",
+      "**/*.svg",
+      "**/*.png",
+      "**/*.ttf",
+      "**/*.wasm",
+      "**/*.xml",
+      "Cargo.lock",
+      "package-lock.json",
+      "scratch_*.py",
+      "scratch_*.rs",
+      "test_shadowing.js",
+      "repomix-output.*",
+      "test-results/**",
+      "static/pkg/**"
+    ]
   },
   "security": {
     "enableSecurityCheck": true
