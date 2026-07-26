@@ -55,6 +55,16 @@ impl BackroomsLevel {
         (v * 0.5 + 0.5).clamp(0.0, 0.999)
     }
 
+    /// Snap a world position to the center of its enclosing fabric room
+    /// cell — the same shared-lattice-anchor pattern `fabric_ceiling_height`
+    /// and every other seam in this pipeline already use, so two callers
+    /// deciding about the same cell always agree.
+    fn fabric_cell_anchor(wx: f32, wz: f32) -> (f32, f32) {
+        let cx = (wx / FABRIC_CELL).floor();
+        let cz = (wz / FABRIC_CELL).floor();
+        ((cx + 0.5) * FABRIC_CELL, (cz + 0.5) * FABRIC_CELL)
+    }
+
     /// Broad, low-frequency ceiling territory. The thresholds are chosen to
     /// bias the sampled world toward regular dropped ceilings while retaining
     /// meaningful regions of open volume and rare compression.
@@ -67,7 +77,16 @@ impl BackroomsLevel {
         // Regular dropped ceiling — the labyrinth fabric — is the default
         // condition of Level 0. Expanses and vaults are deliberate
         // punctuation the maze occasionally opens into, never the baseline.
-        let field = Self::n(noise, seed, 0xAA10, wx, wz, 0.18);
+        // Sampled at the room cell's own anchor, not the raw column: this
+        // field used to be sampled per-column, so a band boundary could
+        // fall anywhere, including the middle of a room with no wall to
+        // carry the resulting height step (the same failure mode
+        // `fabric_ceiling_height`'s zone/FABRIC_CELL mismatch had — see its
+        // doc comment). Quantizing here closes the gap: every column of a
+        // room now shares one band, so a band change can only land on a
+        // cell boundary, where the wall/doorway decision already lives.
+        let (ax, az) = Self::fabric_cell_anchor(wx, wz);
+        let field = Self::n(noise, seed, 0xAA10, ax, az, 0.18);
         if field < -0.60 {
             FabricCeilingBand::Compression
         } else if field < 0.52 {
@@ -101,8 +120,7 @@ impl BackroomsLevel {
         wz: f32,
         band: FabricCeilingBand,
     ) -> f32 {
-        let zone_x = (wx / FABRIC_CELL).floor() * FABRIC_CELL + FABRIC_CELL * 0.5;
-        let zone_z = (wz / FABRIC_CELL).floor() * FABRIC_CELL + FABRIC_CELL * 0.5;
+        let (zone_x, zone_z) = Self::fabric_cell_anchor(wx, wz);
         let detail = Self::n(noise, seed, 0xB300, zone_x, zone_z, 0.72);
         let (height, lo, hi) = match band {
             FabricCeilingBand::Compression => (2.6, 2.5, 2.8),
