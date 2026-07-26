@@ -1,5 +1,5 @@
-use super::*;
 use super::suites::aabb_overlap;
+use super::*;
 use crate::domain::entities::position::Position;
 use crate::use_cases::ports::NoiseProvider;
 
@@ -150,7 +150,7 @@ fn assemblies_are_large_and_narrow_doors_are_anomalies() {
                         b.2 - b.0
                     );
                 }
-                for e in &a.entrances {
+                for e in a.entrances() {
                     entrances += 1;
                     if e.width <= 1.3 {
                         narrow_doors += 1;
@@ -178,8 +178,12 @@ fn every_assembly_entrance_opens_onto_a_corridor() {
     for (rx, rz) in [(0i64, 0i64), (1, 0), (-1, 2), (3, -4)] {
         let p = plan(rx, rz);
         for a in &p.assemblies {
-            assert!(!a.entrances.is_empty(), "assembly {} has no door", a.id);
-            for e in &a.entrances {
+            assert!(
+                a.primary_entrance().is_some(),
+                "assembly {} has no door",
+                a.id
+            );
+            for e in a.entrances() {
                 let near = p.corridors.iter().any(|s| {
                     s.distance(e.center.x, e.center.z) <= s.width * 0.5 + PLAN_WALL_T + 0.05
                 });
@@ -212,6 +216,42 @@ fn assemblies_stay_inside_their_region_and_apart() {
             }
         }
     }
+}
+
+#[test]
+fn assemblies_have_valid_hosted_opening_relationships() {
+    let mut interior_openings = 0usize;
+    for rx in -3..=3 {
+        for rz in -3..=3 {
+            for assembly in &plan(rx, rz).assemblies {
+                let violations = assembly.validate_architecture();
+                assert!(
+                    violations.is_empty(),
+                    "assembly {} has invalid host relationships: {violations:?}",
+                    assembly.id
+                );
+                assert_eq!(
+                    assembly
+                        .hosts
+                        .iter()
+                        .filter(|host| host.role == HostRole::Shell)
+                        .count(),
+                    4,
+                    "assembly {} does not own a complete shell",
+                    assembly.id
+                );
+                interior_openings += assembly
+                    .openings
+                    .iter()
+                    .filter(|opening| opening.role == OpeningRole::Interior)
+                    .count();
+            }
+        }
+    }
+    assert!(
+        interior_openings > 0,
+        "recursive grammar authored no interior thresholds"
+    );
 }
 
 /// Red rooms are graph events: a region shows one only when the macro
@@ -276,11 +316,14 @@ fn stairwells_realize_upward_vertical_links() {
                     assert!(stairs.len() <= 1, "region ({rx},{rz}) built extra stairs");
                     if let Some(stair) = stairs.first() {
                         realized += 1;
-                        assert!(!stair.entrances.is_empty(), "stair core has no entrance");
+                        assert!(
+                            stair.primary_entrance().is_some(),
+                            "stair core has no entrance"
+                        );
                         let b = stair.footprint.bounds();
                         let (cx, cz) = ((b.0 + b.2) * 0.5, (b.1 + b.3) * 0.5);
-                        let d = ((cx - link.anchor.x).powi(2) + (cz - link.anchor.z).powi(2))
-                            .sqrt();
+                        let d =
+                            ((cx - link.anchor.x).powi(2) + (cz - link.anchor.z).powi(2)).sqrt();
                         assert!(
                             d < REGION_SIZE,
                             "stair strayed {d} u from its reservation anchor"

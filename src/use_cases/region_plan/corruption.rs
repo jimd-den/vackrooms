@@ -85,27 +85,7 @@ fn duplicate_suite_candidate(
     // behind an accidental strip of wall.
     let skew = 0.0;
     let mut dup = assemblies[src].clone();
-    let translate = |poly: &mut Polygon2| {
-        for v in &mut poly.vertices {
-            v.0 += shift;
-            v.1 += skew;
-        }
-    };
-    translate(&mut dup.footprint);
-    for s in &mut dup.spaces {
-        translate(&mut s.footprint);
-    }
-    for c in &mut dup.ceiling_zones {
-        translate(&mut c.area);
-    }
-    for f in &mut dup.fixtures {
-        f.at.x += shift;
-        f.at.z += skew;
-    }
-    for e in &mut dup.entrances {
-        e.center.x += shift;
-        e.center.z += skew;
-    }
+    dup.translate(shift, skew);
     dup.id = assemblies.len() as u32 + 1000;
     dup.corruption.misalignment = (shift, skew);
 
@@ -116,7 +96,7 @@ fn duplicate_suite_candidate(
         && b.3 < (rz + 1) as f32 * REGION_SIZE - EDGE_MARGIN;
     // The skewed entrance must still reach a corridor, or the copy would be
     // a sealed pocket.
-    let reachable = dup.entrances.iter().any(|e| {
+    let reachable = dup.entrances().any(|e| {
         spines
             .iter()
             .any(|s| s.distance(e.center.x, e.center.z) <= s.width * 0.5 + PLAN_WALL_T + 0.05)
@@ -130,6 +110,13 @@ fn abandon_assembly(assembly: &mut AssemblyInstance) {
     assembly.program = SpaceProgram::AbandonedExpansion;
     assembly.corruption.abandoned = true;
     assembly.spaces.clear();
+    assembly
+        .hosts
+        .retain(|host| host.role != HostRole::Partition);
+    assembly.openings.retain(|opening| {
+        opening.role != OpeningRole::Interior
+            && assembly.hosts.iter().any(|host| host.id == opening.host)
+    });
     for f in &mut assembly.fixtures {
         f.lit = false;
     }
@@ -186,7 +173,7 @@ fn force_red_room_in_spawn_region(
 ) -> bool {
     if let Some(a) = assemblies
         .iter_mut()
-        .find(|a| !a.entrances.is_empty() && !a.corruption.abandoned)
+        .find(|a| a.primary_entrance().is_some() && !a.corruption.abandoned)
     {
         a.corruption.red_room = true;
         return true;
@@ -211,7 +198,7 @@ fn force_red_room_in_spawn_region(
         0.5,
         lx0 + 12.0,
         lz,
-        spine.width * 0.5 + PLAN_WALL_T,
+        spine.width * 0.5 + PLAN_WALL_T * 0.5,
         1.0,
         origin,
         REGION_SIZE,
@@ -254,7 +241,7 @@ fn realize_red_room_event(
     let start = (event.id % count as u64) as usize;
     for offset in 0..count {
         let a = &mut assemblies[(start + offset) % count];
-        if !a.corruption.abandoned && !a.entrances.is_empty() {
+        if !a.corruption.abandoned && a.primary_entrance().is_some() {
             a.corruption.red_room = true;
             break;
         }
@@ -284,10 +271,14 @@ mod tests {
         AssemblyInstance {
             id,
             program: SpaceProgram::OpenOffice,
-            entrances: vec![Opening {
+            hosts: HostSegment::rectangular_shell(&footprint, PLAN_WALL_T, 3.4),
+            openings: vec![Opening {
+                id: OpeningId(0),
+                host: HostId(0),
+                role: OpeningRole::Entrance,
                 center: Position::new(x0 + 7.0, z0),
                 width: 3.6,
-                through_x_wall: false,
+                through_x_wall: true,
                 lintel_units: None,
             }],
             spaces: vec![Space {
@@ -342,6 +333,24 @@ mod tests {
     #[test]
     fn abandonment_clears_spaces_and_darkens_every_fixture() {
         let mut a = minimal_assembly(0, 0.0, 20.0);
+        a.hosts.push(HostSegment {
+            id: HostId(4),
+            start: Position::new(7.0, 20.0),
+            end: Position::new(7.0, 30.0),
+            thickness: PLAN_WALL_T,
+            base_units: 0.0,
+            top_units: 3.4,
+            role: HostRole::Partition,
+        });
+        a.openings.push(Opening {
+            id: OpeningId(1),
+            host: HostId(4),
+            role: OpeningRole::Interior,
+            center: Position::new(7.0, 25.0),
+            width: 1.2,
+            through_x_wall: false,
+            lintel_units: Some(2.2),
+        });
         assert!(!a.spaces.is_empty());
         assert!(a.fixtures.iter().all(|f| f.lit));
 
@@ -349,7 +358,16 @@ mod tests {
 
         assert_eq!(a.program, SpaceProgram::AbandonedExpansion);
         assert!(a.corruption.abandoned);
-        assert!(a.spaces.is_empty(), "an abandoned shell keeps no program spaces");
+        assert!(
+            a.spaces.is_empty(),
+            "an abandoned shell keeps no program spaces"
+        );
+        assert!(a.hosts.iter().all(|host| host.role != HostRole::Partition));
+        assert!(
+            a.openings
+                .iter()
+                .all(|opening| opening.role != OpeningRole::Interior)
+        );
         assert!(
             a.fixtures.iter().all(|f| !f.lit),
             "an abandoned shell has nothing lit"
@@ -441,7 +459,10 @@ mod tests {
             .expect("an unobstructed duplicate inside the region must be produced");
         assert_eq!(dup.footprint.bounds().0, 44.0, "duplicate was not shifted");
         assert_eq!(dup.corruption.misalignment, (24.0, 0.0));
-        assert_ne!(dup.id, assemblies[0].id, "duplicate must not reuse the source id");
+        assert_ne!(
+            dup.id, assemblies[0].id,
+            "duplicate must not reuse the source id"
+        );
     }
 
     #[test]
@@ -478,7 +499,11 @@ mod tests {
             force_red_room_in_spawn_region(&genome, 0, 0, &mut assemblies, &mut taken, &spines);
         assert!(realized);
         assert!(assemblies[0].corruption.red_room);
-        assert_eq!(assemblies.len(), 1, "an existing assembly was reused, not duplicated");
+        assert_eq!(
+            assemblies.len(),
+            1,
+            "an existing assembly was reused, not duplicated"
+        );
     }
 
     #[test]
@@ -489,7 +514,10 @@ mod tests {
         let spines = [corridor_spine()];
         let realized =
             force_red_room_in_spawn_region(&genome, 0, 0, &mut assemblies, &mut taken, &spines);
-        assert!(realized, "with a main corridor present, a room must be placeable");
+        assert!(
+            realized,
+            "with a main corridor present, a room must be placeable"
+        );
         assert_eq!(assemblies.len(), 1);
         assert!(assemblies[0].corruption.red_room);
     }
@@ -509,10 +537,16 @@ mod tests {
             realize_red_room_event(42, &ZeroNoise, rx, 0, 4.0, &mut trial);
             let marked = trial.iter().filter(|a| a.corruption.red_room).count();
             if marked > 0 {
-                assert_eq!(marked, 1, "exactly one assembly should be realized per event");
+                assert_eq!(
+                    marked, 1,
+                    "exactly one assembly should be realized per event"
+                );
                 fired = true;
             }
         }
-        assert!(fired, "no red room event fired across 64 region samples at scale 4.0");
+        assert!(
+            fired,
+            "no red room event fired across 64 region samples at scale 4.0"
+        );
     }
 }

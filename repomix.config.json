@@ -11,7 +11,7 @@
     "fileSummary": true,
     "directoryStructure": true,
     "files": true,
-    "removeComments": false,
+    "removeComments": true,
     "removeEmptyLines": false,
     "compress": false,
     "topFilesLength": 5,
@@ -21,7 +21,7 @@
     "includeFullDirectoryStructure": true,
     "tokenCountTree": false,
     "git": {
-      "sortByChanges": true,
+      "sortByChanges": false,
       "sortByChangesMaxCommits": 100,
       "includeDiffs": false,
       "includeLogs": false,

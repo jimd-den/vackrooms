@@ -19,7 +19,6 @@ use super::{BackroomsLevel, ColumnPlan};
 use crate::use_cases::generate_chunk::LevelTuning;
 
 impl BackroomsLevel {
-
     /// The architectural column plan: corridor beats assembly beats fabric.
     #[cfg(test)]
     pub(crate) fn plan_column(
@@ -100,8 +99,8 @@ impl BackroomsLevel {
                 } else if depth > 0.0 && column.light {
                     let module = (wx.floor() as i64) ^ ((wz.floor() as i64) << 17);
                     let hash = {
-                        let mut h = (blackout.id ^ module as u64)
-                            .wrapping_mul(0x9E37_79B9_7F4A_7C15);
+                        let mut h =
+                            (blackout.id ^ module as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
                         h ^= h >> 33;
                         (h >> 40) as f32 / (1u64 << 24) as f32
                     };
@@ -161,8 +160,12 @@ impl BackroomsLevel {
                     continue;
                 }
                 let inside = a.footprint.contains(wx, wz);
+                let on_host = a.hosts.iter().any(|host| host.contains_plan(wx, wz));
+                if !inside && !on_host {
+                    continue;
+                }
                 let mut base =
-                    Self::assembly_column(a, inside, renovator_structure.as_ref(), tuning, wx, wz);
+                    Self::assembly_column(a, renovator_structure.as_ref(), tuning, wx, wz);
                 // A stair assembly shapes its interior as a flight: the
                 // vertical link that reserved it decides whether the flight
                 // lands or climbs endlessly. Stairs are architecture, so a

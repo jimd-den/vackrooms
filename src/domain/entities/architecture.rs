@@ -11,6 +11,8 @@
 //! All types are small, plain data. Determinism comes from how they are
 //! *derived* (seed + region coordinate), not from anything stored here.
 
+use std::collections::HashSet;
+
 use crate::domain::entities::anomaly::AnomalyInstance;
 use crate::domain::entities::position::Position;
 
@@ -196,9 +198,122 @@ impl Polygon2 {
 // Assemblies: planned spaces with structure, ceilings and fixtures.
 // ---------------------------------------------------------------------------
 
-/// A doorway/portal on an assembly boundary, opening onto circulation.
+/// Stable identity of a wall-like element inside one assembly.
+///
+/// IDs are local to the assembly. This is enough to keep openings attached
+/// while an assembly is translated, duplicated, or rewritten by a grammar.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct HostId(pub u32);
+
+/// Stable identity of an opening inside one assembly.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct OpeningId(pub u32);
+
+/// Architectural purpose of a wall host.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HostRole {
+    /// The enclosing shell of an assembly.
+    Shell,
+    /// A non-load-bearing wall dividing spaces inside an assembly.
+    Partition,
+    /// A wall that also participates in the structural system.
+    Structural,
+}
+
+/// A finite axis-aligned wall host in plan space.
+///
+/// Voxelization is intentionally absent here. Hosts are authored in world
+/// units, openings reference them by identity, and a later sampler chooses
+/// the representation appropriate for the requested voxel size.
+#[derive(Clone, Copy, Debug)]
+pub struct HostSegment {
+    pub id: HostId,
+    pub start: Position,
+    pub end: Position,
+    pub thickness: f32,
+    pub base_units: f32,
+    pub top_units: f32,
+    pub role: HostRole,
+}
+
+impl HostSegment {
+    pub fn is_horizontal(&self) -> bool {
+        (self.start.z - self.end.z).abs() <= 1e-4
+    }
+
+    pub fn is_axis_aligned(&self) -> bool {
+        self.is_horizontal() || (self.start.x - self.end.x).abs() <= 1e-4
+    }
+
+    pub fn length(&self) -> f32 {
+        self.start.distance(&self.end)
+    }
+
+    /// Whether a plan sample falls in this host's finite wall band.
+    pub fn contains_plan(&self, x: f32, z: f32) -> bool {
+        let half = self.thickness * 0.5 + 1e-4;
+        if self.is_horizontal() {
+            let (lo, hi) = ordered(self.start.x, self.end.x);
+            x >= lo - half && x <= hi + half && (z - self.start.z).abs() <= half
+        } else {
+            let (lo, hi) = ordered(self.start.z, self.end.z);
+            z >= lo - half && z <= hi + half && (x - self.start.x).abs() <= half
+        }
+    }
+
+    pub fn translate(&mut self, dx: f32, dz: f32) {
+        self.start.x += dx;
+        self.start.z += dz;
+        self.end.x += dx;
+        self.end.z += dz;
+    }
+
+    /// Four explicit shell hosts for an axis-aligned footprint. IDs are
+    /// south, east, north, west in that order.
+    pub fn rectangular_shell(footprint: &Polygon2, thickness: f32, top_units: f32) -> Vec<Self> {
+        let (x0, z0, x1, z1) = footprint.bounds();
+        [
+            (Position::new(x0, z0), Position::new(x1, z0)),
+            (Position::new(x1, z0), Position::new(x1, z1)),
+            (Position::new(x1, z1), Position::new(x0, z1)),
+            (Position::new(x0, z1), Position::new(x0, z0)),
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(id, (start, end))| Self {
+            id: HostId(id as u32),
+            start,
+            end,
+            thickness,
+            base_units: 0.0,
+            top_units,
+            role: HostRole::Shell,
+        })
+        .collect()
+    }
+}
+
+fn ordered(a: f32, b: f32) -> (f32, f32) {
+    (a.min(b), a.max(b))
+}
+
+/// How an opening participates in circulation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OpeningRole {
+    /// Connects an assembly to circulation or another assembly.
+    Entrance,
+    /// Connects two spaces inside one assembly.
+    Interior,
+    /// Reserved penetration for building services.
+    Service,
+}
+
+/// A doorway/portal that cuts one explicit host.
 #[derive(Clone, Copy, Debug)]
 pub struct Opening {
+    pub id: OpeningId,
+    pub host: HostId,
+    pub role: OpeningRole,
     /// Center of the opening in world space (on the footprint boundary).
     pub center: Position,
     /// Clear width, world units (>= ~1.0 per walkability contract).
@@ -208,6 +323,33 @@ pub struct Opening {
     pub through_x_wall: bool,
     /// Lintel underside height in units; `None` = full-height portal.
     pub lintel_units: Option<f32>,
+}
+
+impl Opening {
+    /// Whether a plan sample is inside the opening cut. Host thickness is
+    /// supplied by the referenced host rather than duplicated on the opening.
+    pub fn contains_plan(&self, host: &HostSegment, x: f32, z: f32) -> bool {
+        let (along, across) = if host.is_horizontal() {
+            ((x - self.center.x).abs(), (z - self.center.z).abs())
+        } else {
+            ((z - self.center.z).abs(), (x - self.center.x).abs())
+        };
+        along < self.width * 0.5 && across <= host.thickness * 0.5 + 0.05
+    }
+}
+
+/// A failed relationship in the architectural model. Keeping violations
+/// semantic makes them useful to generators, tests, and future repair passes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ArchitectureViolation {
+    InvalidHost(HostId),
+    MissingOpeningHost(OpeningId),
+    OpeningOffHost(OpeningId),
+    OpeningOutsideHost(OpeningId),
+    OverlappingOpenings(OpeningId, OpeningId),
+    DuplicateHostId(HostId),
+    DuplicateOpeningId(OpeningId),
+    OverlappingHosts(HostId, HostId),
 }
 
 /// A named subspace inside an assembly (a private office in a suite, a stall
@@ -298,13 +440,158 @@ pub struct AssemblyInstance {
     pub id: u32,
     pub program: SpaceProgram,
     pub footprint: Polygon2,
-    pub entrances: Vec<Opening>,
+    pub hosts: Vec<HostSegment>,
+    pub openings: Vec<Opening>,
     pub spaces: Vec<Space>,
     pub structure: StructuralSystemInstance,
     pub ceiling_zones: Vec<CeilingZone>,
     pub fixtures: Vec<Fixture>,
     pub service_voids: Vec<ServiceVoid>,
     pub corruption: CorruptionProfile,
+}
+
+impl AssemblyInstance {
+    pub fn entrances(&self) -> impl Iterator<Item = &Opening> {
+        self.openings
+            .iter()
+            .filter(|opening| opening.role == OpeningRole::Entrance)
+    }
+
+    pub fn primary_entrance(&self) -> Option<&Opening> {
+        self.entrances().next()
+    }
+
+    pub fn host(&self, id: HostId) -> Option<&HostSegment> {
+        self.hosts.iter().find(|host| host.id == id)
+    }
+
+    /// Move every owned architectural element as one composition. Keeping
+    /// this transform centralized prevents duplicated rooms from leaving
+    /// ceilings, grids, service zones, or hosted openings behind.
+    pub fn translate(&mut self, dx: f32, dz: f32) {
+        let translate_polygon = |polygon: &mut Polygon2| {
+            for vertex in &mut polygon.vertices {
+                vertex.0 += dx;
+                vertex.1 += dz;
+            }
+        };
+        translate_polygon(&mut self.footprint);
+        for space in &mut self.spaces {
+            translate_polygon(&mut space.footprint);
+        }
+        for zone in &mut self.ceiling_zones {
+            translate_polygon(&mut zone.area);
+        }
+        for service_void in &mut self.service_voids {
+            translate_polygon(&mut service_void.area);
+        }
+        for host in &mut self.hosts {
+            host.translate(dx, dz);
+        }
+        for opening in &mut self.openings {
+            opening.center.x += dx;
+            opening.center.z += dz;
+        }
+        for fixture in &mut self.fixtures {
+            fixture.at.x += dx;
+            fixture.at.z += dz;
+        }
+        self.structure.phase.0 += dx;
+        self.structure.phase.1 += dz;
+    }
+
+    /// Validate the host/opening relationships without voxelizing anything.
+    pub fn validate_architecture(&self) -> Vec<ArchitectureViolation> {
+        let mut violations = Vec::new();
+        let mut host_ids = HashSet::new();
+        for host in &self.hosts {
+            if !host_ids.insert(host.id) {
+                violations.push(ArchitectureViolation::DuplicateHostId(host.id));
+            }
+            if !host.is_axis_aligned()
+                || host.length() <= 1e-4
+                || host.thickness <= 0.0
+                || host.base_units.abs() > 1e-4
+                || host.top_units <= host.base_units
+            {
+                violations.push(ArchitectureViolation::InvalidHost(host.id));
+            }
+        }
+        for (index, a) in self.hosts.iter().enumerate() {
+            for b in self.hosts.iter().skip(index + 1) {
+                if hosts_overlap(a, b) {
+                    violations.push(ArchitectureViolation::OverlappingHosts(a.id, b.id));
+                }
+            }
+        }
+        let mut opening_ids = HashSet::new();
+        for opening in &self.openings {
+            if !opening_ids.insert(opening.id) {
+                violations.push(ArchitectureViolation::DuplicateOpeningId(opening.id));
+            }
+            let Some(host) = self.host(opening.host) else {
+                violations.push(ArchitectureViolation::MissingOpeningHost(opening.id));
+                continue;
+            };
+            if host.is_horizontal() != opening.through_x_wall
+                || !host.contains_plan(opening.center.x, opening.center.z)
+            {
+                violations.push(ArchitectureViolation::OpeningOffHost(opening.id));
+                continue;
+            }
+            let (host_lo, host_hi, center) = if host.is_horizontal() {
+                let (lo, hi) = ordered(host.start.x, host.end.x);
+                (lo, hi, opening.center.x)
+            } else {
+                let (lo, hi) = ordered(host.start.z, host.end.z);
+                (lo, hi, opening.center.z)
+            };
+            if opening.width <= 0.0
+                || center - opening.width * 0.5 < host_lo - 1e-4
+                || center + opening.width * 0.5 > host_hi + 1e-4
+            {
+                violations.push(ArchitectureViolation::OpeningOutsideHost(opening.id));
+            }
+        }
+        for (index, a) in self.openings.iter().enumerate() {
+            for b in self.openings.iter().skip(index + 1) {
+                if a.host != b.host {
+                    continue;
+                }
+                let host = self.host(a.host);
+                let (a_center, b_center) = match host {
+                    Some(host) if host.is_horizontal() => (a.center.x, b.center.x),
+                    Some(_) => (a.center.z, b.center.z),
+                    None => continue,
+                };
+                if (a_center - b_center).abs() < (a.width + b.width) * 0.5 {
+                    violations.push(ArchitectureViolation::OverlappingOpenings(a.id, b.id));
+                }
+            }
+        }
+        violations
+    }
+}
+
+fn hosts_overlap(a: &HostSegment, b: &HostSegment) -> bool {
+    const EPSILON: f32 = 1e-4;
+    if a.is_horizontal() && b.is_horizontal() {
+        if (a.start.z - b.start.z).abs() > EPSILON {
+            return false;
+        }
+        let (a0, a1) = ordered(a.start.x, a.end.x);
+        let (b0, b1) = ordered(b.start.x, b.end.x);
+        return a1.min(b1) - a0.max(b0) > EPSILON;
+    }
+    if !a.is_horizontal() && !b.is_horizontal() {
+        if (a.start.x - b.start.x).abs() > EPSILON {
+            return false;
+        }
+        let (a0, a1) = ordered(a.start.z, a.end.z);
+        let (b0, b1) = ordered(b.start.z, b.end.z);
+        return a1.min(b1) - a0.max(b0) > EPSILON;
+    }
+    false
 }
 
 /// A corridor: a wide polyline with priority over everything it crosses.
@@ -378,6 +665,41 @@ pub struct RegionPlan {
 mod tests {
     use super::*;
 
+    fn hosted_room() -> AssemblyInstance {
+        let footprint = Polygon2::rect(0.0, 0.0, 10.0, 8.0);
+        AssemblyInstance {
+            id: 1,
+            program: SpaceProgram::OpenOffice,
+            footprint: footprint.clone(),
+            hosts: HostSegment::rectangular_shell(&footprint, 0.4, 3.4),
+            openings: vec![Opening {
+                id: OpeningId(0),
+                host: HostId(0),
+                role: OpeningRole::Entrance,
+                center: Position::new(5.0, 0.0),
+                width: 2.0,
+                through_x_wall: true,
+                lintel_units: Some(2.2),
+            }],
+            spaces: Vec::new(),
+            structure: StructuralSystemInstance {
+                system: StructuralSystem::CoreAndShell,
+                bay_x: 4.0,
+                bay_z: 4.0,
+                phase: (0.0, 0.0),
+                column_side: 0.4,
+            },
+            ceiling_zones: vec![CeilingZone {
+                area: footprint,
+                language: CeilingLanguage::FlatTiles,
+                height_units: 3.4,
+            }],
+            fixtures: Vec::new(),
+            service_voids: Vec::new(),
+            corruption: CorruptionProfile::default(),
+        }
+    }
+
     #[test]
     fn rect_polygon_contains_interior_not_exterior() {
         let p = Polygon2::rect(10.0, 20.0, 5.0, 8.0);
@@ -402,5 +724,42 @@ mod tests {
         assert!((spine.distance(5.0, 3.0) - 3.0).abs() < 1e-5);
         assert!((spine.distance(13.0, 10.0) - 3.0).abs() < 1e-5);
         assert!((spine.distance(10.0, 5.0) - 0.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn hosted_opening_validation_rejects_broken_relationships() {
+        let mut room = hosted_room();
+        assert!(room.validate_architecture().is_empty());
+
+        room.openings[0].host = HostId(99);
+        assert_eq!(
+            room.validate_architecture(),
+            vec![ArchitectureViolation::MissingOpeningHost(OpeningId(0))]
+        );
+    }
+
+    #[test]
+    fn architecture_validation_rejects_ambiguous_element_identity() {
+        let mut room = hosted_room();
+        room.hosts.push(room.hosts[0]);
+        room.openings.push(room.openings[0]);
+        let violations = room.validate_architecture();
+        assert!(violations.contains(&ArchitectureViolation::DuplicateHostId(HostId(0))));
+        assert!(violations.contains(&ArchitectureViolation::DuplicateOpeningId(OpeningId(0))));
+        assert!(violations.contains(&ArchitectureViolation::OverlappingHosts(
+            HostId(0),
+            HostId(0)
+        )));
+    }
+
+    #[test]
+    fn assembly_translation_moves_one_coherent_composition() {
+        let mut room = hosted_room();
+        room.translate(12.0, -4.0);
+        assert_eq!(room.footprint.bounds(), (12.0, -4.0, 22.0, 4.0));
+        assert_eq!(room.openings[0].center, Position::new(17.0, -4.0));
+        assert_eq!(room.hosts[0].start, Position::new(12.0, -4.0));
+        assert_eq!(room.structure.phase, (12.0, -4.0));
+        assert!(room.validate_architecture().is_empty());
     }
 }

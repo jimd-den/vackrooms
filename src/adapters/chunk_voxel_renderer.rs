@@ -402,7 +402,7 @@ pub fn render_chunk_voxel_blueprint_svg(
             }
 
             // Openings / portals (green).
-            for opening in &asm.entrances {
+            for opening in asm.entrances() {
                 let hw = opening.width * 0.5;
                 let (ox0, oz0, ox1, oz1) = if opening.through_x_wall {
                     (opening.center.x - hw, opening.center.z - voxel_scale,

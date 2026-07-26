@@ -37,9 +37,23 @@ pub(super) enum FabricCeilingBand {
 }
 
 impl BackroomsLevel {
+    fn fabric_cell_anchor(wx: f32, wz: f32) -> (f32, f32) {
+        (
+            (wx / FABRIC_CELL).floor() * FABRIC_CELL + FABRIC_CELL * 0.5,
+            (wz / FABRIC_CELL).floor() * FABRIC_CELL + FABRIC_CELL * 0.5,
+        )
+    }
+
     /// Smooth world-space noise in [-1, 1]. `scale` stretches the provider's
     /// built-in ~20 u wavelength: wavelength = 20 / scale.
-    pub(super) fn n(noise: &dyn NoiseProvider, seed: u32, salt: u32, x: f32, z: f32, scale: f32) -> f32 {
+    pub(super) fn n(
+        noise: &dyn NoiseProvider,
+        seed: u32,
+        salt: u32,
+        x: f32,
+        z: f32,
+        scale: f32,
+    ) -> f32 {
         noise.evaluate_2d(seed ^ salt, Position::new(x * scale, z * scale))
     }
 
@@ -47,7 +61,13 @@ impl BackroomsLevel {
     /// on its lattice (provider frequency is 0.05, so inputs that are
     /// multiples of 20 hit lattice points), where it is uniform rather than
     /// interpolation-smoothed toward zero.
-    pub(super) fn cell_hash(noise: &dyn NoiseProvider, seed: u32, salt: u32, cx: i64, cz: i64) -> f32 {
+    pub(super) fn cell_hash(
+        noise: &dyn NoiseProvider,
+        seed: u32,
+        salt: u32,
+        cx: i64,
+        cz: i64,
+    ) -> f32 {
         let v = noise.evaluate_2d(
             seed ^ salt,
             Position::new(cx as f32 * 20.0, cz as f32 * 20.0),
@@ -64,10 +84,12 @@ impl BackroomsLevel {
         wx: f32,
         wz: f32,
     ) -> FabricCeilingBand {
-        // Regular dropped ceiling — the labyrinth fabric — is the default
-        // condition of Level 0. Expanses and vaults are deliberate
-        // punctuation the maze occasionally opens into, never the baseline.
-        let field = Self::n(noise, seed, 0xAA10, wx, wz, 0.18);
+        // The continuous field chooses a regime for an architectural cell,
+        // never for an individual voxel column. Threshold contours therefore
+        // snap to the same boundaries that own walls and openings instead of
+        // cutting terrain-like steps through room interiors.
+        let (anchor_x, anchor_z) = Self::fabric_cell_anchor(wx, wz);
+        let field = Self::n(noise, seed, 0xAA10, anchor_x, anchor_z, 0.18);
         if field < -0.60 {
             FabricCeilingBand::Compression
         } else if field < 0.52 {
@@ -101,8 +123,7 @@ impl BackroomsLevel {
         wz: f32,
         band: FabricCeilingBand,
     ) -> f32 {
-        let zone_x = (wx / FABRIC_CELL).floor() * FABRIC_CELL + FABRIC_CELL * 0.5;
-        let zone_z = (wz / FABRIC_CELL).floor() * FABRIC_CELL + FABRIC_CELL * 0.5;
+        let (zone_x, zone_z) = Self::fabric_cell_anchor(wx, wz);
         let detail = Self::n(noise, seed, 0xB300, zone_x, zone_z, 0.72);
         let (height, lo, hi) = match band {
             FabricCeilingBand::Compression => (2.6, 2.5, 2.8),
@@ -270,8 +291,7 @@ impl BackroomsLevel {
                 // badly the wanderer has managed their provisions. Tier 0
                 // never seals, so a provisioned world stays fully connected.
                 let sealed = tier > 0
-                    && Self::cell_hash(noise, seed, strain(0x9800), cx, cz)
-                        < 0.10 * tier as f32;
+                    && Self::cell_hash(noise, seed, strain(0x9800), cx, cz) < 0.10 * tier as f32;
                 let opens_here = opens_here && !sealed;
                 // Whole-wall dropout merges rooms into larger wrong shapes.
                 // Porosity varies along a run, so drops end ragged rather
@@ -289,8 +309,7 @@ impl BackroomsLevel {
                 } else {
                     0.16 * Self::n(noise, seed, drift(0x9700), wx, wz, 0.07)
                 };
-                let survive =
-                    (0.92 - 0.42 * porosity + shift_bias) * tuning.walls.clamp(0.0, 1.5);
+                let survive = (0.92 - 0.42 * porosity + shift_bias) * tuning.walls.clamp(0.0, 1.5);
                 if Self::cell_hash(noise, seed, wall_salt, cx, cz) < survive {
                     let along = if in_w { fz } else { fx };
                     // The binary-tree wall usually gets its doorway; porous

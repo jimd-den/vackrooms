@@ -119,7 +119,7 @@ pub fn render_region_blueprint_svg(
 
     // Layer 3: Entrances / Portals
     for a in &plan.assemblies {
-        for e in &a.entrances {
+        for e in a.entrances() {
             let door_half_w = e.width * 0.5;
             let (x1, z1, x2, z2) = if e.through_x_wall {
                 (e.center.x - door_half_w, e.center.z, e.center.x + door_half_w, e.center.z)

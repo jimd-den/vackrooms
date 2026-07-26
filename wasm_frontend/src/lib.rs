@@ -610,7 +610,7 @@ pub fn get_debug_chunk_json(seed: u32, chunk_x: f32, chunk_z: f32, voxel_scale: 
             (b.0 + s.phase.0, b.1 + s.phase.1, b.2, b.3),
             0,
         );
-        for opening in &assembly.entrances {
+        for opening in assembly.entrances() {
             let half = opening.width * 0.5;
             let b = if opening.through_x_wall {
                 (

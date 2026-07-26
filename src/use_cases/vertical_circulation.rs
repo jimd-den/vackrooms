@@ -26,11 +26,11 @@
 //! * the profile is a pure function of world position and the assembly.
 
 use crate::domain::entities::architecture::{
-    AssemblyInstance, CeilingZone, CorruptionProfile, Fixture, Opening, Polygon2, SpaceProgram,
-    StructuralSystem, StructuralSystemInstance,
+    AssemblyInstance, CeilingZone, CorruptionProfile, Fixture, HostId, HostSegment, Opening,
+    OpeningId, OpeningRole, Polygon2, SpaceProgram, StructuralSystem, StructuralSystemInstance,
 };
-use crate::domain::entities::world_topology::{VerticalLink, VerticalLinkKind};
 use crate::domain::entities::position::Position;
+use crate::domain::entities::world_topology::{VerticalLink, VerticalLinkKind};
 use crate::use_cases::level_zero::ColumnPlan;
 
 /// Stairwell frontage along its corridor, world units.
@@ -93,13 +93,16 @@ pub(crate) fn place_stairwell(
     }
 
     let side = if link.anchor.z >= lz { 1.0 } else { -1.0 };
-    let corridor_half = lw * 0.5 + wall_t;
+    // Center the hosted shell on the corridor edge wall. The old placement
+    // put the shell beyond that wall, leaving a second independently sampled
+    // wall band between corridor and doorway.
+    let corridor_half = lw * 0.5 + wall_t * 0.5;
     let x0 = snap((link.anchor.x - STAIR_WIDTH * 0.5).clamp(lx0 + 4.0, lx1 - STAIR_WIDTH - 4.0));
-    let z_front = snap(if side > 0.0 {
+    let z_front = if side > 0.0 {
         lz + corridor_half
     } else {
         lz - corridor_half - STAIR_DEPTH
-    });
+    };
     let footprint = Polygon2::rect(x0, z_front, STAIR_WIDTH, STAIR_DEPTH);
     let b = footprint.bounds();
 
@@ -123,7 +126,11 @@ pub(crate) fn place_stairwell(
 
     // A broad, framed threshold: the stair announces itself as circulation.
     let front_z = if side > 0.0 { b.1 } else { b.3 };
-    let entrances = vec![Opening {
+    let hosts = HostSegment::rectangular_shell(&footprint, wall_t, STAIR_CEILING_UNITS);
+    let openings = vec![Opening {
+        id: OpeningId(0),
+        host: if side > 0.0 { HostId(0) } else { HostId(2) },
+        role: OpeningRole::Entrance,
         center: Position::new(snap(x0 + STAIR_WIDTH * 0.5), front_z),
         width: 2.4,
         through_x_wall: true,
@@ -165,7 +172,8 @@ pub(crate) fn place_stairwell(
         fixtures,
         service_voids: Vec::new(),
         corruption: CorruptionProfile::default(),
-        entrances,
+        hosts,
+        openings,
         footprint,
     })
 }
@@ -179,7 +187,7 @@ pub(crate) fn apply_stair_profile(
     _wx: f32,
     wz: f32,
 ) {
-    let Some(entrance) = assembly.entrances.first() else {
+    let Some(entrance) = assembly.primary_entrance() else {
         return;
     };
     let b = assembly.footprint.bounds();
@@ -227,7 +235,15 @@ mod tests {
             id: 1,
             program: SpaceProgram::Stair,
             footprint: Polygon2::rect(0.0, 0.0, STAIR_WIDTH, STAIR_DEPTH),
-            entrances: vec![Opening {
+            hosts: HostSegment::rectangular_shell(
+                &Polygon2::rect(0.0, 0.0, STAIR_WIDTH, STAIR_DEPTH),
+                0.4,
+                STAIR_CEILING_UNITS,
+            ),
+            openings: vec![Opening {
+                id: OpeningId(0),
+                host: HostId(0),
+                role: OpeningRole::Entrance,
                 center: Position::new(STAIR_WIDTH * 0.5, 0.0),
                 width: 2.4,
                 through_x_wall: true,

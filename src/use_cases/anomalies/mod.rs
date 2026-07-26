@@ -50,16 +50,21 @@ mod tests {
     use super::*;
     use crate::domain::entities::anomaly::AnomalyKind;
     use crate::domain::entities::architecture::{
-        CorruptionProfile, Opening, Polygon2, SpaceProgram, StructuralSystem,
-        StructuralSystemInstance,
+        CorruptionProfile, HostId, HostSegment, Opening, OpeningId, OpeningRole, Polygon2,
+        SpaceProgram, StructuralSystem, StructuralSystemInstance,
     };
 
     fn red_assembly() -> AssemblyInstance {
+        let footprint = Polygon2::rect(0.0, 0.0, 12.0, 8.0);
         AssemblyInstance {
             id: 7,
             program: SpaceProgram::PrivateOffice,
-            footprint: Polygon2::rect(0.0, 0.0, 12.0, 8.0),
-            entrances: vec![Opening {
+            footprint: footprint.clone(),
+            hosts: HostSegment::rectangular_shell(&footprint, 0.4, 3.4),
+            openings: vec![Opening {
+                id: OpeningId(0),
+                host: HostId(0),
+                role: OpeningRole::Entrance,
                 center: Position::new(6.0, 0.0),
                 width: 1.2,
                 through_x_wall: true,

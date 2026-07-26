@@ -3,12 +3,12 @@ use super::*;
 use crate::domain::entities::anomaly::{
     AnomalyInstance, AnomalyKind, RealitySnapshot, WorldBounds,
 };
-use crate::domain::entities::architecture::SpaceProgram;
+use crate::domain::entities::architecture::{OpeningRole, SpaceProgram};
+use crate::domain::entities::position::Position;
 use crate::domain::entities::voxel_grid::{
     VOXEL_AGED_WALLPAPER, VOXEL_AIR, VOXEL_FLOOR, VOXEL_STAINED_CARPET, VOXEL_STICKY_CARPET,
     VOXEL_WALL, VoxelGrid,
 };
-use crate::domain::entities::position::Position;
 use crate::use_cases::anomalies::geometry::sample_anomaly;
 use crate::use_cases::generate_chunk::{GeneratorConfig, LevelTuning};
 use crate::use_cases::level_generator::LevelGenerator;
@@ -62,7 +62,6 @@ impl NoiseProvider for TestNoise {
         Self::lerp(nx0, nx1, v)
     }
 }
-
 
 fn generate(ox: f32, oz: f32) -> VoxelGrid {
     BackroomsLevel.generate(
@@ -172,9 +171,7 @@ fn chunks_tile_seamlessly() {
 
 #[test]
 fn recursive_level_zero_is_independent_of_output_partition() {
-    use crate::domain::entities::anomaly::{
-        AnomalyStateStamp, Axis2, AxisDirection, RedRoomPhase,
-    };
+    use crate::domain::entities::anomaly::{AnomalyStateStamp, Axis2, AxisDirection, RedRoomPhase};
 
     // A committed encounter selects a deterministic recursive Level 0
     // address.  The ID is intentionally wider than f32 can represent so
@@ -350,23 +347,14 @@ fn assemblies_have_walls_and_open_entrances() {
     assert!(!plan.assemblies.is_empty());
 
     for a in &plan.assemblies {
-        let e = &a.entrances[0];
+        let e = a.primary_entrance().expect("planned assembly entrance");
         // The entrance column itself: open (possibly under a lintel).
-        let door =
-            BackroomsLevel::plan_column(plan, &noise, 42, &tuning, e.center.x, e.center.z);
+        let door = BackroomsLevel::plan_column(plan, &noise, 42, &tuning, e.center.x, e.center.z);
         assert!(!door.solid, "assembly {} door is walled shut", a.id);
-        // Somewhere along the same front wall, clear of the door span,
-        // there must be solid wall. Probe the middle of the wall band
-        // (the entrance center sits exactly on the footprint boundary,
-        // where containment is ambiguous).
+        // Somewhere along the same hosted front wall, clear of the door
+        // span, there must be solid wall. Probe its authored centerline; its
+        // corridor-facing edge belongs to circulation by priority.
         let b = a.footprint.bounds();
-        let band = |c: f32, lo: f32, hi: f32| {
-            if (c - lo).abs() < (c - hi).abs() {
-                lo - PLAN_WALL_T * 0.5
-            } else {
-                hi + PLAN_WALL_T * 0.5
-            }
-        };
         let (lo, hi, door_along) = if e.through_x_wall {
             (b.0, b.2, e.center.x)
         } else {
@@ -377,9 +365,9 @@ fn assemblies_have_walls_and_open_entrances() {
         while along < hi - 0.2 {
             if (along - door_along).abs() > e.width * 0.5 + 0.4 {
                 let (wx, wz) = if e.through_x_wall {
-                    (along, band(e.center.z, b.1, b.3))
+                    (along, e.center.z)
                 } else {
-                    (band(e.center.x, b.0, b.2), along)
+                    (e.center.x, along)
                 };
                 if BackroomsLevel::plan_column(plan, &noise, 42, &tuning, wx, wz).solid {
                     solid_found = true;
@@ -394,6 +382,85 @@ fn assemblies_have_walls_and_open_entrances() {
             a.id
         );
     }
+}
+
+#[test]
+fn hosted_entrances_cut_one_continuous_path_from_corridor_to_room() {
+    let noise = TestNoise;
+    let mut config = GeneratorConfig::low_spec();
+    config.anomalies.frequency = 0.0;
+    let tuning = LevelTuning::default();
+    let plans =
+        BackroomsLevel::region_plans_for(Position::new(0.0, 0.0), 80.0, 42, &config, &noise);
+    let plan = plans.plan_for_region(0, 0).unwrap();
+
+    for assembly in &plan.assemblies {
+        let entrance = assembly.primary_entrance().expect("planned entrance");
+        let bounds = assembly.footprint.bounds();
+        let center = Position::new((bounds.0 + bounds.2) * 0.5, (bounds.1 + bounds.3) * 0.5);
+        let (inward_x, inward_z) = if entrance.through_x_wall {
+            (0.0, (center.z - entrance.center.z).signum())
+        } else {
+            ((center.x - entrance.center.x).signum(), 0.0)
+        };
+        for step in -6..=8 {
+            let offset = step as f32 * 0.1;
+            let wx = entrance.center.x + inward_x * offset;
+            let wz = entrance.center.z + inward_z * offset;
+            let column = BackroomsLevel::plan_column(plan, &noise, 42, &tuning, wx, wz);
+            let corridor_clearance = plan
+                .corridors
+                .iter()
+                .map(|spine| spine.distance(wx, wz) - spine.width * 0.5)
+                .fold(f32::MAX, f32::min);
+            assert!(
+                !column.solid,
+                "assembly {} entrance at ({:.1},{:.1}) is blocked {offset:.1} u from its host; corridor clearance {corridor_clearance:.2}",
+                assembly.id,
+                entrance.center.x,
+                entrance.center.z,
+            );
+        }
+    }
+}
+
+#[test]
+fn every_authored_interior_opening_survives_column_sampling() {
+    let noise = TestNoise;
+    let mut config = GeneratorConfig::low_spec();
+    config.anomalies.frequency = 0.0;
+    let tuning = LevelTuning::default();
+    let mut checked = 0usize;
+    for rx in -2..=2 {
+        for rz in -2..=2 {
+            let plans = BackroomsLevel::region_plans_for(
+                Position::new(rx as f32 * REGION_SIZE, rz as f32 * REGION_SIZE),
+                1.0,
+                42,
+                &config,
+                &noise,
+            );
+            let plan = plans.plan_for_region(rx, rz).unwrap();
+            for opening in plan
+                .assemblies
+                .iter()
+                .flat_map(|assembly| &assembly.openings)
+                .filter(|opening| opening.role == OpeningRole::Interior)
+            {
+                let column = BackroomsLevel::plan_column(
+                    plan,
+                    &noise,
+                    42,
+                    &tuning,
+                    opening.center.x,
+                    opening.center.z,
+                );
+                assert!(!column.solid, "interior opening {:?} is blocked", opening.id);
+                checked += 1;
+            }
+        }
+    }
+    assert!(checked > 0, "no interior openings were sampled");
 }
 
 /// An abandoned expansion is a dark shell: it keeps its walls but none of
@@ -484,7 +551,7 @@ fn stairwells_sample_as_rising_flights() {
             else {
                 continue;
             };
-            let door = stair.entrances[0].center;
+            let door = stair.primary_entrance().expect("stair entrance").center;
             let b = stair.footprint.bounds();
             let inward = if (door.z - b.1).abs() < (door.z - b.3).abs() {
                 1.0
@@ -492,8 +559,7 @@ fn stairwells_sample_as_rising_flights() {
                 -1.0
             };
 
-            let at_door =
-                BackroomsLevel::plan_column(plan, &noise, 42, &tuning, door.x, door.z);
+            let at_door = BackroomsLevel::plan_column(plan, &noise, 42, &tuning, door.x, door.z);
             assert!(!at_door.solid, "stair door is walled shut");
             assert_eq!(at_door.floor_units, 0.0, "stair door is not flat");
 
@@ -529,6 +595,44 @@ fn stairwells_sample_as_rising_flights() {
 
 /// The baseline is broad regular dropped ceiling, with enough expansive
 /// and vaulted territory to prevent Level 0 from reading as a low maze.
+#[test]
+fn fabric_ceiling_regime_is_constant_inside_an_architectural_cell() {
+    let noise = TestNoise;
+    for (cell_x, cell_z) in [(-5, -3), (-1, 0), (0, 0), (7, 11)] {
+        let origin_x = cell_x as f32 * FABRIC_CELL;
+        let origin_z = cell_z as f32 * FABRIC_CELL;
+        let samples = [
+            (0.05, 0.05),
+            (1.7, 3.1),
+            (FABRIC_CELL - 0.05, FABRIC_CELL - 0.05),
+        ];
+        let first = samples[0];
+        let expected_band =
+            BackroomsLevel::fabric_ceiling_band(&noise, 42, origin_x + first.0, origin_z + first.1);
+        let expected_height = BackroomsLevel::fabric_ceiling_height(
+            &noise,
+            42,
+            origin_x + first.0,
+            origin_z + first.1,
+            expected_band,
+        );
+        for (offset_x, offset_z) in samples {
+            let wx = origin_x + offset_x;
+            let wz = origin_z + offset_z;
+            let band = BackroomsLevel::fabric_ceiling_band(&noise, 42, wx, wz);
+            let height = BackroomsLevel::fabric_ceiling_height(&noise, 42, wx, wz, band);
+            assert_eq!(
+                band, expected_band,
+                "regime changed inside cell ({cell_x},{cell_z})"
+            );
+            assert_eq!(
+                height, expected_height,
+                "height changed inside cell ({cell_x},{cell_z})"
+            );
+        }
+    }
+}
+
 #[test]
 fn ceilings_are_vast_and_varied() {
     let noise = TestNoise;
@@ -604,7 +708,7 @@ fn rare_doorways_still_have_lintels() {
                 .plan_for_region(rx, rz)
                 .expect("requested region plan");
             for a in &plan.assemblies {
-                for e in &a.entrances {
+                for e in a.entrances() {
                     if e.width <= DOOR_WIDTH + 0.01 {
                         let column = BackroomsLevel::plan_column(
                             plan, &noise, 42, &tuning, e.center.x, e.center.z,
@@ -707,7 +811,10 @@ fn spawn_door_exports_a_level_exit_and_knob_zero_removes_it() {
     dry.tuning.almond_water = 0.0;
     dry.tuning.rations = 0.0;
     let grid = BackroomsLevel.generate(chunk, 42, dry, &noise);
-    assert!(grid.supply_items.is_empty(), "provision knobs at 0 strip supplies");
+    assert!(
+        grid.supply_items.is_empty(),
+        "provision knobs at 0 strip supplies"
+    );
 }
 
 /// Every LOD of a chunk must voxelize the same plan: coarse walls stay
@@ -881,8 +988,7 @@ fn every_fabric_cell_opens_west_or_north() {
             }
             let mut open = false;
             let mut probe = |wx: f32, wz: f32| {
-                let c =
-                    BackroomsLevel::plan_column(plan_for(wx, wz), &noise, 42, &tuning, wx, wz);
+                let c = BackroomsLevel::plan_column(plan_for(wx, wz), &noise, 42, &tuning, wx, wz);
                 if !c.solid {
                     open = true;
                 }
@@ -1149,12 +1255,13 @@ fn red_threshold_closes_the_remembered_entrance_into_a_loop() {
             gate.id,
         ),
     ]);
-    let entrance = plan
+    let entrance = *plan
         .assemblies
         .iter()
         .find(|a| a.corruption.red_room)
         .unwrap()
-        .entrances[0];
+        .primary_entrance()
+        .unwrap();
     let open = BackroomsLevel::plan_column_in_reality(
         &plan,
         &noise,
@@ -1332,7 +1439,9 @@ fn archways_are_walkable_and_no_two_arcades_match() {
             );
             for instance in plans.iter().flat_map(|(_, p)| &p.anomalies) {
                 if instance.kind == AnomalyKind::ArchwayRoom
-                    && !instances.iter().any(|a: &AnomalyInstance| a.id == instance.id)
+                    && !instances
+                        .iter()
+                        .any(|a: &AnomalyInstance| a.id == instance.id)
                 {
                     instances.push(instance.clone());
                     if instances.len() >= 8 {
@@ -1342,7 +1451,11 @@ fn archways_are_walkable_and_no_two_arcades_match() {
             }
         }
     }
-    assert!(instances.len() >= 4, "only {} arch rooms found", instances.len());
+    assert!(
+        instances.len() >= 4,
+        "only {} arch rooms found",
+        instances.len()
+    );
 
     let mut profiles = std::collections::BTreeSet::new();
     let mut openings_walked = 0usize;
@@ -1367,12 +1480,11 @@ fn archways_are_walkable_and_no_two_arcades_match() {
                     if center + arch.opening * 0.5 >= 2.0 * half_x {
                         break;
                     }
-                    let blind =
-                        bay_index.rem_euclid(arch.blind_every as i64) == arch.blind_every as i64 - 1;
+                    let blind = bay_index.rem_euclid(arch.blind_every as i64)
+                        == arch.blind_every as i64 - 1;
                     if !blind && center - arch.opening * 0.5 > 0.0 {
                         for side in [-1.0f32, 1.0] {
-                            let p = instance
-                                .world_coords(center - half_x, side * (half_z - 0.1));
+                            let p = instance.world_coords(center - half_x, side * (half_z - 0.1));
                             let plan =
                                 sample_anomaly(instance, &noise, 42, &config, &empty, p.x, p.z);
                             assert!(
@@ -1400,7 +1512,10 @@ fn archways_are_walkable_and_no_two_arcades_match() {
             }
         }
     }
-    assert!(openings_walked >= 8, "only {openings_walked} openings verified");
+    assert!(
+        openings_walked >= 8,
+        "only {openings_walked} openings verified"
+    );
     assert!(
         profiles.len() >= instances.len() - 1,
         "arcades repeat themselves: {} profiles for {} rooms",
@@ -1592,7 +1707,10 @@ fn peripheral_shift_rearranges_fabric_but_never_the_plan() {
             }
         }
     }
-    assert!(fabric_compared > 2000, "sample too small: {fabric_compared}");
+    assert!(
+        fabric_compared > 2000,
+        "sample too small: {fabric_compared}"
+    );
     // Walls are 0.4 u bands on a 7.2 u lattice, so even a full re-deal
     // moves only a few percent of *columns* — what matters is that many
     // whole walls and doorways moved, not that the map inverted.
@@ -2004,7 +2122,10 @@ fn old_territory_has_more_dead_lights_than_young_territory() {
             bucket.1 += 1;
         }
     }
-    assert!(young.1 > 400 && old.1 > 400, "sample too small: {young:?} {old:?}");
+    assert!(
+        young.1 > 400 && old.1 > 400,
+        "sample too small: {young:?} {old:?}"
+    );
     let young_rate = young.0 as f32 / young.1 as f32;
     let old_rate = old.0 as f32 / old.1 as f32;
     assert!(
@@ -2060,7 +2181,10 @@ fn old_territory_shows_stained_ordinary_materials() {
     }
     assert!(fresh_wall, "no fresh (young-territory) wall column sampled");
     assert!(aged_wall, "no aged (old-territory) wall column sampled");
-    assert!(fresh_floor, "no fresh (young-territory) floor column sampled");
+    assert!(
+        fresh_floor,
+        "no fresh (young-territory) floor column sampled"
+    );
     assert!(aged_floor, "no aged (old-territory) floor column sampled");
 }
 

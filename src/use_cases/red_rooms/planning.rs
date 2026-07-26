@@ -28,7 +28,7 @@ fn red_room_instance(
     region_origin: Position,
     assembly: &AssemblyInstance,
 ) -> Option<AnomalyInstance> {
-    let entrance = *assembly.entrances.first()?;
+    let entrance = *assembly.primary_entrance()?;
     let bounds = assembly.footprint.bounds();
     let center = Position::new((bounds.0 + bounds.2) * 0.5, (bounds.1 + bounds.3) * 0.5);
     let region_x = (region_origin.x / REGION_SIZE).floor() as i64;
@@ -150,16 +150,26 @@ pub(crate) fn plan_red_rooms(
 mod tests {
     use super::*;
     use crate::domain::entities::architecture::{
-        CorruptionProfile, Opening, Polygon2, SpaceProgram, StructuralSystem,
-        StructuralSystemInstance,
+        CorruptionProfile, HostId, HostSegment, Opening, OpeningId, OpeningRole, Polygon2,
+        SpaceProgram, StructuralSystem, StructuralSystemInstance,
     };
 
     fn red_assembly(entrance_z: f32) -> AssemblyInstance {
+        let footprint = Polygon2::rect(0.0, 0.0, 12.0, 8.0);
+        let host = if entrance_z <= 4.0 {
+            HostId(0)
+        } else {
+            HostId(2)
+        };
         AssemblyInstance {
             id: 7,
             program: SpaceProgram::PrivateOffice,
-            footprint: Polygon2::rect(0.0, 0.0, 12.0, 8.0),
-            entrances: vec![Opening {
+            footprint: footprint.clone(),
+            hosts: HostSegment::rectangular_shell(&footprint, 0.4, 3.4),
+            openings: vec![Opening {
+                id: OpeningId(0),
+                host,
+                role: OpeningRole::Entrance,
                 center: Position::new(6.0, entrance_z),
                 width: 1.2,
                 through_x_wall: true,

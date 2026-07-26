@@ -4,7 +4,7 @@
 use crate::domain::entities::architecture::*;
 use crate::domain::entities::position::Position;
 
-use super::{EDGE_MARGIN, snap};
+use super::{EDGE_MARGIN, PLAN_WALL_T, snap};
 
 /// The suite program palette placed beside main corridors, roughly weighted.
 /// Large, unfinished open-office masses dominate. Small private rooms remain
@@ -151,51 +151,231 @@ fn fixtures_for(
     out
 }
 
-/// Interior partitioning is deliberately sparse. A suite may split once or
-/// twice, producing a few long interruptions rather than a cell grid. How
-/// readily it splits at all is `furnishing_density`: 0 reads as a bare
-/// shell that almost never partitions, 1 as a densely partitioned interior
-/// that almost always does — the axis genome.rs derives but that, until
-/// now, nothing consumed.
+/// Recursively divide a program envelope along its dominant axis. This is a
+/// small shape grammar, not a random room packer: every child remains inside
+/// its parent, split planes snap to the plan lattice, and stable path keys
+/// make the result independent of traversal, chunks, and voxel resolution.
+#[derive(Default)]
+struct SpaceLayout {
+    spaces: Vec<Space>,
+    partitions: Vec<(Position, Position)>,
+}
+
+#[cfg(test)]
 fn spaces_for(
     program: SpaceProgram,
     footprint: &Polygon2,
     genome: &ArchitectGenome,
     aseed: f32,
 ) -> Vec<Space> {
+    space_layout_for(program, footprint, genome, aseed).spaces
+}
+
+fn space_layout_for(
+    program: SpaceProgram,
+    footprint: &Polygon2,
+    genome: &ArchitectGenome,
+    aseed: f32,
+) -> SpaceLayout {
     if !matches!(
         program,
         SpaceProgram::PrivateOffice | SpaceProgram::OpenOffice | SpaceProgram::ConferenceRoom
     ) {
-        return Vec::new();
+        return SpaceLayout::default();
     }
-    let (x0, z0, x1, z1) = footprint.bounds();
-    let long_x = (x1 - x0) >= (z1 - z0);
-    let span = if long_x { x1 - x0 } else { z1 - z0 };
-    let want = genome.room_proportions.min_side.max(12.0);
-    let n = ((span / want) as usize).clamp(1, 2);
     let split_threshold = (1.0 - genome.furnishing_density).clamp(0.05, 0.95);
-    let n = if aseed > split_threshold { n } else { 1 };
-    if n <= 1 {
+    if aseed <= split_threshold {
+        return SpaceLayout::default();
+    }
+
+    let rule = SubdivisionRule {
+        target_side: (genome.room_proportions.min_side * 0.42).clamp(4.0, 7.2),
+        max_depth: 1 + (genome.furnishing_density.clamp(0.0, 1.0) * 2.5) as u8,
+        seed: aseed,
+    };
+    let mut leaves = Vec::new();
+    let mut partitions = Vec::new();
+    subdivide_space(footprint.bounds(), 0, 1, &rule, &mut leaves, &mut partitions);
+    if leaves.len() <= 1 {
+        return SpaceLayout::default();
+    }
+    SpaceLayout {
+        spaces: leaves
+            .into_iter()
+            .map(|(x0, z0, x1, z1)| Space {
+                program,
+                footprint: Polygon2::rect(x0, z0, x1 - x0, z1 - z0),
+            })
+            .collect(),
+        partitions,
+    }
+}
+
+struct SubdivisionRule {
+    target_side: f32,
+    max_depth: u8,
+    seed: f32,
+}
+
+fn subdivide_space(
+    bounds: (f32, f32, f32, f32),
+    depth: u8,
+    path: u32,
+    rule: &SubdivisionRule,
+    leaves: &mut Vec<(f32, f32, f32, f32)>,
+    partitions: &mut Vec<(Position, Position)>,
+) {
+    let width = bounds.2 - bounds.0;
+    let depth_units = bounds.3 - bounds.1;
+    let split_x = width >= depth_units;
+    let span = if split_x { width } else { depth_units };
+    if depth >= rule.max_depth || span < rule.target_side * 2.05 {
+        leaves.push(bounds);
+        return;
+    }
+
+    let jitter = keyed_unit(rule.seed, path) - 0.5;
+    let split = (span * (0.5 + jitter * 0.16) / 0.4).round() * 0.4;
+    if split < rule.target_side || span - split < rule.target_side {
+        leaves.push(bounds);
+        return;
+    }
+    let (a, b) = if split_x {
+        let plane = bounds.0 + split;
+        partitions.push((
+            Position::new(plane, bounds.1),
+            Position::new(plane, bounds.3),
+        ));
+        (
+            (bounds.0, bounds.1, plane, bounds.3),
+            (plane, bounds.1, bounds.2, bounds.3),
+        )
+    } else {
+        let plane = bounds.1 + split;
+        partitions.push((
+            Position::new(bounds.0, plane),
+            Position::new(bounds.2, plane),
+        ));
+        (
+            (bounds.0, bounds.1, bounds.2, plane),
+            (bounds.0, plane, bounds.2, bounds.3),
+        )
+    };
+    subdivide_space(a, depth + 1, path << 1, rule, leaves, partitions);
+    subdivide_space(b, depth + 1, path << 1 | 1, rule, leaves, partitions);
+}
+
+fn keyed_unit(seed: f32, key: u32) -> f32 {
+    let mut value = seed.to_bits() ^ key.wrapping_mul(0x9E37_79B9);
+    value ^= value >> 16;
+    value = value.wrapping_mul(0x85EB_CA6B);
+    value ^= value >> 13;
+    (value >> 8) as f32 / (1u32 << 24) as f32
+}
+
+/// Lower a suite's room subdivision into explicit wall hosts and hosted
+/// openings. The recursive/automata layer can rewrite these elements later;
+/// voxel sampling no longer has to rediscover partitions from rectangles.
+fn hosts_and_openings_for(
+    footprint: &Polygon2,
+    partition_segments: &[(Position, Position)],
+    ceiling_units: f32,
+    entrance: Opening,
+    partition_density: f32,
+    grammar_seed: f32,
+) -> (Vec<HostSegment>, Vec<Opening>) {
+    let mut hosts = HostSegment::rectangular_shell(footprint, PLAN_WALL_T, ceiling_units);
+    let mut openings = vec![entrance];
+
+    // A short totalistic cellular automaton acts as a renovation/demolition
+    // pass over the partition graph. It can merge neighboring program cells,
+    // but never touches the shell and never creates an unpierced retained
+    // partition, so topology stays legible and walkable.
+    let retained = evolve_partitions(partition_segments, partition_density, grammar_seed);
+    for (&(start, end), retain) in partition_segments.iter().zip(retained) {
+        if retain {
+            let host_id = HostId(hosts.len() as u32);
+            let horizontal = (start.z - end.z).abs() <= 1e-4;
+            let center = Position::new((start.x + end.x) * 0.5, (start.z + end.z) * 0.5);
+            hosts.push(HostSegment {
+                id: host_id,
+                start,
+                end,
+                thickness: PLAN_WALL_T,
+                base_units: 0.0,
+                top_units: ceiling_units,
+                role: HostRole::Partition,
+            });
+            openings.push(Opening {
+                id: OpeningId(openings.len() as u32),
+                host: host_id,
+                role: OpeningRole::Interior,
+                center,
+                width: 1.2,
+                through_x_wall: horizontal,
+                lintel_units: Some(2.2),
+            });
+        }
+    }
+    (hosts, openings)
+}
+
+fn point_on_segment(point: Position, segment: (Position, Position)) -> bool {
+    const EPSILON: f32 = 1e-4;
+    if (segment.0.z - segment.1.z).abs() <= EPSILON {
+        (point.z - segment.0.z).abs() <= EPSILON
+            && point.x >= segment.0.x.min(segment.1.x) - EPSILON
+            && point.x <= segment.0.x.max(segment.1.x) + EPSILON
+    } else {
+        (point.x - segment.0.x).abs() <= EPSILON
+            && point.z >= segment.0.z.min(segment.1.z) - EPSILON
+            && point.z <= segment.0.z.max(segment.1.z) + EPSILON
+    }
+}
+
+fn segments_touch(a: (Position, Position), b: (Position, Position)) -> bool {
+    point_on_segment(a.0, b)
+        || point_on_segment(a.1, b)
+        || point_on_segment(b.0, a)
+        || point_on_segment(b.1, a)
+}
+
+fn evolve_partitions(segments: &[(Position, Position)], density: f32, seed: f32) -> Vec<bool> {
+    if segments.is_empty() {
         return Vec::new();
     }
-    let mut out = Vec::new();
-    for k in 0..n {
-        let (a, b) = (
-            snap(k as f32 / n as f32 * span),
-            snap((k + 1) as f32 / n as f32 * span),
-        );
-        let rect = if long_x {
-            Polygon2::rect(x0 + a, z0, b - a, z1 - z0)
-        } else {
-            Polygon2::rect(x0, z0 + a, x1 - x0, b - a)
-        };
-        out.push(Space {
-            program,
-            footprint: rect,
-        });
+    let survival = (0.25 + density.clamp(0.0, 1.0) * 0.75).clamp(0.0, 1.0);
+    let mut state: Vec<bool> = segments
+        .iter()
+        .enumerate()
+        .map(|(index, _)| keyed_unit(seed, index as u32 ^ 0xA170) < survival)
+        .collect();
+    for _ in 0..2 {
+        state = segments
+            .iter()
+            .enumerate()
+            .map(|(index, segment)| {
+                let neighbours = segments
+                    .iter()
+                    .enumerate()
+                    .filter(|(other_index, other)| {
+                        *other_index != index && segments_touch(*segment, **other)
+                    })
+                    .filter(|(other_index, _)| state[*other_index])
+                    .count();
+                if state[index] {
+                    neighbours <= 3
+                } else {
+                    neighbours == 2
+                }
+            })
+            .collect();
     }
-    out
+    if !state.iter().any(|retained| *retained) {
+        let fallback = (keyed_unit(seed, 0xFA11) * segments.len() as f32) as usize;
+        state[fallback.min(segments.len() - 1)] = true;
+    }
+    state
 }
 
 pub(super) fn aabb_overlap(a: (f32, f32, f32, f32), b: (f32, f32, f32, f32), gap: f32) -> bool {
@@ -226,11 +406,14 @@ pub(super) fn place_suite(
     let d = snap((w * (0.72 - 0.28 * p.elongation)).clamp(8.0, 18.0));
 
     let x0 = snap(cursor_x);
-    let z_front = snap(if side > 0.0 {
+    // Wall centerlines may occupy the half-step of the 0.4-unit plan lattice:
+    // coarse voxel centers live there too. Snapping this midpoint back to a
+    // full step can move the shell outside the corridor wall it is hosting.
+    let z_front = if side > 0.0 {
         corridor_z + corridor_half
     } else {
         corridor_z - corridor_half - d
-    });
+    };
     let footprint = Polygon2::rect(x0, z_front, w, d);
     let b = footprint.bounds();
 
@@ -276,28 +459,40 @@ pub(super) fn place_suite(
     };
     let edge = width * 0.5 + 0.8;
     let door_x = snap((b.0 + w * (0.25 + 0.5 * threshold_seed)).clamp(b.0 + edge, b.2 - edge));
-    let entrances = vec![Opening {
-        center: Position::new(door_x, front_z),
-        width,
-        through_x_wall: true,
-        lintel_units: lintel,
-    }];
-
     let ceiling = CeilingZone {
         area: footprint.clone(),
         language: genome.ceiling_language,
         height_units: ceiling_height_for(program, aseed),
     };
+    let layout = space_layout_for(program, &footprint, genome, aseed);
+    let entrance = Opening {
+        id: OpeningId(0),
+        host: if side > 0.0 { HostId(0) } else { HostId(2) },
+        role: OpeningRole::Entrance,
+        center: Position::new(door_x, front_z),
+        width,
+        through_x_wall: true,
+        lintel_units: lintel,
+    };
+    let (hosts, openings) = hosts_and_openings_for(
+        &footprint,
+        &layout.partitions,
+        ceiling.height_units,
+        entrance,
+        genome.furnishing_density,
+        aseed,
+    );
     Some(AssemblyInstance {
         id,
         program,
-        spaces: spaces_for(program, &footprint, genome, aseed),
+        spaces: layout.spaces,
         structure: structure_for(genome, aseed),
         ceiling_zones: vec![ceiling],
         fixtures: fixtures_for(genome, &footprint, true, aseed),
         service_voids: Vec::new(),
         corruption: CorruptionProfile::default(),
-        entrances,
+        hosts,
+        openings,
         footprint,
     })
 }
@@ -335,10 +530,9 @@ mod tests {
             spaces_for(SpaceProgram::OpenOffice, &footprint, &bare_shell, 0.5).is_empty(),
             "furnishing_density 0 should almost never partition"
         );
-        assert_eq!(
-            spaces_for(SpaceProgram::OpenOffice, &footprint, &dense, 0.5).len(),
-            2,
-            "furnishing_density 1 should almost always partition"
+        assert!(
+            spaces_for(SpaceProgram::OpenOffice, &footprint, &dense, 0.5).len() >= 2,
+            "furnishing_density 1 should recursively partition"
         );
     }
 
@@ -387,9 +581,10 @@ mod tests {
         let centered = fixtures_for(&genome_with(0.5, 1.0), &footprint, true, aseed);
         assert_eq!(jittered.len(), centered.len());
         assert!(
-            jittered.iter().zip(&centered).any(|(j, c)| {
-                (j.at.x - c.at.x).abs() > 1e-3 || (j.at.z - c.at.z).abs() > 1e-3
-            }),
+            jittered
+                .iter()
+                .zip(&centered)
+                .any(|(j, c)| { (j.at.x - c.at.x).abs() > 1e-3 || (j.at.z - c.at.z).abs() > 1e-3 }),
             "full symmetry tolerance must move at least one pendant off its jittered spot"
         );
         // At full tolerance, an odd fixture count's middle pendant must land
@@ -400,6 +595,80 @@ mod tests {
         if centered.len() % 2 == 1 {
             let mid = &centered[centered.len() / 2];
             assert!((mid.at.x - cx).abs() < 1e-4 && (mid.at.z - cz).abs() < 1e-4);
+        }
+    }
+
+    #[test]
+    fn recursive_subdivision_is_snapped_bounded_and_replayable() {
+        let footprint = Polygon2::rect(-4.0, 8.0, 30.0, 18.0);
+        let genome = genome_with(1.0, 0.5);
+        let first = spaces_for(SpaceProgram::OpenOffice, &footprint, &genome, 0.67);
+        let second = spaces_for(SpaceProgram::OpenOffice, &footprint, &genome, 0.67);
+        assert!(first.len() >= 4, "dense grammar did not recurse");
+        assert_eq!(first.len(), second.len());
+        let outer = footprint.bounds();
+        for (a, b) in first.iter().zip(&second) {
+            assert_eq!(a.footprint.bounds(), b.footprint.bounds());
+            let bounds = a.footprint.bounds();
+            assert!(bounds.0 >= outer.0 && bounds.1 >= outer.1);
+            assert!(bounds.2 <= outer.2 && bounds.3 <= outer.3);
+            for coordinate in [bounds.0, bounds.1, bounds.2, bounds.3] {
+                assert!(
+                    (coordinate / 0.4 - (coordinate / 0.4).round()).abs() < 1e-4,
+                    "subdivision left the 0.4-unit plan lattice at {coordinate}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn partition_automaton_preserves_shell_and_pierces_every_retained_wall() {
+        let footprint = Polygon2::rect(0.0, 0.0, 30.0, 18.0);
+        let genome = genome_with(1.0, 0.5);
+        let layout = space_layout_for(SpaceProgram::OpenOffice, &footprint, &genome, 0.67);
+        let build = || {
+            hosts_and_openings_for(
+                &footprint,
+                &layout.partitions,
+                3.6,
+                Opening {
+                    id: OpeningId(0),
+                    host: HostId(0),
+                    role: OpeningRole::Entrance,
+                    center: Position::new(15.0, 0.0),
+                    width: 3.6,
+                    through_x_wall: true,
+                    lintel_units: Some(3.0),
+                },
+                0.72,
+                0.67,
+            )
+        };
+        let (hosts, openings) = build();
+        let (replayed_hosts, replayed_openings) = build();
+        assert_eq!(hosts.len(), replayed_hosts.len());
+        assert_eq!(openings.len(), replayed_openings.len());
+        assert_eq!(
+            hosts.iter().map(|host| host.id).collect::<Vec<_>>(),
+            replayed_hosts
+                .iter()
+                .map(|host| host.id)
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            hosts
+                .iter()
+                .filter(|host| host.role == HostRole::Shell)
+                .count(),
+            4
+        );
+        assert!(hosts.iter().any(|host| host.role == HostRole::Partition));
+        for host in hosts.iter().filter(|host| host.role == HostRole::Partition) {
+            assert!(
+                openings.iter().any(|opening| opening.host == host.id),
+                "retained partition {:?} has no traversable opening",
+                host.id
+            );
         }
     }
 }

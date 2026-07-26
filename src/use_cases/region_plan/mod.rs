@@ -16,8 +16,9 @@
 //! corridors chain across regions forever (a main corridor that never ends
 //! is the first and cheapest corruption).
 //!
-//! All coordinates are snapped to a 0.4 u lattice — the coarsest voxel size —
-//! so plan geometry lands identically at every LOD.
+//! Dimensions and split planes use a 0.4 u lattice. Hosted wall centerlines
+//! may use its 0.2 u half-step, which aligns them with coarse voxel centers
+//! without changing the physical plan at different LODs.
 
 use crate::domain::entities::architecture::*;
 use crate::domain::entities::position::Position;
@@ -166,7 +167,7 @@ pub fn generate_region_plan(
                     threshold_seed,
                     cursor,
                     lz,
-                    lw * 0.5 + PLAN_WALL_T,
+                    lw * 0.5 + PLAN_WALL_T * 0.5,
                     side,
                     region_origin,
                     region_size,

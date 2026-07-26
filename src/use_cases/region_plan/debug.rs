@@ -48,7 +48,7 @@ pub fn debug_region_ascii(plan: &RegionPlan, step: f32) -> String {
                 }
             }
             for a in &plan.assemblies {
-                for e in &a.entrances {
+                for e in a.entrances() {
                     if (x - e.center.x).abs() < e.width * 0.5 && (z - e.center.z).abs() < step {
                         ch = '+';
                     }
