@@ -582,6 +582,58 @@ fn ceilings_are_vast_and_varied() {
     );
 }
 
+/// A room is one fabric cell. Its ceiling band must be resolved once for the
+/// whole cell, not resampled per column, or a room's ceiling can visibly
+/// change height mid-floor with no wall to explain the break. Regular and
+/// Compression bands are flat architectural tiers (fixed height regardless
+/// of position), so within those walled rooms height must be uniform too;
+/// Expanse and Vault are open volumes with no walls at all, where height is
+/// deliberately allowed to vary per suspended-grid bay — that is not a room
+/// being cut, since there is no room there to cut.
+#[test]
+fn ceiling_is_uniform_across_a_single_room_cell() {
+    let noise = TestNoise;
+    let t = PLAN_WALL_T;
+    let mut checked = 0usize;
+    for cz in -20..=20 {
+        for cx in -20..=20 {
+            let anchor_x = (cx as f32 + 0.5) * FABRIC_CELL;
+            let anchor_z = (cz as f32 + 0.5) * FABRIC_CELL;
+            let expected_band = BackroomsLevel::fabric_ceiling_band(&noise, 42, anchor_x, anchor_z);
+            let walled = matches!(
+                expected_band,
+                FabricCeilingBand::Regular | FabricCeilingBand::Compression
+            );
+            let expected_height =
+                BackroomsLevel::fabric_ceiling_height(&noise, 42, anchor_x, anchor_z, expected_band);
+
+            // Sample a handful of interior points of this cell, clear of the
+            // 0.4 u wall band on its west and north edges.
+            for &fx in &[t + 0.5, FABRIC_CELL * 0.5, FABRIC_CELL - 0.5] {
+                for &fz in &[t + 0.5, FABRIC_CELL * 0.5, FABRIC_CELL - 0.5] {
+                    let wx = cx as f32 * FABRIC_CELL + fx;
+                    let wz = cz as f32 * FABRIC_CELL + fz;
+                    let band = BackroomsLevel::fabric_ceiling_band(&noise, 42, wx, wz);
+                    assert_eq!(
+                        band, expected_band,
+                        "cell ({cx},{cz}) column ({wx},{wz}) band {band:?} != cell band {expected_band:?}"
+                    );
+                    if walled {
+                        let height =
+                            BackroomsLevel::fabric_ceiling_height(&noise, 42, wx, wz, band);
+                        assert_eq!(
+                            height, expected_height,
+                            "cell ({cx},{cz}) column ({wx},{wz}) height {height} != cell height {expected_height}"
+                        );
+                    }
+                    checked += 1;
+                }
+            }
+        }
+    }
+    assert!(checked > 1000, "only checked {checked} columns");
+}
+
 /// Framed doorways still exist, but only as a rare architectural anomaly.
 #[test]
 fn rare_doorways_still_have_lintels() {
