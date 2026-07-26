@@ -29,30 +29,18 @@ impl BrowserGpuContext {
         let surface = instance
             .create_surface(wgpu::SurfaceTarget::Canvas(canvas.clone()))
             .map_err(js_error)?;
-        // Adapter ladder, mirroring the portable pattern the WebGPU samples
-        // use: default options first (mobile browsers can return null for a
-        // high-performance request that a plain one satisfies), then the
-        // software fallback adapter rather than no engine at all.
-        let default_options = wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::None,
-            compatible_surface: Some(&surface),
-            force_fallback_adapter: false,
-            apply_limit_buckets: true,
-        };
-        let adapter = match instance.request_adapter(&default_options).await {
-            Ok(adapter) => adapter,
-            Err(primary_error) => instance
-                .request_adapter(&wgpu::RequestAdapterOptions {
-                    force_fallback_adapter: true,
-                    ..default_options
-                })
-                .await
-                .map_err(|fallback_error| {
-                    js_error(format!(
-                        "no WebGPU adapter: {primary_error}; fallback adapter: {fallback_error}"
-                    ))
-                })?,
-        };
+        // Browser WebGPU does not expose wgpu's native forced-fallback flag.
+        // Make one standards-based request and let backend selection recover
+        // to WebGL when the browser reports no adapter.
+        let adapter = instance
+            .request_adapter(&wgpu::RequestAdapterOptions {
+                power_preference: wgpu::PowerPreference::None,
+                compatible_surface: Some(&surface),
+                force_fallback_adapter: false,
+                apply_limit_buckets: true,
+            })
+            .await
+            .map_err(|error| js_error(format!("no WebGPU adapter: {error}")))?;
         let adapter_info = adapter.get_info();
         // Never request more than the adapter reports: desktop-default
         // limits make `requestDevice` reject outright on mobile GPUs. Any

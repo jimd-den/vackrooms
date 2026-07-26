@@ -281,6 +281,7 @@ mod tests {
                 through_x_wall: true,
                 lintel_units: None,
             }],
+            door_leaves: Vec::new(),
             spaces: vec![Space {
                 program: SpaceProgram::OpenOffice,
                 footprint: footprint.clone(),

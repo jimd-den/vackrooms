@@ -268,12 +268,10 @@ fn stored_backend_pref(window: &Window) -> Option<String> {
 
 /// Backend, then renderer, selection.
 ///
-/// Backend: `?backend=webgl|webgpu` > saved preference > WebGL2. WebGL2 is
-/// the compatibility floor (Firefox ESR, mobile); WebGPU stays an explicit
-/// opt-in. Renderer within the backend: `?renderer=` (surface, splat,
-/// raymarch, cpu), defaulting to surfaces — on WebGPU without an explicit
-/// choice, the adapter's own compatibility decides (software adapters get
-/// the CPU rasterizer).
+/// Backend: `?backend=auto|webgl|webgpu` > saved preference > automatic.
+/// Automatic mode uses standards-based WebGPU when a secure browser context
+/// exposes a usable adapter, otherwise it retains WebGL2 as the compatibility
+/// floor. Renderer within the backend follows `?renderer=`.
 async fn create_renderer(
     window: &Window,
     canvas: &HtmlCanvasElement,
@@ -284,9 +282,22 @@ async fn create_renderer(
     let backend = query_param(query, "backend")
         .map(str::to_owned)
         .or_else(|| stored_backend_pref(window))
-        .unwrap_or_else(|| "webgl".to_owned());
-    if backend == "webgpu" {
+        .unwrap_or_else(|| "auto".to_owned());
+    let use_webgpu = if backend == "webgpu" {
         webgpu_preflight(window, status_msg).await?;
+        true
+    } else if backend == "auto" {
+        match webgpu_preflight(window, status_msg).await {
+            Ok(()) => true,
+            Err(_) => {
+                status_msg.set_text_content(Some("Generating world in WebAssembly…"));
+                false
+            }
+        }
+    } else {
+        false
+    };
+    if use_webgpu {
         let requested = query_param(query, "renderer").and_then(RendererKind::parse);
         return WebGpuRenderer::new_auto(canvas, requested, quality)
             .await
@@ -332,7 +343,7 @@ async fn create_renderer(
     }
 }
 
-/// Preflight for the opt-in WebGPU backend: failures inside wgpu's surface
+/// Preflight for the WebGPU backend: failures inside wgpu's surface
 /// and adapter glue are unactionable (`getContext` null, or an uncaught
 /// TypeError when `requestAdapter` resolves to null — seen on mobile
 /// Chrome), so probe both layers first and put concrete guidance in the

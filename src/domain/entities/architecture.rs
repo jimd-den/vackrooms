@@ -325,6 +325,13 @@ pub struct Opening {
     pub lintel_units: Option<f32>,
 }
 
+/// Optional visible leaf attached to a hosted opening. Traversal semantics
+/// remain on gates/exits; this is architectural presentation only.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DoorLeaf {
+    pub opening: OpeningId,
+}
+
 impl Opening {
     /// Whether a plan sample is inside the opening cut. Host thickness is
     /// supplied by the referenced host rather than duplicated on the opening.
@@ -350,6 +357,8 @@ pub enum ArchitectureViolation {
     DuplicateHostId(HostId),
     DuplicateOpeningId(OpeningId),
     OverlappingHosts(HostId, HostId),
+    MissingDoorOpening(OpeningId),
+    DuplicateDoorLeaf(OpeningId),
 }
 
 /// A named subspace inside an assembly (a private office in a suite, a stall
@@ -442,6 +451,7 @@ pub struct AssemblyInstance {
     pub footprint: Polygon2,
     pub hosts: Vec<HostSegment>,
     pub openings: Vec<Opening>,
+    pub door_leaves: Vec<DoorLeaf>,
     pub spaces: Vec<Space>,
     pub structure: StructuralSystemInstance,
     pub ceiling_zones: Vec<CeilingZone>,
@@ -569,6 +579,15 @@ impl AssemblyInstance {
                 }
             }
         }
+        let mut door_openings = HashSet::new();
+        for leaf in &self.door_leaves {
+            if !self.openings.iter().any(|opening| opening.id == leaf.opening) {
+                violations.push(ArchitectureViolation::MissingDoorOpening(leaf.opening));
+            }
+            if !door_openings.insert(leaf.opening) {
+                violations.push(ArchitectureViolation::DuplicateDoorLeaf(leaf.opening));
+            }
+        }
         violations
     }
 }
@@ -681,6 +700,7 @@ mod tests {
                 through_x_wall: true,
                 lintel_units: Some(2.2),
             }],
+            door_leaves: Vec::new(),
             spaces: Vec::new(),
             structure: StructuralSystemInstance {
                 system: StructuralSystem::CoreAndShell,

@@ -63,6 +63,55 @@ fn hash_screen(pixel: vec2<f32>) -> f32 {
     return fract(sin(dot(pixel, vec2<f32>(12.9898, 78.233))) * 43758.5453);
 }
 
+fn material_hash(cell: vec2<f32>) -> f32 {
+    return fract(sin(dot(cell, vec2<f32>(12.9898, 78.233))) * 43758.5453);
+}
+
+fn material_noise(point: vec2<f32>) -> f32 {
+    let cell = floor(point);
+    let f = fract(point);
+    let u = f * f * (vec2<f32>(3.0) - 2.0 * f);
+    let a = material_hash(cell);
+    let b = material_hash(cell + vec2<f32>(1.0, 0.0));
+    let c = material_hash(cell + vec2<f32>(0.0, 1.0));
+    let d = material_hash(cell + vec2<f32>(1.0, 1.0));
+    return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
+}
+
+fn apply_material_pattern(
+    material: u32,
+    albedo: vec3<f32>,
+    world: vec3<f32>,
+    normal: vec3<f32>,
+    sample_footprint: f32,
+) -> vec3<f32> {
+    let carpet = material == 2u || material == 12u || material == 13u
+        || material == 14u || material == 25u;
+    if carpet && normal.y > 0.5 {
+        let broad = material_noise(world.xz * 0.18);
+        let fibers = material_noise(world.xz * 1.15);
+        let detail = clamp(1.15 - sample_footprint * 0.32, 0.20, 1.0);
+        let wear = 0.88 + 0.18 * broad + (fibers - 0.5) * 0.055 * detail;
+        return albedo * wear;
+    }
+    let wallpaper = material == 1u || material == 24u;
+    if wallpaper && abs(normal.y) < 0.5 {
+        let along = select(world.x, world.z, abs(normal.x) > 0.5);
+        let repeat = fract(along / 1.35);
+        let center = abs(repeat - 0.5);
+        let stem = 1.0 - smoothstep(0.035, 0.085, center);
+        let vine = 0.5 + 0.5 * sin(world.y * 3.1 + sin(along * 2.4) * 0.8);
+        let medallion = pow(max(cos((repeat - 0.5) * 6.2831853), 0.0), 6.0)
+            * pow(max(cos((world.y - 0.35) * 3.1415926), 0.0), 4.0);
+        let age = select(0.0, 1.0, material == 24u);
+        let stain = material_noise(vec2<f32>(along * 0.09, world.y * 0.16));
+        let motif = stem * (0.45 + 0.55 * vine) + medallion * 0.55;
+        let factor = 1.025 - motif * (0.12 + age * 0.035) - age * stain * 0.07;
+        return albedo * factor;
+    }
+    return albedo;
+}
+
 const PI: f32 = 3.14159265358979323846;
 const LIGHT_POINT: u32 = 0u;
 const MINIMUM_SCENE_LIGHT_DISTANCE: f32 = 0.2;

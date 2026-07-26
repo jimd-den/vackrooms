@@ -88,6 +88,7 @@ impl BackroomsLevel {
         let mut covering_hosts = 0usize;
         let mut cut_hosts = 0usize;
         let mut lintel_units = 0.0f32;
+        let mut door_leaf = false;
         for host in a.hosts.iter().filter(|host| host.contains_plan(wx, wz)) {
             covering_hosts += 1;
             ceiling_units = ceiling_units.max(host.top_units);
@@ -96,6 +97,10 @@ impl BackroomsLevel {
             }) {
                 cut_hosts += 1;
                 lintel_units = lintel_units.max(opening.lintel_units.unwrap_or(0.0));
+                door_leaf |= a
+                    .door_leaves
+                    .iter()
+                    .any(|leaf| leaf.opening == opening.id);
             }
         }
         if covering_hosts > 0 {
@@ -104,6 +109,7 @@ impl BackroomsLevel {
                 plan.lintel_from_units = walls_on
                     .then_some(lintel_units)
                     .filter(|height| *height > 0.0);
+                plan.door_leaf = walls_on && door_leaf;
             } else {
                 plan.solid = walls_on;
             }
@@ -159,6 +165,7 @@ mod tests {
             footprint: footprint.clone(),
             hosts: HostSegment::rectangular_shell(&footprint, 0.4, 5.0),
             openings: Vec::new(),
+            door_leaves: Vec::new(),
             spaces: Vec::new(),
             structure: StructuralSystemInstance {
                 system: StructuralSystem::CoreAndShell,

@@ -1,6 +1,8 @@
 //! Materialize sampled Level 0 columns at the requested voxel size.
 
-use crate::domain::entities::voxel_grid::{VOXEL_CEILING, VOXEL_RED_LIGHT, VoxelGrid};
+use crate::domain::entities::voxel_grid::{
+    VOXEL_CEILING, VOXEL_METAL_DOOR, VOXEL_RED_LIGHT, VoxelGrid,
+};
 use crate::use_cases::level_zero::ColumnField;
 
 /// Writes geometry and fixture voxels without knowing seeds, regions,
@@ -33,6 +35,12 @@ pub(crate) fn voxelize_columns(grid: &mut VoxelGrid, field: &ColumnField, voxel_
             } else if let Some(lintel_height) = plan.lintel_from_units {
                 for y in to_voxel(lintel_height)..ceiling_y {
                     grid.set(x, y, z, plan.wall_material);
+                }
+            }
+            if plan.door_leaf && !plan.solid {
+                let door_top = to_voxel(plan.lintel_from_units.unwrap_or(2.2));
+                for y in 1..door_top {
+                    grid.set(x, y, z, VOXEL_METAL_DOOR);
                 }
             }
 
@@ -168,5 +176,19 @@ mod tests {
                 "wall should reach the taller neighbour's ceiling at y={y}"
             );
         }
+    }
+
+    #[test]
+    fn door_leaves_fill_the_opening_below_the_lintel() {
+        let mut door = ColumnPlan::open(4.0);
+        door.lintel_from_units = Some(2.2);
+        door.door_leaf = true;
+        let field = ColumnField::sample(1, 1, |_, _| door);
+        let mut grid = VoxelGrid::new(1, 6, 1);
+        voxelize_columns(&mut grid, &field, 1.0);
+
+        assert_eq!(grid.get(0, 1, 0), VOXEL_METAL_DOOR);
+        assert_eq!(grid.get(0, 2, 0), VOXEL_WALL, "lintel remains structural");
+        assert_eq!(grid.get(0, 4, 0), VOXEL_WALL, "header reaches the ceiling");
     }
 }

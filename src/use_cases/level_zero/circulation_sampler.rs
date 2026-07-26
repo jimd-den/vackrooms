@@ -5,7 +5,7 @@
 use crate::domain::entities::anomaly::RealitySnapshot;
 use crate::domain::entities::architecture::{CirculationSpine, SpaceProgram};
 use crate::use_cases::ports::NoiseProvider;
-use crate::use_cases::region_plan::spawn_point;
+use crate::use_cases::region_plan::{PLAN_WALL_T, spawn_point};
 
 use super::BackroomsLevel;
 
@@ -14,6 +14,7 @@ use super::BackroomsLevel;
 /// unambiguous walled corridor, not a dissolved edge into open fabric. The
 /// world only starts opening up once that grammar has been established.
 pub(super) const SPAWN_READABLE_RADIUS: f32 = 26.0;
+const CEILING_ZONE: f32 = 12.0;
 
 impl BackroomsLevel {
     pub(super) fn corridor_ceiling(
@@ -26,9 +27,8 @@ impl BackroomsLevel {
         // Slow, quantized drift: one sample per 12 u corridor zone snapped
         // to the voxel lattice, so long runs hold one height and then step
         // once — instead of per-column ripple overhead.
-        const DRIFT_ZONE: f32 = 12.0;
-        let zone_x = (wx / DRIFT_ZONE).floor() * DRIFT_ZONE + DRIFT_ZONE * 0.5;
-        let zone_z = (wz / DRIFT_ZONE).floor() * DRIFT_ZONE + DRIFT_ZONE * 0.5;
+        let zone_x = (wx / CEILING_ZONE).floor() * CEILING_ZONE + CEILING_ZONE * 0.5;
+        let zone_z = (wz / CEILING_ZONE).floor() * CEILING_ZONE + CEILING_ZONE * 0.5;
         let drift = Self::n(
             noise,
             seed,
@@ -44,6 +44,36 @@ impl BackroomsLevel {
         };
         // Snap first, clamp last (f32 lattice snap can overshoot the band).
         ((height / 0.2).round() * 0.2).clamp(lo, hi)
+    }
+
+    /// Lower edge of a bulkhead where one corridor ceiling module meets a
+    /// different-height module. Each boundary is owned by the module on its
+    /// east/south side, so independently sampled chunks author it once.
+    pub(super) fn corridor_ceiling_join(
+        spine: &CirculationSpine,
+        noise: &dyn NoiseProvider,
+        seed: u32,
+        wx: f32,
+        wz: f32,
+    ) -> Option<f32> {
+        let current = Self::corridor_ceiling(spine, noise, seed, wx, wz);
+        let in_west_edge = wx.rem_euclid(CEILING_ZONE) < PLAN_WALL_T;
+        let in_north_edge = wz.rem_euclid(CEILING_ZONE) < PLAN_WALL_T;
+        let mut join_from: Option<f32> = None;
+        for (nx, nz) in [
+            in_west_edge.then_some((wx - CEILING_ZONE, wz)),
+            in_north_edge.then_some((wx, wz - CEILING_ZONE)),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            let neighbor = Self::corridor_ceiling(spine, noise, seed, nx, nz);
+            if (neighbor - current).abs() > 0.05 {
+                let lower = neighbor.min(current);
+                join_from = Some(join_from.map_or(lower, |height| height.min(lower)));
+            }
+        }
+        join_from
     }
 
     /// Whether a corridor-side wall dissolves into the adjacent room/fabric.

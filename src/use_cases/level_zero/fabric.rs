@@ -187,6 +187,9 @@ impl BackroomsLevel {
         // ---- ceiling field -------------------------------------------------
         let ceiling_band = Self::fabric_ceiling_band(noise, seed, wx, wz);
         let ceiling_units = Self::fabric_ceiling_height(noise, seed, wx, wz, ceiling_band);
+        let fx = wx.rem_euclid(FABRIC_CELL);
+        let fz = wz.rem_euclid(FABRIC_CELL);
+        let (in_w, in_n) = (fx < PLAN_WALL_T, fz < PLAN_WALL_T);
 
         // ---- material/decay -------------------------------------------------
         // Every consumer of Level 0 materials is meant to derive from one
@@ -251,9 +254,6 @@ impl BackroomsLevel {
             // second doorways) breaks the lattice read: it plays as one
             // endless wrong building, never as "a maze section".
             let t = PLAN_WALL_T;
-            let fx = wx.rem_euclid(FABRIC_CELL);
-            let fz = wz.rem_euclid(FABRIC_CELL);
-            let (in_w, in_n) = (fx < t, fz < t);
             if in_w && in_n {
                 // Junction posts anchor every corner; where the walls
                 // around them have dropped they survive as column stubs.
@@ -359,6 +359,34 @@ impl BackroomsLevel {
             }
         }
 
+        // A changed ceiling plane needs a vertical fascia even when the wall
+        // below was removed or pierced. The lower ceiling is the bulkhead's
+        // underside; voxelization grows this supported column to the taller
+        // neighbor, closing the join without inventing a floating ceiling.
+        if !solid && tuning.walls > 0.0 && (in_w || in_n) {
+            let mut join_from: Option<f32> = None;
+            for (nx, nz) in [
+                in_w.then_some((wx - FABRIC_CELL, wz)),
+                in_n.then_some((wx, wz - FABRIC_CELL)),
+            ]
+            .into_iter()
+            .flatten()
+            {
+                let neighbor_band = Self::fabric_ceiling_band(noise, seed, nx, nz);
+                let neighbor_height =
+                    Self::fabric_ceiling_height(noise, seed, nx, nz, neighbor_band);
+                if (neighbor_height - ceiling_units).abs() > 0.05 {
+                    let lower = neighbor_height.min(ceiling_units);
+                    join_from = Some(join_from.map_or(lower, |height| height.min(lower)));
+                }
+            }
+            if let Some(join_from) = join_from {
+                lintel_from_units = Some(
+                    lintel_from_units.map_or(join_from, |height| height.min(join_from)),
+                );
+            }
+        }
+
         // ---- lights ------------------------------------------------------
         let light = if !solid {
             // Open regions keep a longer, sparser fluorescent rhythm; the
@@ -398,6 +426,7 @@ impl BackroomsLevel {
             light,
             red_light: false,
             lintel_from_units,
+            door_leaf: false,
             wall_material: env.wall_voxel(),
             floor_material: env.floor_voxel(),
             light_material: env.light_voxel(),

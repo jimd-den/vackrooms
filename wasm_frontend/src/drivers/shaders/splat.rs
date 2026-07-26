@@ -2,11 +2,11 @@
 //!
 //! One instance is one axis-aligned surface rectangle (`PackedFaceInstance`);
 //! the vertex shader rebuilds the quad from center + extents + axis via
-//! `gl_VertexID` (4-vertex TRIANGLE_STRIP) and evaluates ALL lighting once
-//! per face, flat — the voxel look, and the reason the fragment shader
-//! shrinks to fog + grain + dither (the Pi win).
+//! `gl_VertexID` (4-vertex TRIANGLE_STRIP). Lighting is evaluated at those
+//! four corners and interpolated, avoiding the large, uniformly lit patches
+//! produced by one face-center sample without paying per-fragment light loops.
 
-use super::chunks;
+use super::{chunks, encode_display_color};
 
 /// Preamble: version, attributes, uniforms, varyings.
 const VERTEX_HEADER: &str = r#"#version 300 es
@@ -44,14 +44,15 @@ uniform int uOutdoor;
 uniform float uAmbientScale;
 
 out vec3 vWorldPos;
-flat out vec3 vColor;
+out vec3 vColor;
 flat out vec3 vNormal;
+flat out float vMaterial;
 flat out float vEmissive;
 flat out float vGrainAmp;
 flat out float vBeamPattern;
 "#;
 
-/// Quad reconstruction + per-face lighting body.
+/// Quad reconstruction + per-corner lighting body.
 const VERTEX_BODY: &str = r#"
 vec3 normalForAxis(float axis) {
     if (axis < 0.5) return vec3(0.0, 1.0, 0.0);
@@ -103,17 +104,6 @@ float shadowVisibility(vec3 worldPos, vec3 normal, vec3 lightDir) {
     return shadow * 0.25;
 }
 
-// Quantize the light magnitude while preserving its RGB ratio. Quantizing
-// channels independently makes warm yellow light jump toward neutral grey.
-vec3 quantizeLighting(vec3 lightColor) {
-    float peak = max(max(lightColor.r, lightColor.g), lightColor.b);
-    if (peak < 0.0001) {
-        return vec3(0.08, 0.07, 0.035);
-    }
-    float band = max(floor(peak * 6.0 + 0.5) / 6.0, 0.08);
-    return lightColor * (band / peak);
-}
-
 void main() {
     vec2 corner = vec2(
         (gl_VertexID == 1 || gl_VertexID == 3) ? 1.0 : -1.0,
@@ -129,9 +119,10 @@ void main() {
     vec3 world = center + corner.x * halfU * U + corner.y * halfV * V;
     vWorldPos = world;
     vNormal = N;
+    vMaterial = aFaceMeta.y;
     gl_Position = uProjection * uView * vec4(world, 1.0);
 
-    vec3 albedo = materialColor(aFaceMeta.y);
+    vec3 albedo = srgbToLinear(materialColor(aFaceMeta.y));
     bool emissive = aFaceFlags > 0.5;
     vEmissive = emissive ? 1.0 : 0.0;
     // Per-voxel grain amplitude: subtle on walls/floors, none on ceilings
@@ -147,22 +138,20 @@ void main() {
         return;
     }
 
-    vec3 toCamera = uCameraPosition - center;
+    vec3 toCamera = uCameraPosition - world;
     float distanceToCamera = length(toCamera);
 
     // Sample the baked light volume half a voxel into the air so a face
     // never reads the dark interior of its own wall.
-    vec3 samplePos = center + N * (0.5 * uVoxelScale);
+    vec3 samplePos = world + N * (0.5 * uVoxelScale);
     vec3 uvw = (samplePos - uChunkOrigin) / uChunkSize;
     vec3 irradiance = textureLod(uLightVolume, clamp(uvw, 0.0, 1.0), 0.0).rgb;
     // The compact face record carries the scalar bake too. It is a robust
     // floor at chunk borders and preserves the CPU splatter's light bands,
     // while the 3D volume supplies the actual warm/red chroma.
-    float baked = aFaceMeta.z * (1.0 / 15.0);
-    vec3 bakedWarm = vec3(baked, baked * 0.94, baked * 0.72);
-    vec3 roomAmbient = vec3(0.16, 0.145, 0.075);
-    vec3 bouncedLight = irradiance * 0.75;
-    irradiance = max(roomAmbient, bouncedLight);
+    vec3 roomAmbient = vec3(0.045, 0.040, 0.024);
+    vec3 bouncedLight = irradiance * 0.12;
+    irradiance = roomAmbient + bouncedLight;
     if (uOutdoor == 1) {
         irradiance = max(irradiance, vec3(0.30, 0.32, 0.36));
     }
@@ -176,7 +165,7 @@ void main() {
         faceResponse = 0.65 + 0.1 * N.x + 0.05 * N.z;
     }
 
-    float ao = mix(1.0, 0.22, clamp(aFaceMeta.w * 1.3, 0.0, 1.0));
+    float ao = mix(1.0, 0.62, clamp(aFaceMeta.w, 0.0, 1.0));
 
     vec3 ambientUp = vec3(1.05, 1.0, 0.72) * irradiance;
     vec3 ambientDown = vec3(0.58, 0.52, 0.30) * irradiance;
@@ -189,7 +178,7 @@ void main() {
     vec3 directDiffuse = vec3(0.0);
     for (int i = 0; i < 16; ++i) {
         if (i >= uLightCount) break;
-        vec3 toLight = uLightPositions[i] - center;
+        vec3 toLight = uLightPositions[i] - world;
         float d2 = dot(toLight, toLight);
         float range = uLightParams[i].x;
         float range2 = range * range;
@@ -203,7 +192,7 @@ void main() {
 
         float visible = 1.0;
         if (i == uShadowedLightIndex) {
-            visible = shadowVisibility(center, N, L);
+            visible = shadowVisibility(world, N, L);
         }
 
         float lightHash = hash3D(uLightPositions[i] * 10.0);
@@ -212,8 +201,7 @@ void main() {
         directDiffuse += lightColor * uLightParams[i].y * falloff * visible * ndotl * directMod;
     }
 
-    // Flashlight: the shared spotlight cone (spec in the CPU splatter),
-    // evaluated once per face at its center — flat like all splat lighting.
+    // Flashlight: the shared spotlight cone (spec in the CPU splatter).
     // Kept INSIDE the light sum: the material color is the immutable base
     // and every light multiplies it, so the flashlight brightens yellow
     // walls toward brighter yellow, never neutral grey.
@@ -222,8 +210,8 @@ void main() {
         flashlight = spotBeam(uCameraPosition, uCamForward, center, N);
     }
 
-    vec3 lighting = quantizeLighting(ambient + directDiffuse + flashlight);
-    vColor = albedo * lighting;
+    const float INV_PI = 0.3183098861837907;
+    vColor = albedo * ((ambient + directDiffuse) * INV_PI + flashlight);
 }
 "#;
 
@@ -235,8 +223,9 @@ precision highp float;
 precision highp int;
 
 in vec3 vWorldPos;
-flat in vec3 vColor;
+in vec3 vColor;
 flat in vec3 vNormal;
+flat in float vMaterial;
 flat in float vEmissive;
 flat in float vGrainAmp;
 flat in float vBeamPattern;
@@ -259,12 +248,14 @@ uniform vec3 uFogColor;
 out vec4 fragColor;
 "#;
 
-/// The splat fragment body is deliberately tiny (the Pi win): fog,
-/// voxel-lattice albedo grain, ordered dither, tone map. All lighting
-/// arrived flat from the vertex shader.
+/// The splat fragment body remains deliberately small: procedural finish,
+/// fog, voxel-lattice grain, ordered dither, and display encoding. Lighting
+/// arrives interpolated from the vertex shader.
 const FRAGMENT_BODY: &str = r#"
 void main() {
-    vec3 color = vColor;
+    vec3 color = applyMaterialPattern(
+        vMaterial, vColor, vWorldPos, vNormal, uVoxelScale
+    );
     float distanceToCamera = length(uCameraPosition - vWorldPos);
 
     if (vEmissive < 0.5) {
@@ -313,7 +304,7 @@ void main() {
     // Flare cores (shared chunk; occluded by nearer surfaces).
     color += flareCores(vWorldPos, uCameraPosition);
 
-    color = toneMap(color);
+    color = encodeDisplayColor(color);
     color += (ign(gl_FragCoord.xy) - 0.5) * (1.0 / 128.0) * (1.0 - fogAmount) * float(uDitherEnabled);
 
     fragColor = vec4(color, 1.0);
@@ -327,12 +318,14 @@ pub fn vertex_source() -> String {
         VERTEX_HEADER.len()
             + material_color.len()
             + chunks::NOISE_GLSL.len()
+            + encode_display_color::GLSL.len()
             + chunks::SPOT_CONE_GLSL.len()
             + VERTEX_BODY.len(),
     );
     source.push_str(VERTEX_HEADER);
     source.push_str(&material_color);
     source.push_str(chunks::NOISE_GLSL);
+    source.push_str(encode_display_color::GLSL);
     source.push_str(chunks::SPOT_CONE_GLSL);
     source.push_str(VERTEX_BODY);
     source
@@ -343,14 +336,30 @@ pub fn fragment_source() -> String {
     let mut source = String::with_capacity(
         FRAGMENT_HEADER.len()
             + chunks::NOISE_GLSL.len()
-            + chunks::TONE_MAP_GLSL.len()
+            + chunks::MATERIAL_PATTERN_GLSL.len()
+            + encode_display_color::GLSL.len()
             + chunks::FLARE_CORES_GLSL.len()
             + FRAGMENT_BODY.len(),
     );
     source.push_str(FRAGMENT_HEADER);
     source.push_str(chunks::NOISE_GLSL);
-    source.push_str(chunks::TONE_MAP_GLSL);
+    source.push_str(chunks::MATERIAL_PATTERN_GLSL);
+    source.push_str(encode_display_color::GLSL);
     source.push_str(chunks::FLARE_CORES_GLSL);
     source.push_str(FRAGMENT_BODY);
     source
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fragment_applies_shared_finishes_before_display_encoding() {
+        let source = fragment_source();
+        let pattern = source.find("applyMaterialPattern(").expect("material finish");
+        let display = source.rfind("encodeDisplayColor(").expect("display encoding");
+        assert!(pattern < display);
+        assert!(!source.contains("quantize5"));
+    }
 }

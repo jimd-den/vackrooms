@@ -52,9 +52,7 @@ impl WorkerChunkSource {
     /// and workers derive the identical generator configuration.
     pub fn new(query: &str, default_seed: u32, pool_size: usize) -> Result<Self, JsValue> {
         if !(1..=usize::from(MAX_GENERATION_WORKERS)).contains(&pool_size) {
-            return Err(JsValue::from_str(
-                "generation worker pool size must be 1..=4",
-            ));
+            return Err(JsValue::from_str("generation worker pool size must be 1..=32"));
         }
 
         let completed: Rc<RefCell<Vec<CompletedChunk>>> = Rc::new(RefCell::new(Vec::new()));
@@ -192,6 +190,10 @@ impl ChunkSourcePort for WorkerChunkSource {
 
     fn is_async(&self) -> bool {
         true
+    }
+
+    fn max_concurrent_requests(&self) -> usize {
+        self.pool_size()
     }
 
     fn request(&mut self, request: ChunkRequest) {

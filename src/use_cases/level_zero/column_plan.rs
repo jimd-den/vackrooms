@@ -25,6 +25,9 @@ pub(crate) struct ColumnPlan {
     /// Solid band hanging from the ceiling down to this height (door
     /// lintels). The space below stays walkable.
     pub lintel_from_units: Option<f32>,
+    /// A visible, non-colliding door leaf occupies the opening below its
+    /// lintel. Gates and level exits remain separate semantic records.
+    pub door_leaf: bool,
     /// Material used for solid columns and lintels (a wall-treatment voxel
     /// from the shared
     /// [`crate::domain::entities::environment::EnvironmentProfile`] semantics).
@@ -47,6 +50,7 @@ impl ColumnPlan {
             light: false,
             red_light: false,
             lintel_from_units: None,
+            door_leaf: false,
             wall_material: VOXEL_WALL,
             floor_material: VOXEL_FLOOR,
             light_material: VOXEL_LIGHT,

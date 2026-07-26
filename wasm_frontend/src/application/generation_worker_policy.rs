@@ -160,6 +160,8 @@ mod tests {
             16,
             "an explicit request for 16 workers on 16-thread hardware must not be clamped below it"
         );
+        assert_eq!(GenerationWorkerPreference::Auto.resolve(64.0), 32);
+        assert_eq!(GenerationWorkerPreference::Fixed(u8::MAX).resolve(64.0), 32);
     }
 
     #[test]

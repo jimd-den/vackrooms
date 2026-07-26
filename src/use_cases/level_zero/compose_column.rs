@@ -53,6 +53,7 @@ impl BackroomsLevel {
         // -- circulation ----------------------------------------------------
         let mut in_corridor = false;
         let mut corridor_ceiling = 0.0f32;
+        let mut corridor_join_from: Option<f32> = None;
         let mut corridor_light = false;
         let mut corridor_wall = false;
         // Edge-gap decisions are deferred: they read the Peripheral Shift,
@@ -66,6 +67,11 @@ impl BackroomsLevel {
                 in_corridor = true;
                 corridor_ceiling =
                     corridor_ceiling.max(Self::corridor_ceiling(s, noise, seed, wx, wz));
+                if let Some(join_from) = Self::corridor_ceiling_join(s, noise, seed, wx, wz) {
+                    corridor_join_from = Some(
+                        corridor_join_from.map_or(join_from, |height| height.min(join_from)),
+                    );
+                }
                 // Light strip modules follow the corridor in world space.
                 if d < 0.45 && along.rem_euclid(4.0) < 1.0 {
                     corridor_light = true;
@@ -82,6 +88,9 @@ impl BackroomsLevel {
                 light: corridor_light && tuning.lights > 0.0,
                 ..ColumnPlan::open(corridor_ceiling)
             };
+            if tuning.walls > 0.0 {
+                column.lintel_from_units = corridor_join_from;
+            }
             // Geometry priority and presentation priority are different
             // things: the corridor owns passability — its route through a
             // blackout stays carved open — but a blackout owns the *dark*.
@@ -166,6 +175,17 @@ impl BackroomsLevel {
                 }
                 let mut base =
                     Self::assembly_column(a, renovator_structure.as_ref(), tuning, wx, wz);
+                if corridor_wall
+                    && !base.solid
+                    && tuning.walls > 0.0
+                    && (base.ceiling_units - corridor_ceiling).abs() > 0.05
+                {
+                    let join_from = base.ceiling_units.min(corridor_ceiling);
+                    base.lintel_from_units = Some(
+                        base.lintel_from_units
+                            .map_or(join_from, |height| height.min(join_from)),
+                    );
+                }
                 // A stair assembly shapes its interior as a flight: the
                 // vertical link that reserved it decides whether the flight
                 // lands or climbs endlessly. Stairs are architecture, so a
@@ -218,6 +238,7 @@ impl BackroomsLevel {
         // -- corridor edge walls through fabric -------------------------------
         // The mouths onto circulation drift and seal with the same reality
         // as the fabric they open into (frozen in the sanctuaries above).
+        let mut open_corridor_mouth = false;
         if corridor_wall && tuning.walls > 0.0 {
             let corridor_gap = gap_probes.iter().any(|&(s, along, is_horizontal)| {
                 Self::corridor_edge_opens(
@@ -237,7 +258,20 @@ impl BackroomsLevel {
                     ..ColumnPlan::open(corridor_ceiling.max(3.2))
                 };
             }
+            open_corridor_mouth = true;
         }
-        Self::column_plan_in_reality(noise, seed, tuning, fabric_reality, wx, wz)
+        let mut fabric = Self::column_plan_in_reality(noise, seed, tuning, fabric_reality, wx, wz);
+        if open_corridor_mouth
+            && !fabric.solid
+            && (fabric.ceiling_units - corridor_ceiling).abs() > 0.05
+        {
+            let join_from = fabric.ceiling_units.min(corridor_ceiling);
+            fabric.lintel_from_units = Some(
+                fabric
+                    .lintel_from_units
+                    .map_or(join_from, |height| height.min(join_from)),
+            );
+        }
+        fabric
     }
 }

@@ -652,7 +652,13 @@ fn raymarch_fragment(@builtin(position) pixel: vec4<f32>) -> @location(0) vec4<f
         return vec4<f32>(display_color(frame.sky_color_ambient.xyz), 1.0);
     }
     let world = frame.camera_position.xyz + direction * nearest.distance;
-    let albedo = packed_srgb_to_linear(nearest.color);
+    let albedo = apply_material_pattern(
+        nearest.material,
+        packed_srgb_to_linear(nearest.color),
+        world,
+        nearest.normal,
+        nearest.voxel_size
+    );
     let emission = authored_emission_strength(nearest.material);
     let emits = emission > 0.0 && nearest.normal.y < -0.5;
     var radiance = vec3<f32>(0.0);

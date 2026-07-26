@@ -8,6 +8,7 @@ struct SurfaceVertex {
     @location(2) @interpolate(flat) visual: u32,
     @location(3) @interpolate(flat) baked: f32,
     @location(4) @interpolate(flat) ao: f32,
+    @location(5) @interpolate(flat) material: u32,
 };
 
 @vertex
@@ -21,14 +22,21 @@ fn surface_vertex(@builtin(vertex_index) vertex_index: u32) -> SurfaceVertex {
     output.world = world;
     output.normal = normal_for_axis(normal_axis);
     output.visual = packed.visual;
+    output.material = (packed.z_normal_material >> 24u) & 255u;
     output.baked = f32(packed.light_ao & 255u) / 15.0;
-    output.ao = 1.0 - f32((packed.light_ao >> 8u) & 255u) / 255.0;
+    output.ao = 1.0 - f32((packed.light_ao >> 8u) & 1u);
     return output;
 }
 
 @fragment
 fn surface_fragment(input: SurfaceVertex) -> @location(0) vec4<f32> {
-    let albedo = packed_srgb_to_linear(input.visual);
+    let albedo = apply_material_pattern(
+        input.material,
+        packed_srgb_to_linear(input.visual),
+        input.world,
+        input.normal,
+        chunk.bounds_voxel_size.w
+    );
     let emission = f32(input.visual >> 24u) / 25.5;
     let emits = emission > 0.0 && input.normal.y < -0.5;
     let radiance = select(

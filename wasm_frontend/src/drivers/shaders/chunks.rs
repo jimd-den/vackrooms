@@ -97,6 +97,15 @@ mod tests {
             assert!(glsl.contains(&format!("vec3({red}.0, {green}.0, {blue}.0)")));
         }
     }
+
+    #[test]
+    fn procedural_finishes_are_world_locked_and_material_specific() {
+        assert!(MATERIAL_PATTERN_GLSL.contains("world.xz * 0.18"));
+        assert!(MATERIAL_PATTERN_GLSL.contains("bool carpet"));
+        assert!(MATERIAL_PATTERN_GLSL.contains("bool wallpaper"));
+        assert!(MATERIAL_PATTERN_GLSL.contains("stem"));
+        assert!(MATERIAL_PATTERN_GLSL.contains("medallion"));
+    }
 }
 
 /// World-hash and interleaved-gradient-noise helpers.
@@ -112,6 +121,58 @@ float hash3D(vec3 p) {
 float ign(vec2 p) {
     vec3 magic = vec3(0.06711056, 0.00583715, 52.9829189);
     return fract(magic.z * fract(dot(p, magic.xy)));
+}
+"#;
+
+/// World-locked procedural finishes shared by WebGL surface and splat paths.
+/// The wallpaper motif is generated geometry, not a copied texture asset.
+pub const MATERIAL_PATTERN_GLSL: &str = r#"
+float materialNoise2D(vec2 p) {
+    vec2 cell = floor(p);
+    vec2 f = fract(p);
+    vec2 u = f * f * (3.0 - 2.0 * f);
+    float a = hash3D(vec3(cell, 17.0));
+    float b = hash3D(vec3(cell + vec2(1.0, 0.0), 17.0));
+    float c = hash3D(vec3(cell + vec2(0.0, 1.0), 17.0));
+    float d = hash3D(vec3(cell + vec2(1.0, 1.0), 17.0));
+    return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
+}
+
+vec3 applyMaterialPattern(
+    float material,
+    vec3 albedo,
+    vec3 world,
+    vec3 normal,
+    float sampleFootprint
+) {
+    bool carpet = material > 1.5 && material < 2.5
+        || material > 11.5 && material < 14.5
+        || material > 24.5 && material < 25.5;
+    if (carpet && normal.y > 0.5) {
+        float broad = materialNoise2D(world.xz * 0.18);
+        float fibers = materialNoise2D(world.xz * 1.15);
+        float detail = clamp(1.15 - sampleFootprint * 0.32, 0.20, 1.0);
+        float wear = 0.88 + 0.18 * broad + (fibers - 0.5) * 0.055 * detail;
+        return albedo * wear;
+    }
+
+    bool wallpaper = material > 0.5 && material < 1.5
+        || material > 23.5 && material < 24.5;
+    if (wallpaper && abs(normal.y) < 0.5) {
+        float along = abs(normal.x) > 0.5 ? world.z : world.x;
+        float repeat = fract(along / 1.35);
+        float center = abs(repeat - 0.5);
+        float stem = 1.0 - smoothstep(0.035, 0.085, center);
+        float vine = 0.5 + 0.5 * sin(world.y * 3.1 + sin(along * 2.4) * 0.8);
+        float medallion = pow(max(cos((repeat - 0.5) * 6.2831853), 0.0), 6.0)
+            * pow(max(cos((world.y - 0.35) * 3.1415926), 0.0), 4.0);
+        float age = material > 23.5 ? 1.0 : 0.0;
+        float stain = materialNoise2D(vec2(along * 0.09, world.y * 0.16));
+        float motif = stem * (0.45 + 0.55 * vine) + medallion * 0.55;
+        float factor = 1.025 - motif * (0.12 + age * 0.035) - age * stain * 0.07;
+        return albedo * factor;
+    }
+    return albedo;
 }
 "#;
 

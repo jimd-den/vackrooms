@@ -634,6 +634,37 @@ fn fabric_ceiling_regime_is_constant_inside_an_architectural_cell() {
 }
 
 #[test]
+fn open_fabric_ceiling_steps_receive_supported_bulkheads() {
+    let noise = TestNoise;
+    let tuning = LevelTuning::default();
+    let mut checked = 0;
+
+    for cell_z in -12..=12 {
+        for boundary_x in -12..=12 {
+            let wz = (cell_z as f32 + 0.5) * FABRIC_CELL;
+            let wx = boundary_x as f32 * FABRIC_CELL;
+            let left = BackroomsLevel::fabric_ceiling_band(&noise, 42, wx - 0.1, wz);
+            let right = BackroomsLevel::fabric_ceiling_band(&noise, 42, wx + 0.1, wz);
+            if left == right {
+                continue;
+            }
+
+            let column = BackroomsLevel::column_plan(&noise, 42, &tuning, wx + 0.01, wz);
+            if column.solid {
+                continue;
+            }
+            assert!(
+                column.lintel_from_units.is_some(),
+                "ceiling regime step at ({wx},{wz}) has no supporting bulkhead"
+            );
+            checked += 1;
+        }
+    }
+
+    assert!(checked > 8, "sample did not cross enough ceiling territories");
+}
+
+#[test]
 fn ceilings_are_vast_and_varied() {
     let noise = TestNoise;
     let mut counts = [0usize; 4];
@@ -715,6 +746,7 @@ fn rare_doorways_still_have_lintels() {
                         );
                         assert!(!column.solid, "narrow doorway is blocked");
                         assert_eq!(column.lintel_from_units, Some(DOOR_HEIGHT));
+                        assert!(column.door_leaf, "narrow doorway has no sampled door leaf");
                         found = true;
                     }
                 }

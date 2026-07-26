@@ -134,11 +134,22 @@ fn primary_circulation_is_wide_and_secondary_routes_are_sparse() {
 fn assemblies_are_large_and_narrow_doors_are_anomalies() {
     let mut entrances = 0usize;
     let mut narrow_doors = 0usize;
+    let mut door_leaves = 0usize;
     let mut broad_or_unframed = 0usize;
     for rx in -6..=6 {
         for rz in -6..=6 {
             let p = plan(rx, rz);
             for a in &p.assemblies {
+                door_leaves += a.door_leaves.len();
+                for leaf in &a.door_leaves {
+                    let opening = a
+                        .openings
+                        .iter()
+                        .find(|opening| opening.id == leaf.opening)
+                        .expect("door leaf references an opening");
+                    assert_eq!(opening.role, OpeningRole::Entrance);
+                    assert!(opening.width <= 1.3, "broad opening received a door leaf");
+                }
                 let b = a.footprint.bounds();
                 // Stair cores are deliberately compact circulation, not
                 // program suites; every other mass keeps suite scale.
@@ -170,6 +181,10 @@ fn assemblies_are_large_and_narrow_doors_are_anomalies() {
     assert!(
         broad_or_unframed * 100 >= entrances * 84,
         "broad or unframed openings were only {broad_or_unframed}/{entrances}"
+    );
+    assert_eq!(
+        door_leaves, narrow_doors,
+        "every rare narrow entrance should own exactly one door leaf"
     );
 }
 

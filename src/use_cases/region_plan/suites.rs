@@ -474,6 +474,13 @@ pub(super) fn place_suite(
         through_x_wall: true,
         lintel_units: lintel,
     };
+    let door_leaves = if threshold == ThresholdLanguage::DoorWithLintel {
+        vec![DoorLeaf {
+            opening: entrance.id,
+        }]
+    } else {
+        Vec::new()
+    };
     let (hosts, openings) = hosts_and_openings_for(
         &footprint,
         &layout.partitions,
@@ -493,6 +500,7 @@ pub(super) fn place_suite(
         corruption: CorruptionProfile::default(),
         hosts,
         openings,
+        door_leaves,
         footprint,
     })
 }

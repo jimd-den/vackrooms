@@ -598,6 +598,13 @@ pub trait ChunkSourcePort {
         false
     }
 
+    /// Maximum useful number of simultaneous background requests. Async
+    /// transports override this so streaming can saturate their worker pool
+    /// without coupling the application layer to browser worker types.
+    fn max_concurrent_requests(&self) -> usize {
+        1
+    }
+
     /// Queues a background load. Deduplication is the caller's concern.
     fn request(&mut self, _request: ChunkRequest) {}
 

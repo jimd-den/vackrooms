@@ -70,6 +70,7 @@ mod tests {
                 through_x_wall: true,
                 lintel_units: Some(2.2),
             }],
+            door_leaves: Vec::new(),
             spaces: Vec::new(),
             structure: StructuralSystemInstance {
                 system: StructuralSystem::RegularGrid,

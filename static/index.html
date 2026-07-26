@@ -711,8 +711,9 @@ chunks <b id="hud-chunks">0</b>   svo nodes <b id="hud-nodes">0</b>   scale <b i
             <div class="setting-row">
                 <label for="setting-backend">Graphics backend <span class="value">reload</span></label>
                 <select id="setting-backend">
-                    <option value="webgl">WebGL2 (default, runs everywhere)</option>
-                    <option value="webgpu">WebGPU (experimental, needs modern browser)</option>
+                    <option value="auto">Automatic (WebGPU with WebGL2 fallback)</option>
+                    <option value="webgpu">WebGPU (modern secure browsers)</option>
+                    <option value="webgl">WebGL2 compatibility</option>
                 </select>
             </div>
             <div class="setting-row">
@@ -1239,10 +1240,10 @@ chunks <b id="hud-chunks">0</b>   svo nodes <b id="hud-nodes">0</b>   scale <b i
         const BACKEND_KEY = 'vackrooms_backend';
         const urlBackend = (urlParams.get('backend') || '').toLowerCase();
         const savedBackend = localStorage.getItem(BACKEND_KEY);
-        $('setting-backend').value =
-            urlBackend === 'webgpu' || (!urlBackend && savedBackend === 'webgpu')
-                ? 'webgpu'
-                : 'webgl';
+        const selectedBackend = urlBackend || savedBackend || 'auto';
+        $('setting-backend').value = ['auto', 'webgl', 'webgpu'].includes(selectedBackend)
+            ? selectedBackend
+            : 'auto';
         $('setting-backend').addEventListener('change', (e) => {
             localStorage.setItem(BACKEND_KEY, e.target.value);
             location.reload();
@@ -1468,7 +1469,8 @@ chunks <b id="hud-chunks">0</b>   svo nodes <b id="hud-nodes">0</b>   scale <b i
             if (voxelSize) params.set('voxel_size', voxelSize);
             const renderer = $('setting-renderer').value;
             if (renderer !== 'surface') params.set('renderer', renderer);
-            if ($('setting-backend').value === 'webgpu') params.set('backend', 'webgpu');
+            const backend = $('setting-backend').value;
+            if (backend !== 'auto') params.set('backend', backend);
             params.set(
                 'workers',
                 normalizeGenerationWorkers($('setting-generation-workers').value),

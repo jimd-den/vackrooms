@@ -892,9 +892,15 @@ impl Engine {
     /// missing chunk (nearest first), then at most one fine refinement in
     /// flight at a time, mirroring the sync path's priorities.
     fn issue_requests(&mut self, desired: &[(f32, f32)], desired_visual: &[(f32, f32)]) {
-        // Keep roughly a worker pool's worth of requests in flight; more
-        // would just build a stale backlog behind a moving player.
-        let max_pending = (self.config.max_loads_per_tick * 2).max(4);
+        // Generation concurrency and installation cost are separate budgets:
+        // saturate the source's worker pool here, then time-slice completed
+        // payload installation elsewhere so 32 workers never imply a frame
+        // with 32 atlas uploads.
+        let max_pending = self
+            .source
+            .max_concurrent_requests()
+            .max(self.config.max_loads_per_tick * 2)
+            .max(4);
 
         let forced: Vec<_> = self
             .forced_reloads
@@ -1565,6 +1571,7 @@ mod tests {
         requests: Rc<RefCell<Vec<ChunkRequest>>>,
         ready: Rc<RefCell<Vec<crate::application::ports::CompletedChunk>>>,
         failed: Rc<RefCell<Vec<ChunkRequest>>>,
+        max_concurrent_requests: usize,
     }
 
     impl ChunkSourcePort for AsyncFakeSource {
@@ -1573,6 +1580,9 @@ mod tests {
         }
         fn is_async(&self) -> bool {
             true
+        }
+        fn max_concurrent_requests(&self) -> usize {
+            self.max_concurrent_requests.max(1)
         }
         fn request(&mut self, request: ChunkRequest) {
             self.requests.borrow_mut().push(request);
@@ -1583,6 +1593,26 @@ mod tests {
         fn poll_failed_requests(&mut self) -> Vec<ChunkRequest> {
             self.failed.borrow_mut().drain(..).collect()
         }
+    }
+
+    #[test]
+    fn async_streaming_can_saturate_a_32_worker_source() {
+        let source = AsyncFakeSource {
+            max_concurrent_requests: 32,
+            ..AsyncFakeSource::default()
+        };
+        let requests = source.requests.clone();
+        let mut config = EngineConfig::default();
+        config.chunk_radius = 3;
+        let mut engine = Engine::new(
+            config,
+            Box::new(SurfaceRecordingRenderer::default()),
+            Box::new(source),
+        );
+
+        engine.tick(1.0 / 60.0, &InputFrame::default());
+
+        assert_eq!(requests.borrow().len(), 32);
     }
 
     fn completed(request: ChunkRequest) -> crate::application::ports::CompletedChunk {

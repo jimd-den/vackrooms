@@ -71,6 +71,7 @@ pub fn fragment_source() -> String {
         FRAGMENT_INTERFACE,
         &material_color,
         chunks::NOISE_GLSL,
+        chunks::MATERIAL_PATTERN_GLSL,
         chunks::SPOT_CONE_GLSL,
         chunks::FLARE_CORES_GLSL,
         encode_display_color::GLSL,
@@ -98,6 +99,7 @@ mod tests {
             "evaluateRectangleLight",
             "applyDistanceFog",
             "encodeDisplayColor",
+            "applyMaterialPattern",
         ] {
             assert!(source.contains(symbol), "missing shader section {symbol}");
         }

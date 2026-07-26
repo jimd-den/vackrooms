@@ -174,6 +174,7 @@ pub(crate) fn place_stairwell(
         corruption: CorruptionProfile::default(),
         hosts,
         openings,
+        door_leaves: Vec::new(),
         footprint,
     })
 }
@@ -249,6 +250,7 @@ mod tests {
                 through_x_wall: true,
                 lintel_units: Some(2.6),
             }],
+            door_leaves: Vec::new(),
             spaces: Vec::new(),
             structure: StructuralSystemInstance {
                 system: StructuralSystem::CoreAndShell,

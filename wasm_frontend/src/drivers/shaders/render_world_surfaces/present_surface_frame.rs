@@ -3,7 +3,13 @@
 pub const GLSL: &str = r#"
 void main() {
     vec3 normal = normalize(vNormal);
-    vec3 albedo = srgbToLinear(materialColor(vMaterial));
+    vec3 albedo = applyMaterialPattern(
+        vMaterial,
+        srgbToLinear(materialColor(vMaterial)),
+        vWorldPosition,
+        normal,
+        uVoxelSize
+    );
     float distanceToCamera = length(uCameraPosition - vWorldPosition);
     vec3 radiance = composeSurfaceLighting(normal, albedo);
 
